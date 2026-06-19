@@ -112,6 +112,5 @@ async def general_exception_handler(request: Request, exc: Exception):
             "error": "InternalServerError",
             "message": "An unexpected error occurred",
             "status_code": 500,
-            "details": {"error": str(exc)},
         },
     )

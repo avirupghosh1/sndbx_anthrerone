@@ -8,6 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+load_dotenv(Path(__file__).resolve().parent / ".env.example", override=False)
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -25,14 +26,10 @@ logger = logging.getLogger(__name__)
 
 
 async def health(_request: Request) -> JSONResponse:
-    cfg = get_config()
     return JSONResponse(
         {
             "status": "ok",
             "role": "proxy-service",
-            "sandbox_domain": cfg.SANDBOX_DOMAIN,
-            "upstream_resolve_mode": cfg.UPSTREAM_RESOLVE_MODE,
-            "control_plane_url": cfg.CONTROL_PLANE_URL,
         }
     )
 

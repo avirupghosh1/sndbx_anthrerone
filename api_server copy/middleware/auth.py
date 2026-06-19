@@ -5,9 +5,8 @@ from fastapi import Request, HTTPException, status
 from typing import Optional
 
 # Valid API keys (in production, use proper auth/database)
-VALID_API_KEYS = {
-    os.getenv("API_KEY", "test-key-12345"),
-}
+_raw_key = os.getenv("API_KEY", "")
+VALID_API_KEYS: set[str] = {_raw_key} if _raw_key else set()
 
 
 async def validate_api_key(request: Request) -> str:

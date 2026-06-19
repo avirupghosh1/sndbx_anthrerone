@@ -43,10 +43,11 @@ app = FastAPI(
 )
 
 # Add CORS middleware
+_allowed_origins = [o.strip() for o in (config.ALLOWED_ORIGINS or "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_allowed_origins or ["*"],
+    allow_credentials=bool(_allowed_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -122,7 +123,7 @@ async def root():
 async def startup_event():
     """Startup event."""
     logger.info("Starting Sandbox API Server (role=%s)", getattr(config, "API_SERVICE_ROLE", "control"))
-    logger.info(f"API Key: {config.API_KEY}")
+    logger.info("API Key: %s", "****" + config.API_KEY[-4:] if len(config.API_KEY) > 4 else "<not set>")
     logger.info(f"Database: {config.DATABASE_PATH}")
     logger.info(f"Execution plane: {sandbox_manager.get_execution_kind()}")
     wp = getattr(sandbox_manager, "warm_pool", None)

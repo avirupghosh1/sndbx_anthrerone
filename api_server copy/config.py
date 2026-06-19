@@ -38,9 +38,11 @@ class Config:
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", 8000))
     DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
+
+    ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", "")
     
     # API
-    API_KEY: str = os.getenv("API_KEY", "test-key-12345")
+    API_KEY: str = os.getenv("API_KEY", "")
     API_TITLE: str = "Sandbox API Server"
     API_VERSION: str = "1.0.0"
     API_DESCRIPTION: str = "REST API server for managing sandboxes and agents"

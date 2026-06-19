@@ -16,7 +16,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - API_KEY=test-key-12345
+      - API_KEY=${API_KEY:?Set API_KEY in your environment or .env file}
       - DEBUG=false
       - DATABASE_PATH=/data/sandboxes.db
       - LOG_LEVEL=INFO
