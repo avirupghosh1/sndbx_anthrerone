@@ -5,17 +5,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    s = str(raw).strip().lower()
-    if s in ("1", "true", "yes", "on"):
-        return True
-    if s in ("0", "false", "no", "off"):
-        return False
-    return default
+from shared.env_utils import env_bool as _env_bool
 
 
 class Config:

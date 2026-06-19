@@ -6,6 +6,7 @@ import hmac
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from routing.host_parse import format_sandbox_base_url, format_sandbox_host
+from shared.k8s_utils import k8s_pod_service_host
 from orchestrator.runtime_utils import supports_data_plane_routing
 from orchestrator.guest_ports import ports_from_metadata
 
@@ -114,16 +115,6 @@ def get_host_for_sandbox(config: Any, *, sandbox_id: str, port: int) -> str:
         sandbox_domain=sandbox_domain_for_config(config),
         debug=data_plane_debug_for_config(config),
     )
-
-
-def k8s_pod_service_host(config: Any, sandbox_id: str) -> str:
-    sid = (sandbox_id or "").strip()
-    ns = (getattr(config, "K8S_NAMESPACE", None) or "sandboxes").strip()
-    tpl = (
-        getattr(config, "K8S_POD_SERVICE_TEMPLATE", None)
-        or "sandbox-{sandbox_id}.{namespace}.svc.cluster.local"
-    ).strip()
-    return tpl.format(sandbox_id=sid, namespace=ns)
 
 
 def k8s_guest_upstream_target(config: Any, sandbox_id: str, guest_port: int) -> Dict[str, Any]:
