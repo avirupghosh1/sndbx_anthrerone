@@ -1,0 +1,3 @@
+# Install inside the sandbox image (or on the host to test locally).
+starlette>=0.37,<1
+uvicorn[standard]>=0.27,<1

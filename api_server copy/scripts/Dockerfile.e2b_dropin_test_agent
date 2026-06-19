@@ -1,0 +1,14 @@
+# Image with a tiny WebSocket stub that mimics agentlib-e2b-server's ``result`` reply.
+# Build: docker build -f api_server/scripts/Dockerfile.e2b_dropin_test_agent -t e2b-dropin-test-agent:latest .
+# Register logical template (POST /templates) with base_image e2b-dropin-test-agent:latest, then
+# create sandboxes with that template_id and start the mock with:
+#   nohup python /opt/agentlib_mock/mock_agentlib_e2b_ws_server.py >/tmp/mock_ws.log 2>&1 & sleep 2
+
+FROM python:3.11-slim
+
+RUN pip install --no-cache-dir "websockets>=12,<15"
+
+RUN mkdir -p /opt/agentlib_mock
+COPY scripts/mock_agentlib_e2b_ws_server.py /opt/agentlib_mock/
+
+WORKDIR /opt/agentlib_mock

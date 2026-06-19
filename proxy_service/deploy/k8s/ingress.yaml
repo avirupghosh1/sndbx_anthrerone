@@ -1,0 +1,55 @@
+# Data plane ingress + proxy-service ClusterIP.
+# Apply after api_server copy/deploy/k8s/api-service.yaml:
+#   kubectl apply -f deploy/k8s/proxy-service.yaml
+#   kubectl apply -f deploy/k8s/ingress.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxy-service
+  namespace: sandboxes
+spec:
+  selector:
+    app: proxy-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sandbox-ingress
+  namespace: sandboxes
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: api.sndbx.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api-service
+                port:
+                  number: 8000
+    - host: "*.sndbx.com"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: proxy-service
+                port:
+                  number: 8080
+  tls:
+    - hosts:
+        - api.sndbx.com
+        - "*.sndbx.com"
+      secretName: sndbx-com-tls

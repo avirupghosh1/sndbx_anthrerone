@@ -1,0 +1,6 @@
+# Local DB when using scripts/run_api_host.sh (default DATABASE_PATH)
+sandboxes.host.db
+sandboxes.db
+*.log
+results.csv
+.venv
