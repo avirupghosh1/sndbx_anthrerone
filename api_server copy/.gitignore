@@ -4,3 +4,4 @@ sandboxes.db
 *.log
 results.csv
 .venv
+.env
