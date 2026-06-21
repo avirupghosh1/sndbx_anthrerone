@@ -247,7 +247,7 @@ class SandboxManager:
                 logger.warning("envd auto-start: api_server/envd_guest missing on API host")
                 return
             if not self.execution.put_archive_to_container(container_id, "/opt", tb):
-                logger.warning("envd auto-start: put_archive failed sandbox=%s", sandbox_id)
+                logger.warning("envd auto-start: put_archive failed_yo whysandbox=%s", sandbox_id)
                 return
             inst = self.execution.run_command(
                 container_id,

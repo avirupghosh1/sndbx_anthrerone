@@ -22,7 +22,7 @@ from middleware import (
     general_exception_handler,
     APIException,
 )
-from handlers import sandboxes, commands, files, agents, templates, guest_connection, sandbox_envd, internal_routing
+from handlers import sandboxes, commands, files, agents, templates, guest_connection, sandbox_envd, internal_routing, internal
 
 # Configure logging
 logging.basicConfig(
@@ -78,6 +78,7 @@ app.include_router(templates.router)
 app.include_router(guest_connection.router)
 app.include_router(sandbox_envd.router)
 app.include_router(internal_routing.router)
+app.include_router(internal.router)
 
 
 @app.get("/health")

@@ -73,10 +73,11 @@ def _sandbox_id_from_pod_name(pod_name: str) -> str:
 class K8sPodManager:
     """Creates one Pod + headless Service per sandbox; guest ports == containerPort (no host publish)."""
 
-    def __init__(self) -> None:
+    def __init__(self, oci_runtime: Optional[str] = None) -> None:
         from config import get_config
 
         self._cfg = get_config()
+        self._oci_runtime = oci_runtime
         self._namespace = (getattr(self._cfg, "K8S_NAMESPACE", None) or "sandboxes").strip()
         self._core: Optional[client.CoreV1Api] = None
         self._k8s_error: Optional[str] = None
@@ -225,6 +226,7 @@ class K8sPodManager:
             spec=client.V1PodSpec(
                 restart_policy="Never",
                 image_pull_secrets=image_pull_secrets,
+                runtime_class_name="gvisor" if self._oci_runtime == "runsc" else None,
                 containers=[
                     client.V1Container(
                         name=SANDBOX_CONTAINER_NAME,
@@ -293,29 +295,34 @@ class K8sPodManager:
             exec_cmd = ["/bin/sh", "-c", f"exec su -s /bin/sh {shlex.quote(user)} -c {shlex.quote(command)}"]
 
         def _exec() -> tuple[int, str, str]:
-            assert self._core is not None
-            resp = stream(
-                self._core.connect_get_namespaced_pod_exec,
-                pod_name,
-                self._namespace,
-                command=exec_cmd,
-                container=SANDBOX_CONTAINER_NAME,
-                stderr=True,
-                stdin=False,
-                stdout=True,
-                tty=False,
-                _preload_content=False,
-            )
-            stdout_parts: list[str] = []
-            stderr_parts: list[str] = []
-            while resp.is_open():
-                resp.update(timeout=1)
-                if resp.peek_stdout():
-                    stdout_parts.append(resp.read_stdout())
-                if resp.peek_stderr():
-                    stderr_parts.append(resp.read_stderr())
-            code = resp.returncode if resp.returncode is not None else 0
-            return int(code), "".join(stdout_parts), "".join(stderr_parts)
+            # Use a dedicated ApiClient to avoid polluting the shared connection pool with WebSocket upgrades
+            from kubernetes import client
+            core_isolated = client.CoreV1Api(api_client=client.ApiClient())
+            try:
+                resp = stream(
+                    core_isolated.connect_get_namespaced_pod_exec,
+                    pod_name,
+                    self._namespace,
+                    command=exec_cmd,
+                    container=SANDBOX_CONTAINER_NAME,
+                    stderr=True,
+                    stdin=False,
+                    stdout=True,
+                    tty=False,
+                    _preload_content=False,
+                )
+                stdout_parts: list[str] = []
+                stderr_parts: list[str] = []
+                while resp.is_open():
+                    resp.update(timeout=1)
+                    if resp.peek_stdout():
+                        stdout_parts.append(resp.read_stdout())
+                    if resp.peek_stderr():
+                        stderr_parts.append(resp.read_stderr())
+                code = resp.returncode if resp.returncode is not None else 0
+                return int(code), "".join(stdout_parts), "".join(stderr_parts)
+            finally:
+                core_isolated.api_client.close()
 
         exec_timeout = float(timeout) if timeout is not None else 30.0
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -340,7 +347,7 @@ class K8sPodManager:
         dest = (path or "/").rstrip("/") or "/"
         b64 = base64.b64encode(data).decode("ascii")
         chunk = 48000
-        tmp = f"/tmp/sandbox-upload-{int(time.time())}.tar.gz"
+        tmp = f"/tmp/sandbox-upload-{int(time.time())}.tar"
         script = (
             f"set -eu\nmkdir -p {shlex.quote(dest)}\n"
             f"rm -f {shlex.quote(tmp)}\n"
@@ -350,7 +357,7 @@ class K8sPodManager:
             part = b64[i : i + chunk]
             script += f"printf '%s' {shlex.quote(part)} >> {shlex.quote(tmp)}\n"
         script += (
-            f"base64 -d {shlex.quote(tmp)} | tar xzf - -C {shlex.quote(dest)}\n"
+            f"base64 -d {shlex.quote(tmp)} | tar xf - -C {shlex.quote(dest)}\n"
             f"rm -f {shlex.quote(tmp)}\n"
         )
         r = self.run_command(container_id, script, timeout=300.0, user="root")
@@ -372,10 +379,46 @@ class K8sPodManager:
         return int(self.run_command(container_id, script, timeout=120.0).get("exit_code") or 0) == 0
 
     def list_files(self, container_id: str, path: str = "/") -> Optional[list]:
+        from pathlib import PurePosixPath
         r = self.run_command(container_id, f"ls -la {shlex.quote(path)}", timeout=30.0)
         if int(r.get("exit_code") or 0) != 0:
             return None
-        return (r.get("stdout") or "").splitlines()
+        
+        output = r.get("stdout") or ""
+        base = path.rstrip("/") or "/"
+        entries = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line or line.startswith("total "):
+                continue
+            parts = line.split()
+            if len(parts) < 9:
+                continue
+            perms = parts[0]
+            name = " ".join(parts[8:])
+            if name in (".", ".."):
+                continue
+            try:
+                size = int(parts[4])
+            except ValueError:
+                size = 0
+            modified_at = " ".join(parts[5:8])
+            full_path = str(PurePosixPath(base) / name)
+            if perms.startswith("d"):
+                typ = "directory"
+            elif perms.startswith("l"):
+                typ = "symlink"
+            else:
+                typ = "file"
+            entries.append({
+                "path": full_path,
+                "name": name,
+                "type": typ,
+                "size": size,
+                "permissions": perms,
+                "modified_at": modified_at,
+            })
+        return entries
 
     def delete_file(self, container_id: str, path: str, recursive: bool = False) -> bool:
         flag = "-rf" if recursive else "-f"
@@ -486,8 +529,39 @@ class K8sPodManager:
             return "root"
 
     def commit_filesystem_snapshot(self, container_id: str, repo: str, tag: str) -> Optional[str]:
-        logger.warning("commit_filesystem_snapshot not supported on K8s runtime")
-        return None
+        if not self._ensure_k8s_client():
+            return None
+        pod_name = (container_id or "").strip()
+        assert self._core is not None
+        try:
+            pod = self._core.read_namespaced_pod(pod_name, self._namespace)
+        except Exception as e:
+            logger.error("Failed to read pod %s for commit: %s", pod_name, e)
+            return None
+        
+        statuses = pod.status.container_statuses or []
+        if not statuses:
+            logger.error("Pod %s has no container statuses", pod_name)
+            return None
+            
+        cid_str = statuses[0].container_id
+        if not cid_str or not cid_str.startswith("docker://"):
+            logger.error("Pod %s container_id %s is not a docker:// runtime", pod_name, cid_str)
+            return None
+            
+        raw_cid = cid_str[len("docker://"):]
+        dc = self._optional_docker()
+        if not dc:
+            logger.error("Docker client not available to commit %s", raw_cid)
+            return None
+            
+        try:
+            container = dc.containers.get(raw_cid)
+            container.commit(repository=repo, tag=tag)
+            return f"{repo}:{tag}"
+        except Exception as e:
+            logger.error("Docker commit failed for %s: %s", raw_cid, e)
+            return None
 
     def pull_image(self, image: str) -> bool:
         """K8s pulls on schedule; optional pre-pull via docker when DOCKER_HOST is set."""

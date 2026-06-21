@@ -1,0 +1,22 @@
+  raise TypeError(f'Object of type {o.__class__.__name__} '
+TypeError: Object of type bytes is not JSON serializable
+INFO:     10.244.0.1:40386 - "GET /health HTTP/1.1" 200 OK
+2026-06-19 14:46:39,761 - middleware.errors - ERROR - Validation Error: [{'type': 'model_attributes_type', 'loc': ('body',), 'msg': 'Input should be a valid dictionary or object to extract fields from', 'input': b'{\n    "template_id": "python:3.11",\n    "metadata": { "guest_ports": [8765] }\n  }', 'url': 'https://errors.pydantic.dev/2.13/v/model_attributes_type'}]
+2026-06-19 14:46:39,762 - middleware.errors - ERROR - Unexpected Error: Object of type bytes is not JSON serializable
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/site-packages/starlette/middleware/exceptions.py", line 68, in __call__
+    await self.app(scope, receive, sender)
+  File "/usr/local/lib/python3.12/site-packages/fastapi/middleware/asyncexitstack.py", line 20, in __call__
+    raise e
+  File "/usr/local/lib/python3.12/site-packages/fastapi/middleware/asyncexitstack.py", line 17, in __call__
+    await self.app(scope, receive, send)
+  File "/usr/local/lib/python3.12/site-packages/starlette/routing.py", line 718, in __call__
+    await route.handle(scope, receive, send)
+  File "/usr/local/lib/python3.12/site-packages/starlette/routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "/usr/local/lib/python3.12/site-packages/starlette/routing.py", line 66, in app
+    response = await func(request)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/fastapi/routing.py", line 272, in app
+    raise RequestValidationError(_normalize_errors(errors), body=body)
+fastapi.exceptions.RequestValidationError: [{'type': 'model_attributes_type', 'loc': ('body',), 'msg': 'Input should be a valid dictionary or object to extract fields from', 'input': b'{\n    "template_id": "python:3.11",\n    "metadata": { "guest_ports": [8765] }\n  }', 'url': 'https://errors.pydantic.dev/2.13/v/model_attributes_type'}]

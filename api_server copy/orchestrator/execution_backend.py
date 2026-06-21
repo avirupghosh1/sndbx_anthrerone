@@ -39,11 +39,13 @@ def build_execution_backend(config: "Config | None" = None) -> SandboxExecutionP
     if config.is_k8s_runtime():
         from .k8s_pod_manager import K8sPodManager
 
+        oci = config.docker_oci_runtime()
         logger.info(
-            "Sandbox execution: Kubernetes Pods (namespace=%s)",
+            "Sandbox execution: Kubernetes Pods (namespace=%s, oci_runtime=%s)",
             getattr(config, "K8S_NAMESPACE", "sandboxes"),
+            oci,
         )
-        return K8sPodManager()
+        return K8sPodManager(oci_runtime=oci)
 
     engine = (getattr(config, "SANDBOX_ENGINE", None) or "docker").strip().lower()
     if engine in ("firecracker", "fc", "microvm"):

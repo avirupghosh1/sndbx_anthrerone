@@ -22,6 +22,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/exec", "pods/log", "services"]
     verbs: ["create", "delete", "get", "list", "watch", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "jobs/status"]
+    verbs: ["create", "delete", "get", "list", "watch", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -81,7 +84,7 @@ spec:
       containers:
         - name: api-service
           image: api-service:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
           ports:
             - containerPort: 8000
               name: http
@@ -97,6 +100,7 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/api
+
           readinessProbe:
             httpGet:
               path: /health
@@ -113,6 +117,7 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: api-service-data
+
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -123,12 +128,16 @@ data:
   API_SERVICE_ROLE: "control"
   SANDBOX_ENGINE: "k8s"
   SANDBOX_RUNTIME: "k8s"
+  
+  TEMPLATE_DOCKERFILE_BUILD_MODE: "kaniko"
   SANDBOX_DATA_PLANE_ENABLED: "true"
   SANDBOX_DATA_PLANE_DOMAIN: "sndbx.com"
   SANDBOX_DATA_PLANE_SCHEME: "https"
   SANDBOX_DATA_PLANE_DEBUG: "false"
   K8S_NAMESPACE: "sandboxes"
   K8S_POD_SERVICE_TEMPLATE: "sandbox-{sandbox_id}.{namespace}.svc.cluster.local"
+  SANDBOX_ISOLATION: "gvisor"
+  SANDBOX_WARM_POOL_SIZE: "3"
   ENVD_ALWAYS_ON: "true"
   ENVD_PUBLISH_PORT: "false"
   DATABASE_PATH: "/var/lib/api/sandboxes.db"

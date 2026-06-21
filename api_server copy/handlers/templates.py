@@ -135,7 +135,32 @@ async def register_template_from_dockerfile(
             request.env,
             request.start_cmd or "",
         )
+        
+    elif mode == "kaniko":
+        from orchestrator.kaniko_builder import build_with_kaniko
+        df_content = request.dockerfile
+        if request.start_cmd:
+            df_content += f"\nRUN {request.start_cmd}\n"
+        
+        try:
+            tag = await run_io(
+                build_with_kaniko,
+                dockerfile=df_content,
+                template_id=tid,
+                context_tar_gzip=ctx,
+                image_tag=request.image_tag,
+            )
+        except RuntimeError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+            
+        reg_env, _ = _fields_from_dockerfile_request(
+            request.dockerfile,
+            request.env,
+            request.start_cmd or "",
+        )
+        reg_start = ""  # Pre-baked into image via Kaniko
 
+    if mode in ("docker_cli", "kaniko"):
         if kind == "firecracker":
             try:
 

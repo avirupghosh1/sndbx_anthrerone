@@ -128,7 +128,7 @@ Paste kubectl -n sandboxes get pods and the last few lines of kubectl describe p
 You need a container image minikube can pull, e.g. python:3.11, registered as a template in api-service (via its templates API or DB). Simplest path if you already have templates in SQLite from before — otherwise create one:
 
 curl -s -X POST "http://127.0.0.1:8000/sandboxes" \
-  -H "X-API-Key: test-key-12345" \
+  -H "X-API-Key: api_key_12_12_12_12" \
   -H "Content-Type: application/json" \
   -d '{
     "template_id": "python:3.11",
