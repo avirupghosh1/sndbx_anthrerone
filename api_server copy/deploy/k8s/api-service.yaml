@@ -132,7 +132,7 @@ data:
   TEMPLATE_DOCKERFILE_BUILD_MODE: "kaniko"
   SANDBOX_DATA_PLANE_ENABLED: "true"
   SANDBOX_DATA_PLANE_DOMAIN: "sndbx.com"
-  SANDBOX_DATA_PLANE_SCHEME: "https"
+  SANDBOX_DATA_PLANE_SCHEME: "http"
   SANDBOX_DATA_PLANE_DEBUG: "false"
   K8S_NAMESPACE: "sandboxes"
   K8S_POD_SERVICE_TEMPLATE: "sandbox-{sandbox_id}.{namespace}.svc.cluster.local"
