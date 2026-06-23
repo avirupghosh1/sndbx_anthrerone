@@ -26,9 +26,18 @@ def parse_ingress_host(
     sandbox_domain: str,
     debug: bool,
     sandbox_id_header: Optional[str] = None,
+    guest_port_header: Optional[str] = None,
 ) -> Optional[Tuple[int, str]]:
     """Return ``(guest_port, sandbox_id)`` when the Host targets sandbox data plane."""
     raw = (host_header or "").strip()
+    sid_hdr = (sandbox_id_header or "").strip()
+    port_hdr = (guest_port_header or "").strip()
+
+    if debug and sid_hdr and port_hdr.isdigit():
+        guest_port = int(port_hdr)
+        if 1 <= guest_port <= 65535:
+            return guest_port, sid_hdr
+
     if not raw:
         return None
 
@@ -38,11 +47,10 @@ def parse_ingress_host(
         if ":" in first:
             h, _, p_s = first.rpartition(":")
             if p_s.isdigit() and h.lower() in ("localhost", "127.0.0.1"):
-                sid = (sandbox_id_header or "").strip()
-                if sid:
+                if sid_hdr:
                     guest_port = int(p_s)
                     if 1 <= guest_port <= 65535:
-                        return guest_port, sid
+                        return guest_port, sid_hdr
 
     authority = first
     if ":" in authority and not authority.startswith("["):

@@ -270,6 +270,37 @@ class Config:
     ).strip()
     K8S_POD_READY_TIMEOUT_SEC: float = max(30.0, float(os.getenv("K8S_POD_READY_TIMEOUT_SEC", "180")))
     K8S_IMAGE_PULL_SECRET: str = (os.getenv("K8S_IMAGE_PULL_SECRET") or "").strip()
+    # ``IfNotPresent`` / ``Never`` for images built into minikube docker (host-side template builds).
+    K8S_SANDBOX_IMAGE_PULL_POLICY: str = (
+        os.getenv("K8S_SANDBOX_IMAGE_PULL_POLICY") or "Never"
+    ).strip()
+    K8S_SANDBOX_CPU_LIMIT: str = (os.getenv("K8S_SANDBOX_CPU_LIMIT") or "500m").strip()
+    K8S_SANDBOX_MEMORY_LIMIT: str = (os.getenv("K8S_SANDBOX_MEMORY_LIMIT") or "1536Mi").strip()
+    # One kubectl exec for envd + agent start (avoids ~2s overhead per exec on K8s).
+    K8S_COMBINED_GUEST_BOOTSTRAP: bool = _env_bool("K8S_COMBINED_GUEST_BOOTSTRAP", True)
+    K8S_POD_READY_POLL_SEC: float = max(
+        0.1, min(2.0, float(os.getenv("K8S_POD_READY_POLL_SEC", "0.2")))
+    )
+    # Guest agent listen wait during POST /sandboxes (envd starts in background by default).
+    GUEST_BOOTSTRAP_AGENT_WAIT_SEC: float = max(
+        1.0, float(os.getenv("GUEST_BOOTSTRAP_AGENT_WAIT_SEC", "8"))
+    )
+    GUEST_BOOTSTRAP_POLL_SEC: float = max(
+        0.05, min(1.0, float(os.getenv("GUEST_BOOTSTRAP_POLL_SEC", "0.1")))
+    )
+    ENVD_BOOTSTRAP_WAIT_ON_CREATE: bool = _env_bool("ENVD_BOOTSTRAP_WAIT_ON_CREATE", False)
+
+    # Kaniko template builds (requires ``minikube addons enable registry`` on Mac dev).
+    KANIKO_REGISTRY_HOST: str = (
+        os.getenv("KANIKO_REGISTRY_HOST") or "registry.kube-system.svc.cluster.local:80"
+    ).strip().rstrip("/")
+    # Image ref stored on templates / used by sandbox pods (in-cluster pull).
+    KANIKO_IMAGE_PULL_HOST: str = (
+        os.getenv("KANIKO_IMAGE_PULL_HOST") or os.getenv("KANIKO_REGISTRY_HOST") or "registry.kube-system.svc.cluster.local:80"
+    ).strip().rstrip("/")
+    KANIKO_API_SERVICE_HOST: str = (
+        os.getenv("KANIKO_API_SERVICE_HOST") or "api-service.sandboxes.svc.cluster.local:8000"
+    ).strip()
 
     def is_k8s_runtime(self) -> bool:
         rt = (self.SANDBOX_RUNTIME or "").strip().lower()

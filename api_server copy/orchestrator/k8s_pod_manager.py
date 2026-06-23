@@ -144,12 +144,14 @@ class K8sPodManager:
 
     def _wait_pod_running(self, pod_name: str, *, timeout_sec: float = 180.0) -> bool:
         assert self._core is not None
+        poll = float(getattr(self._cfg, "K8S_POD_READY_POLL_SEC", 0.2) or 0.2)
+        poll = max(0.1, min(2.0, poll))
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
             try:
                 pod = self._core.read_namespaced_pod(pod_name, self._namespace)
             except ApiException:
-                time.sleep(0.5)
+                time.sleep(poll)
                 continue
             phase = (pod.status.phase or "").strip()
             if phase == "Running":
@@ -159,7 +161,7 @@ class K8sPodManager:
             if phase in ("Failed", "Succeeded"):
                 logger.error("Pod %s entered terminal phase %s", pod_name, phase)
                 return False
-            time.sleep(0.5)
+            time.sleep(poll)
         logger.error("Pod %s not ready within %.0fs", pod_name, timeout_sec)
         return False
 
@@ -214,6 +216,7 @@ class K8sPodManager:
         image_pull_secrets = (
             [client.V1LocalObjectReference(name=pull_secret)] if pull_secret else None
         )
+        pull_policy = (getattr(self._cfg, "K8S_SANDBOX_IMAGE_PULL_POLICY", None) or "Never").strip()
 
         pod = client.V1Pod(
             metadata=client.V1ObjectMeta(
@@ -231,6 +234,7 @@ class K8sPodManager:
                     client.V1Container(
                         name=SANDBOX_CONTAINER_NAME,
                         image=config.image,
+                        image_pull_policy=pull_policy or None,
                         command=["/bin/bash"],
                         stdin=True,
                         tty=True,
@@ -291,8 +295,26 @@ class K8sPodManager:
         exec_cmd = ["/bin/sh", "-c", command]
         if cwd and cwd != "/":
             exec_cmd = ["/bin/sh", "-c", f"cd {shlex.quote(cwd)} && {command}"]
-        if user and user != "root":
-            exec_cmd = ["/bin/sh", "-c", f"exec su -s /bin/sh {shlex.quote(user)} -c {shlex.quote(command)}"]
+        if user == "root":
+            inner = exec_cmd[-1]
+            exec_cmd = ["/bin/sh", "-c", f"exec sudo -E -n sh -c {shlex.quote(inner)}"]
+        elif user:
+            inner = exec_cmd[-1]
+            target = shlex.quote(user)
+            inner_q = shlex.quote(inner)
+            exec_cmd = [
+                "/bin/sh",
+                "-c",
+                (
+                    f'if [ "$(id -un)" = {target} ]; then '
+                    f"exec /bin/sh -c {inner_q}; "
+                    "elif command -v sudo >/dev/null 2>&1; then "
+                    f"exec sudo -E -n -u {target} /bin/sh -c {inner_q}; "
+                    "else "
+                    f"exec su -m -s /bin/sh {target} -c {inner_q}; "
+                    "fi"
+                ),
+            ]
 
         def _exec() -> tuple[int, str, str]:
             # Use a dedicated ApiClient to avoid polluting the shared connection pool with WebSocket upgrades

@@ -109,6 +109,14 @@ class RegisterTemplateRequest(BaseModel):
             "until exit code 0 or ``TEMPLATE_READY_TIMEOUT_SEC``. Empty = skip."
         ),
     )
+    warm_snapshot_image: Optional[str] = Field(
+        default=None,
+        max_length=300,
+        description=(
+            "When set, skip the one-time warm snapshot build and use this OCI image ref directly "
+            "(e.g. host ``docker build`` + minikube docker-env for Mac dev)."
+        ),
+    )
 
 
 class RegisterTemplateFromDockerfileRequest(BaseModel):

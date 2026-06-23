@@ -1,7 +1,24 @@
-# Minikube / dev ingress — HTTP only (no TLS secret required).
-# Apply instead of ingress.yaml when SANDBOX_DATA_PLANE_SCHEME=http on api-service.
+# HTTP ingress for Mac minikube (no TLS). Requires: minikube addons enable ingress
+# and ``minikube tunnel`` in a separate terminal (binds ingress LB to 127.0.0.1).
 #
+#   kubectl apply -f deploy/k8s/proxy-service.yaml
 #   kubectl apply -f deploy/k8s/ingress-http-minikube.yaml
+#
+# Add to /etc/hosts (one line):  127.0.0.1 api.sndbx.com
+# Guest traffic uses Host headers (8765-sb-….sndbx.com) via SANDBOX_DATA_PLANE_URL.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxy-service
+  namespace: sandboxes
+spec:
+  selector:
+    app: proxy-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress

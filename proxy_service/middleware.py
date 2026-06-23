@@ -37,11 +37,13 @@ class SandboxDataPlaneMiddleware:
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
         host = headers.get("host", "")
         sandbox_id_hdr = headers.get("x-sandbox-id")
+        guest_port_hdr = headers.get("x-guest-port")
         parsed = parse_ingress_host(
             host,
             sandbox_domain=getattr(cfg, "SANDBOX_DOMAIN", "sndbx.com"),
             debug=bool(getattr(cfg, "SANDBOX_INGRESS_DEBUG", False)),
             sandbox_id_header=sandbox_id_hdr,
+            guest_port_header=guest_port_hdr,
         )
         if not parsed:
             await self.app(scope, receive, send)
@@ -75,7 +77,7 @@ class SandboxDataPlaneMiddleware:
             return
 
         if scope["type"] == "websocket":
-            await self._proxy_websocket(scope, receive, send, upstream_base)
+            await self._proxy_websocket(scope, receive, send, upstream_base, headers)
             return
 
         request = Request(scope, receive)
@@ -148,6 +150,7 @@ class SandboxDataPlaneMiddleware:
         receive: Receive,
         send: Send,
         upstream_base: str,
+        inbound_headers: Dict[str, str],
     ) -> None:
         ws = WebSocket(scope, receive=receive, send=send)
         parsed = urlparse(upstream_base)
@@ -159,6 +162,12 @@ class SandboxDataPlaneMiddleware:
         if query:
             upstream_uri = f"{upstream_uri}?{query}"
 
+        upstream_headers: Dict[str, str] = {}
+        for key in ("authorization", "origin", "sec-websocket-protocol"):
+            value = (inbound_headers.get(key) or "").strip()
+            if value:
+                upstream_headers[key.title() if key == "authorization" else key] = value
+
         cfg = get_config()
         accepted = False
         try:
@@ -169,6 +178,7 @@ class SandboxDataPlaneMiddleware:
                 retry_delay=float(cfg.UPSTREAM_WS_RETRY_DELAY_SEC),
                 ping_interval=None,
                 ping_timeout=None,
+                additional_headers=upstream_headers or None,
             )
             await ws.accept()
             accepted = True

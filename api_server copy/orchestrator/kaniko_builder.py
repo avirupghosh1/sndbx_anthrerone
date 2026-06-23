@@ -7,11 +7,56 @@ import time
 import uuid
 import logging
 import base64
+import shutil
+import tempfile
+from pathlib import Path
 
 from kubernetes import client, config as k8s_config
 from kubernetes.client.rest import ApiException
 
+from config import get_config
+from .envd_template_bake import (
+    dockerfile_append_envd_layer,
+    resolve_envd_restore_user_for_embed,
+    write_envd_guest_build_context,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def _prepare_kaniko_context(
+    *,
+    dockerfile: str,
+    context_tar_gzip: bytes | None,
+    embed_envd: bool,
+) -> bytes:
+    tmp = Path(tempfile.mkdtemp(prefix="kaniko-ctx-"))
+    try:
+        if context_tar_gzip is not None:
+            buf = io.BytesIO(context_tar_gzip)
+            with tarfile.open(fileobj=buf, mode="r:gz") as tf:
+                tf.extractall(tmp)
+
+        df_text = dockerfile
+        if embed_envd:
+            if write_envd_guest_build_context(tmp / "envd_guest"):
+                cfg = get_config()
+                ru = resolve_envd_restore_user_for_embed(
+                    dockerfile,
+                    str(getattr(cfg, "ENVD_DOCKERFILE_RESTORE_USER", "auto") or "auto"),
+                )
+                df_text = (
+                    dockerfile.rstrip() + dockerfile_append_envd_layer(restore_user=ru)
+                ).lstrip()
+
+        (tmp / "Dockerfile").write_text(df_text, encoding="utf-8")
+        out = io.BytesIO()
+        with tarfile.open(fileobj=out, mode="w:gz") as tf:
+            for path in sorted(tmp.rglob("*")):
+                tf.add(path, arcname=path.relative_to(tmp).as_posix())
+        return out.getvalue()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 def build_with_kaniko(
     dockerfile: str,
@@ -19,11 +64,15 @@ def build_with_kaniko(
     context_tar_gzip: bytes | None,
     image_tag: str | None = None,
     registry_host: str = "registry.kube-system.svc.cluster.local:80",
-    kubelet_registry_host: str = "localhost:5000",
+    image_pull_host: str | None = None,
     namespace: str = "sandboxes",
-    api_service_host: str = "api-service.sandboxes.svc.cluster.local:8000"
+    api_service_host: str = "api-service.sandboxes.svc.cluster.local:8000",
+    embed_envd: bool = False,
 ) -> str:
-    """Build a Dockerfile using Kaniko inside a K8s Job."""
+    """Build a Dockerfile using Kaniko inside a K8s Job.
+
+    Returns the image reference sandbox pods should pull (``{image_pull_host}/{tag}``).
+    """
     
     try:
         try:
@@ -41,30 +90,27 @@ def build_with_kaniko(
     
     context_path = os.path.join(contexts_dir, f"{job_id}.tar.gz")
     
-    if context_tar_gzip is None:
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-            df_info = tarfile.TarInfo("Dockerfile")
-            df_bytes = dockerfile.encode("utf-8")
-            df_info.size = len(df_bytes)
-            tf.addfile(df_info, io.BytesIO(df_bytes))
-        context_tar_gzip = buf.getvalue()
+    context_tar_gzip = _prepare_kaniko_context(
+        dockerfile=dockerfile,
+        context_tar_gzip=context_tar_gzip,
+        embed_envd=embed_envd,
+    )
         
     with open(context_path, "wb") as f:
         f.write(context_tar_gzip)
         
     tag = image_tag or f"sandbox-{template_id}:latest"
-    dest = f"{registry_host}/{tag}"
-    kubelet_dest = f"{kubelet_registry_host}/{tag}"
+    reg = (registry_host or "").strip().rstrip("/")
+    pull_reg = (image_pull_host or reg).strip().rstrip("/")
+    dest = f"{reg}/{tag}"
+    pull_ref = f"{pull_reg}/{tag}"
     
     job_name = job_id
     
-    b64_df = base64.b64encode(dockerfile.encode('utf-8')).decode('ascii')
     init_cmd = (
         f"apk add --no-cache curl tar && "
         f"curl -sSf http://{api_service_host}/internal/contexts/{job_id} -o /tmp/ctx.tar.gz && "
-        f"tar -xzf /tmp/ctx.tar.gz -C /workspace && "
-        f"echo '{b64_df}' | base64 -d > /workspace/Dockerfile"
+        f"tar -xzf /tmp/ctx.tar.gz -C /workspace"
     )
     
     job_spec = client.V1Job(
@@ -96,7 +142,8 @@ def build_with_kaniko(
                                 "--insecure",
                                 "--insecure-pull",
                                 "--skip-tls-verify",
-                                "--cache=true"
+                                "--cache=false",
+                                "--snapshot-mode=redo",
                             ],
                             volume_mounts=[
                                 client.V1VolumeMount(name="workspace", mount_path="/workspace")
@@ -129,7 +176,7 @@ def build_with_kaniko(
                     )
                 except Exception as e:
                     logger.warning(f"Failed to delete job {job_name}: {e}")
-                return kubelet_dest
+                return pull_ref
             if job.status.failed:
                 raise RuntimeError(f"Kaniko job failed: {job.status.conditions}")
             time.sleep(2)

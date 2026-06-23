@@ -188,7 +188,12 @@ def _ensure_python3_for_envd_bake(
     install_timeout_sec: float,
 ) -> bool:
     """Ensure ``python3 -m pip`` works in a build container (parsed snapshot / bake path)."""
-    r = run_command(container_id, ENVD_ENSURE_PYTHON_PIP_SHELL, timeout=float(install_timeout_sec))
+    r = run_command(
+        container_id,
+        ENVD_ENSURE_PYTHON_PIP_SHELL,
+        timeout=float(install_timeout_sec),
+        user="root",
+    )
     if int(r.get("exit_code") or 0) != 0:
         detail = (r.get("stderr") or r.get("stdout") or "").strip()
         logger.warning(
@@ -200,24 +205,52 @@ def _ensure_python3_for_envd_bake(
     return True
 
 
-def uvicorn_envd_start_script(port: int) -> str:
-    """Shell snippet: background uvicorn on ``port`` and wait until localhost accepts TCP."""
+def uvicorn_envd_start_background_script(port: int) -> str:
+    """Shell snippet: spawn uvicorn on ``port`` in the background (no listen wait)."""
     p = max(1, min(65535, int(port)))
-    return f"""set -eu
-: > /tmp/envd.log
+    return f""": > /tmp/envd.log
 if command -v setsid >/dev/null 2>&1; then
   setsid -f env PYTHONPATH=/opt python3 -m uvicorn envd_guest.server:app --host 0.0.0.0 --port {p} >>/tmp/envd.log 2>&1 &
 else
   nohup env PYTHONPATH=/opt python3 -m uvicorn envd_guest.server:app --host 0.0.0.0 --port {p} >>/tmp/envd.log 2>&1 &
-fi
-for i in $(seq 1 60); do
-  python3 -c "import socket;s=socket.socket();import sys;r=s.connect_ex(('127.0.0.1',{p}));sys.exit(0 if r==0 else 1)" 2>/dev/null && exit 0
-  sleep 0.25
-done
-echo "--- /tmp/envd.log ---"
-cat /tmp/envd.log 2>/dev/null || true
-exit 1
-"""
+fi"""
+
+
+def guest_tcp_wait_loop_script(
+    port: int,
+    *,
+    max_seconds: float = 8.0,
+    poll_seconds: float = 0.1,
+    log_path: str = "",
+) -> str:
+    """Poll localhost ``port`` until open or timeout."""
+    import shlex
+
+    p = max(1, min(65535, int(port)))
+    poll = max(0.05, min(1.0, float(poll_seconds)))
+    max_iters = max(1, int(float(max_seconds) / poll))
+    log_tail = ""
+    if log_path:
+        log_tail = (
+            f"\necho '--- {log_path} ---'\n"
+            f"cat {shlex.quote(log_path)} 2>/dev/null || true\n"
+        )
+    return f"""for i in $(seq 1 {max_iters}); do
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import socket,sys;s=socket.socket();r=s.connect_ex(('127.0.0.1',{p}));sys.exit(0 if r==0 else 1)" 2>/dev/null && exit 0
+  fi
+  if (echo >/dev/tcp/127.0.0.1/{p}) 2>/dev/null; then exit 0; fi
+  sleep {poll}
+done{log_tail}exit 1"""
+
+
+def uvicorn_envd_start_script(port: int) -> str:
+    """Shell snippet: background uvicorn on ``port`` and wait until localhost accepts TCP."""
+    p = max(1, min(65535, int(port)))
+    return (
+        f"set -eu\n{uvicorn_envd_start_background_script(p)}\n"
+        + guest_tcp_wait_loop_script(p, max_seconds=15.0, poll_seconds=0.25, log_path="/tmp/envd.log")
+    )
 
 
 def container_has_baked_envd(
@@ -265,6 +298,7 @@ def bake_envd_guest_into_container(
         container_id,
         ENVD_PIP_INSTALL_SHELL,
         timeout=float(pip_timeout_sec),
+        user="root",
     )
     if int(pip.get("exit_code") or 0) != 0:
         detail = (pip.get("stderr") or pip.get("stdout") or "").strip()
@@ -274,7 +308,7 @@ def bake_envd_guest_into_container(
             detail[:2500],
         )
         return False
-    mk = run_command(container_id, f"touch {ENVD_BAKE_MARKER}", timeout=30.0)
+    mk = run_command(container_id, f"touch {ENVD_BAKE_MARKER}", timeout=30.0, user="root")
     if int(mk.get("exit_code") or 0) != 0:
         logger.warning("envd template bake: could not write marker container=%s", container_id[:12])
         return False

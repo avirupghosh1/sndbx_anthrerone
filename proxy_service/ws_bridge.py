@@ -21,6 +21,7 @@ async def connect_upstream_with_retries(
     retry_delay: float,
     ping_interval: float | None = None,
     ping_timeout: float | None = None,
+    additional_headers: dict[str, str] | None = None,
 ) -> Tuple[Any, Any]:
     last_exc: BaseException | None = None
     for attempt in range(1, connect_retries + 1):
@@ -31,6 +32,7 @@ async def connect_upstream_with_retries(
             ping_timeout=ping_timeout,
             close_timeout=10,
             max_size=None,
+            additional_headers=additional_headers or None,
         )
         try:
             ws = await cm.__aenter__()

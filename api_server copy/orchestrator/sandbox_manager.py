@@ -17,13 +17,29 @@ from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
 from .container_manager import ContainerManager, ContainerConfig
 from orchestrator.runtime_utils import is_container_like_execution, is_k8s_execution
 from orchestrator.guest_ports import resolve_guest_ports
+
+
+def _create_env_from_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Merge SDK ``metadata.e2b_shim_envs`` / ``metadata.env`` into pod environment."""
+    md = metadata or {}
+    out: Dict[str, str] = {}
+    for key in ("e2b_shim_envs", "env"):
+        block = md.get(key)
+        if not isinstance(block, dict):
+            continue
+        for k, v in block.items():
+            if k and v is not None:
+                out[str(k)] = str(v)
+    return out
+
+
 from .envd_template_bake import (
-    ENVD_ENSURE_PYTHON_PIP_SHELL,
-    ENVD_PIP_INSTALL_SHELL,
+    ENVD_BAKE_MARKER,
     bake_envd_guest_into_container,
     container_has_baked_envd,
-    envd_guest_tarball_bytes,
+    guest_tcp_wait_loop_script,
     should_embed_envd_at_template_build,
+    uvicorn_envd_start_background_script,
     uvicorn_envd_start_script,
 )
 from .firecracker_plane import FC_WARM_DOCKERLESS_MARKER
@@ -35,6 +51,8 @@ if TYPE_CHECKING:
     from .protocols import SandboxExecutionPlane
 
 logger = logging.getLogger(__name__)
+
+ENVD_TEMPLATE_BAKED_ENV = "MYSANDBOX_ENVD_BAKED"
 
 
 def _resolve_sandbox_image(template_id: Optional[str]) -> str:
@@ -221,69 +239,120 @@ class SandboxManager:
         info, _reason = self.get_envd_connection_ex(sandbox_id)
         return info
 
-    def _bootstrap_envd_daemon(self, sandbox_id: str, container_id: str, port: int) -> None:
-        """Start guest envd: if the template image already embeds ``envd_guest``, only spawn uvicorn."""
-        if not is_container_like_execution(self.execution):
-            return
-        p = max(1, min(65535, int(port)))
-        pip_to = float(getattr(self._config, "ENVD_BOOTSTRAP_PIP_TIMEOUT_SEC", 300.0) or 300.0)
+    def _guest_bootstrap_poll_seconds(self) -> float:
+        return max(
+            0.05,
+            min(1.0, float(getattr(self._config, "GUEST_BOOTSTRAP_POLL_SEC", 0.1) or 0.1)),
+        )
+
+    def _guest_bootstrap_agent_wait_seconds(self) -> float:
+        return max(
+            1.0,
+            float(getattr(self._config, "GUEST_BOOTSTRAP_AGENT_WAIT_SEC", 8.0) or 8.0),
+        )
+
+    def _resolve_template_start_spec(
+        self, template_id: str
+    ) -> tuple[str, str, Dict[str, str], int]:
+        """Return ``(start_cmd, image_ref, template_env, guest_port)``."""
+        tid = (template_id or "").strip()
+        row = self.db.get_sandbox_template(tid) if tid else None
+        sc = (row.get("start_cmd") or "").strip() if row else ""
+        tpl_env = dict(row.get("env") or {}) if row else {}
+        img_ref = ""
+        if row:
+            img_ref = (row.get("warm_snapshot_image") or row.get("base_image") or "").strip()
+        if not sc and img_ref:
+            sc = self.execution.image_start_cmd_shell(img_ref) or ""
+        if not tpl_env and img_ref:
+            tpl_env = self.execution.image_env_dict(img_ref)
+        try:
+            guest_port = int(str(tpl_env.get("PORT") or "0").strip() or "0")
+        except ValueError:
+            guest_port = 0
+        return sc, img_ref, tpl_env, guest_port
+
+    def _ensure_envd_baked(self, sandbox_id: str, container_id: str, *, pip_timeout: float) -> bool:
+        """Ensure ``/opt/envd_guest`` and deps exist in the guest before startup."""
         with self._sandbox_io_lock(sandbox_id):
             if container_has_baked_envd(self.execution.run_command, container_id):
-                start = uvicorn_envd_start_script(p)
-                st = self.execution.run_command(container_id, start, timeout=120.0)
-                if int(st.get("exit_code") or 0) != 0:
-                    logger.warning(
-                        "envd start (baked image): daemon did not listen on :%s sandbox=%s stderr=%s",
-                        p,
-                        sandbox_id,
-                        (st.get("stderr") or "")[:2500],
-                    )
-                else:
-                    logger.info("envd start (baked image): sandbox %s guest listening on tcp/%s", sandbox_id, p)
-                return
+                return True
+            return bake_envd_guest_into_container(
+                put_archive_to_container=self.execution.put_archive_to_container,
+                run_command=self.execution.run_command,
+                container_id=container_id,
+                pip_timeout_sec=pip_timeout,
+            )
 
-            tb = envd_guest_tarball_bytes()
-            if not tb:
-                logger.warning("envd auto-start: api_server/envd_guest missing on API host")
-                return
-            if not self.execution.put_archive_to_container(container_id, "/opt", tb):
-                logger.warning("envd auto-start: put_archive failed_yo whysandbox=%s", sandbox_id)
-                return
-            inst = self.execution.run_command(
-                container_id,
-                ENVD_ENSURE_PYTHON_PIP_SHELL,
-                timeout=max(120.0, pip_to),
-            )
-            if int(inst.get("exit_code") or 0) != 0:
-                logger.warning(
-                    "envd auto-start: python3-pip install failed sandbox=%s detail=%s",
-                    sandbox_id,
-                    ((inst.get("stderr") or inst.get("stdout") or ""))[:2500],
+    def _template_declares_envd_baked(self, template_id: str) -> bool:
+        tid = (template_id or "").strip()
+        if not tid:
+            return False
+        row = self.db.get_sandbox_template(tid)
+        if not row:
+            return False
+        raw = str((row.get("env") or {}).get(ENVD_TEMPLATE_BAKED_ENV) or "").strip().lower()
+        return raw in ("1", "true", "yes", "on")
+
+    def _bootstrap_envd_daemon(
+        self, sandbox_id: str, container_id: str, port: int, *, template_id: str = "", wait_for_listen: bool | None = None
+    ) -> bool:
+        """Start guest envd and optionally wait until localhost accepts on the envd port."""
+        if not is_container_like_execution(self.execution):
+            return True
+        if wait_for_listen is None:
+            wait_for_listen = bool(getattr(self._config, "ENVD_BOOTSTRAP_WAIT_ON_CREATE", False))
+        p = max(1, min(65535, int(port)))
+        pip_to = float(getattr(self._config, "ENVD_BOOTSTRAP_PIP_TIMEOUT_SEC", 300.0) or 300.0)
+        declared_baked = self._template_declares_envd_baked(template_id)
+
+        def _start_once() -> Dict[str, Any]:
+            with self._sandbox_io_lock(sandbox_id):
+                start = uvicorn_envd_start_script(p)
+                if not wait_for_listen:
+                    start = f"set -eu\n{uvicorn_envd_start_background_script(p)}"
+                return self.execution.run_command(
+                    container_id,
+                    start,
+                    timeout=120.0 if wait_for_listen else 30.0,
                 )
-                return
-            pip = self.execution.run_command(
-                container_id,
-                ENVD_PIP_INSTALL_SHELL,
-                timeout=pip_to,
+
+        if not declared_baked:
+            if not self._ensure_envd_baked(sandbox_id, container_id, pip_timeout=pip_to):
+                logger.warning("envd auto-start: bake/bootstrap failed sandbox=%s", sandbox_id)
+                return False
+
+        st = _start_once()
+        if int(st.get("exit_code") or 0) == 0:
+            logger.info("envd auto-start: sandbox %s guest listening on tcp/%s", sandbox_id, p)
+            return True
+
+        if declared_baked:
+            logger.warning(
+                "envd auto-start: declared baked template failed first start sandbox=%s template=%s stderr=%s; retrying after bake probe",
+                sandbox_id,
+                template_id,
+                (st.get("stderr") or "")[:1200],
             )
-            if int(pip.get("exit_code") or 0) != 0:
-                logger.warning(
-                    "envd auto-start: pip install failed sandbox=%s stderr=%s",
+            if not self._ensure_envd_baked(sandbox_id, container_id, pip_timeout=pip_to):
+                logger.warning("envd auto-start: fallback bake failed sandbox=%s", sandbox_id)
+                return False
+            st = _start_once()
+            if int(st.get("exit_code") or 0) == 0:
+                logger.info(
+                    "envd auto-start: sandbox %s guest listening on tcp/%s after fallback bake",
                     sandbox_id,
-                    (pip.get("stderr") or "")[:2500],
-                )
-                return
-            start = uvicorn_envd_start_script(p)
-            st = self.execution.run_command(container_id, start, timeout=120.0)
-            if int(st.get("exit_code") or 0) != 0:
-                logger.warning(
-                    "envd auto-start: daemon did not listen on :%s sandbox=%s stderr=%s",
                     p,
-                    sandbox_id,
-                    (st.get("stderr") or "")[:2500],
                 )
-            else:
-                logger.info("envd auto-start: sandbox %s guest listening on tcp/%s", sandbox_id, p)
+                return True
+
+        logger.warning(
+            "envd auto-start: daemon did not listen on :%s sandbox=%s stderr=%s",
+            p,
+            sandbox_id,
+            (st.get("stderr") or "")[:2500],
+        )
+        return False
 
     def _bootstrap_template_start_cmd(self, sandbox_id: str, container_id: str, template_id: str) -> None:
         """Background-start the template ``start_cmd`` (e.g. Dockerfile ``CMD``) — sandboxes boot with ``/bin/bash``."""
@@ -316,8 +385,8 @@ class SandboxManager:
         if not sc:
             logger.debug("template start_cmd empty for %r — skip bootstrap", tid)
             return
-        exec_user = "root"
-        if img_ref and is_container_like_execution(self.execution):
+        exec_user = None if is_k8s_execution(self.execution) else "root"
+        if img_ref and is_container_like_execution(self.execution) and not is_k8s_execution(self.execution):
             exec_user = self.execution.image_default_user(img_ref)
         script = (
             "set -eu\n"
@@ -342,21 +411,17 @@ class SandboxManager:
                 )
                 return
             if 1 <= guest_port <= 65535:
-                wait = (
-                    f"for i in $(seq 1 80); do\n"
-                    f"  if command -v python3 >/dev/null 2>&1; then\n"
-                    f"    python3 -c \"import socket,sys;s=socket.socket();"
-                    f"r=s.connect_ex(('127.0.0.1',{guest_port}));sys.exit(0 if r==0 else 1)\" "
-                    f"2>/dev/null && exit 0\n"
-                    f"  fi\n"
-                    f"  if (echo >/dev/tcp/127.0.0.1/{guest_port}) 2>/dev/null; then exit 0; fi\n"
-                    f"  sleep 0.25\n"
-                    f"done\n"
-                    f"echo '--- /tmp/template-start.log ---'\n"
-                    f"cat /tmp/template-start.log 2>/dev/null || true\n"
-                    f"exit 1\n"
+                wait = guest_tcp_wait_loop_script(
+                    guest_port,
+                    max_seconds=self._guest_bootstrap_agent_wait_seconds(),
+                    poll_seconds=self._guest_bootstrap_poll_seconds(),
+                    log_path="/tmp/template-start.log",
                 )
-                wt = self.execution.run_command(container_id, wait, timeout=25.0)
+                wt = self.execution.run_command(
+                    container_id,
+                    wait,
+                    timeout=self._guest_bootstrap_agent_wait_seconds() + 10.0,
+                )
                 if int(wt.get("exit_code") or 0) != 0:
                     logger.warning(
                         "template start_cmd did not listen on :%s sandbox=%s template=%s log=%s",
@@ -391,31 +456,168 @@ class SandboxManager:
         if md:
             self.db.merge_sandbox_metadata(sid, md)
 
-    def _bootstrap_guest_services(self, sandbox_id: str, container_id: str, template_id: str) -> None:
+    def _bootstrap_guest_services_k8s_combined(
+        self,
+        sandbox_id: str,
+        container_id: str,
+        template_id: str,
+        *,
+        start_envd: bool,
+        envd_port: int,
+    ) -> bool:
+        """Single kubectl exec fast path; if envd is missing from the image, bake it first."""
+        sc, img_ref, _tpl_env, guest_port = self._resolve_template_start_spec(template_id)
+        exec_user = None if is_k8s_execution(self.execution) else "root"
+        if img_ref and is_container_like_execution(self.execution) and not is_k8s_execution(self.execution):
+            exec_user = self.execution.image_default_user(img_ref)
+
+        wait_sec = self._guest_bootstrap_agent_wait_seconds()
+        poll_sec = self._guest_bootstrap_poll_seconds()
+        declared_baked = self._template_declares_envd_baked(template_id)
+        parts = ["set -eu"]
+
+        if start_envd:
+            p = max(1, min(65535, int(envd_port)))
+            envd_wait = guest_tcp_wait_loop_script(
+                p,
+                max_seconds=min(wait_sec, 15.0),
+                poll_seconds=poll_sec,
+                log_path="/tmp/envd.log",
+            )
+            if not declared_baked:
+                pip_to = float(getattr(self._config, "ENVD_BOOTSTRAP_PIP_TIMEOUT_SEC", 300.0) or 300.0)
+                if not self._ensure_envd_baked(sandbox_id, container_id, pip_timeout=pip_to):
+                    logger.warning("k8s combined guest bootstrap: envd bake failed sandbox=%s", sandbox_id)
+                    return False
+            # Subshell: wait loop uses ``exit 0`` on success — must not terminate the
+            # combined script before ``start_cmd`` runs.
+            parts.append(
+                f"{uvicorn_envd_start_background_script(p)}\n(\n{envd_wait}\n)"
+            )
+
+        if sc:
+            parts.append(": > /tmp/template-start.log")
+            parts.append(
+                "if command -v setsid >/dev/null 2>&1; then\n"
+                f"  setsid -f /bin/sh -c {shlex.quote(sc)} >>/tmp/template-start.log 2>&1 &\n"
+                "else\n"
+                f"  nohup /bin/sh -c {shlex.quote(sc)} >>/tmp/template-start.log 2>&1 &\n"
+                "fi"
+            )
+
+        if 1 <= guest_port <= 65535:
+            agent_wait = guest_tcp_wait_loop_script(
+                guest_port,
+                max_seconds=wait_sec,
+                poll_seconds=poll_sec,
+                log_path="/tmp/template-start.log",
+            )
+            parts.append(f"(\n{agent_wait}\n)")
+        elif sc:
+            parts.append("sleep 0.5")
+
+        if len(parts) == 1:
+            return True
+
+        script = "\n".join(parts)
+        def _run_script() -> Dict[str, Any]:
+            with self._sandbox_io_lock(sandbox_id):
+                return self.execution.run_command(
+                    container_id,
+                    script,
+                    timeout=wait_sec + 30.0,
+                    user=exec_user,
+                )
+
+        st = _run_script()
+        if int(st.get("exit_code") or 0) != 0 and start_envd and declared_baked:
+            pip_to = float(getattr(self._config, "ENVD_BOOTSTRAP_PIP_TIMEOUT_SEC", 300.0) or 300.0)
+            logger.warning(
+                "k8s combined guest bootstrap: declared baked template failed first attempt sandbox=%s template=%s output=%s; retrying after bake probe",
+                sandbox_id,
+                template_id,
+                (st.get("stderr") or st.get("stdout") or "")[:1500],
+            )
+            if not self._ensure_envd_baked(sandbox_id, container_id, pip_timeout=pip_to):
+                logger.warning("k8s combined guest bootstrap: fallback bake failed sandbox=%s", sandbox_id)
+                return False
+            st = _run_script()
+
+        if int(st.get("exit_code") or 0) != 0 and 1 <= guest_port <= 65535:
+            logger.warning(
+                "k8s combined guest bootstrap: agent :%s not ready sandbox=%s template=%s log=%s",
+                guest_port,
+                sandbox_id,
+                template_id,
+                (st.get("stderr") or st.get("stdout") or "")[:2500],
+            )
+            return False
+        if int(st.get("exit_code") or 0) != 0:
+            logger.warning(
+                "k8s combined guest bootstrap failed sandbox=%s template=%s output=%s",
+                sandbox_id,
+                template_id,
+                (st.get("stderr") or st.get("stdout") or "")[:2000],
+            )
+            return False
+
+        if sc:
+            logger.info(
+                "template start_cmd bootstrapped sandbox=%s template=%r cmd=%r port=%s",
+                sandbox_id,
+                template_id,
+                sc[:120],
+                guest_port or "?",
+            )
+        if start_envd:
+            logger.info(
+                "envd auto-start: sandbox %s guest tcp/%s ready",
+                sandbox_id,
+                envd_port,
+            )
+        return True
+
+    def _bootstrap_guest_services(self, sandbox_id: str, container_id: str, template_id: str) -> bool:
         """Idempotent guest daemons after the workload is running (control-plane responsibility)."""
         if not is_container_like_execution(self.execution):
-            return
+            return True
 
         envd_port_cfg = max(1, min(65535, int(getattr(self._config, "ENVD_PORT", 49983))))
         envd_always = bool(getattr(self._config, "ENVD_ALWAYS_ON", True))
         publish_envd_legacy = bool(getattr(self._config, "ENVD_PUBLISH_PORT", False))
         start_envd = envd_always or publish_envd_legacy
-        if start_envd and getattr(self._config, "ENVD_AUTO_START", True):
-            self._bootstrap_envd_daemon(sandbox_id, container_id, envd_port_cfg)
+        auto_start_envd = start_envd and getattr(self._config, "ENVD_AUTO_START", True)
 
-        tid = (template_id or "").strip()
-        tpl = self.db.get_sandbox_template(tid) if tid else None
-        sc = (tpl.get("start_cmd") or "").strip() if tpl else ""
-        img_ref = ""
-        if tpl:
-            img_ref = (tpl.get("warm_snapshot_image") or tpl.get("base_image") or "").strip()
-        if not sc and img_ref:
-            sc = self.execution.image_start_cmd_shell(img_ref) or ""
+        if (
+            is_k8s_execution(self.execution)
+            and bool(getattr(self._config, "K8S_COMBINED_GUEST_BOOTSTRAP", True))
+        ):
+            ok = self._bootstrap_guest_services_k8s_combined(
+                sandbox_id,
+                container_id,
+                template_id,
+                start_envd=auto_start_envd,
+                envd_port=envd_port_cfg,
+            )
+            self.refresh_guest_routing_metadata(sandbox_id)
+            return ok
 
+        if auto_start_envd:
+            if not self._bootstrap_envd_daemon(
+                sandbox_id,
+                container_id,
+                envd_port_cfg,
+                template_id=template_id,
+            ):
+                self.refresh_guest_routing_metadata(sandbox_id)
+                return False
+
+        sc, _img_ref, _tpl_env, _guest_port = self._resolve_template_start_spec(template_id)
         if sc:
             self._bootstrap_template_start_cmd(sandbox_id, container_id, template_id)
 
         self.refresh_guest_routing_metadata(sandbox_id)
+        return True
 
     def create_sandbox(
         self,
@@ -525,7 +727,9 @@ class SandboxManager:
                 if sid:
                     row = self.get_sandbox(sid)
                     if row:
-                        self._bootstrap_guest_services(sid, row["container_id"], tid)
+                        if not self._bootstrap_guest_services(sid, row["container_id"], tid):
+                            self.kill_sandbox(sid, force=True)
+                            return None
                     return sid
             return self._create_sandbox_fresh(
                 template_id=tid,
@@ -541,7 +745,9 @@ class SandboxManager:
             if sid:
                 row = self.get_sandbox(sid)
                 if row:
-                    self._bootstrap_guest_services(sid, row["container_id"], tid or template_id)
+                    if not self._bootstrap_guest_services(sid, row["container_id"], tid or template_id):
+                        self.kill_sandbox(sid, force=True)
+                        return None
                 return sid
         return self._create_sandbox_fresh(
             template_id=template_id,
@@ -604,6 +810,19 @@ class SandboxManager:
                 return False
             if row.get("warm_snapshot_image"):
                 return True
+
+            # K8s + host-built image (``--host-docker``): skip tpl-build / docker commit.
+            if self.execution.get_backend_kind() == "k8s":
+                bi = (row.get("base_image") or "").strip()
+                sc = (row.get("start_cmd") or "").strip()
+                if bi and bi != template_id and (":" in bi or "/" in bi) and not sc:
+                    self.db.set_template_warm_snapshot(template_id, bi, None)
+                    logger.info(
+                        "Template %s: using pre-built base_image as warm snapshot (k8s): %s",
+                        template_id,
+                        bi,
+                    )
+                    return True
 
             cfg = self._config
             name = f"tpl-build-{uuid.uuid4().hex[:10]}"
@@ -952,6 +1171,16 @@ class SandboxManager:
             if ev:
                 env_for_create = ev
 
+        meta_env = _create_env_from_metadata(metadata)
+        if meta_env:
+            env_for_create = {**(env_for_create or {}), **meta_env}
+
+        if is_k8s_execution(self.execution):
+            cpu_limit = (getattr(self._config, "K8S_SANDBOX_CPU_LIMIT", None) or cpu_limit).strip()
+            memory_limit = (
+                getattr(self._config, "K8S_SANDBOX_MEMORY_LIMIT", None) or memory_limit
+            ).strip()
+
         envd_port_cfg = max(1, min(65535, int(getattr(self._config, "ENVD_PORT", 49983))))
         is_container_backend = is_container_like_execution(self.execution)
         envd_always = is_container_backend and bool(getattr(self._config, "ENVD_ALWAYS_ON", True))
@@ -1039,7 +1268,10 @@ class SandboxManager:
             self.db.merge_sandbox_metadata(sandbox_id, {"traffic_access_token": traffic_token})
 
         if is_container_backend:
-            self._bootstrap_guest_services(sandbox_id, container_id, template_id)
+            if not self._bootstrap_guest_services(sandbox_id, container_id, template_id):
+                logger.error("Sandbox %s bootstrap failed; tearing down workload", sandbox_id)
+                self.kill_sandbox(sandbox_id, force=True)
+                return None
         else:
             self.refresh_guest_routing_metadata(sandbox_id)
 

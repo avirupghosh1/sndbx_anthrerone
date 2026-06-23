@@ -12,6 +12,7 @@ from models import RegisterTemplateFromDockerfileRequest, RegisterTemplateReques
 from models.responses import TemplateDefinitionResponse
 from middleware import validate_api_key
 from orchestrator import SandboxManager
+from orchestrator.sandbox_manager import ENVD_TEMPLATE_BAKED_ENV
 from orchestrator.template_docker_build import build_image_from_dockerfile
 
 router = APIRouter(prefix="/templates", tags=["templates"])
@@ -66,6 +67,11 @@ async def register_template(
         int(request.settle_seconds),
         (request.ready_cmd or "").strip(),
     )
+    warm = (request.warm_snapshot_image or "").strip()
+    if warm:
+        await run_io(sandbox_manager.db.set_template_warm_snapshot, tid, warm, None)
+        await run_io(sandbox_manager.sync_warm_pool_default_segment, tid, warm)
+        row = await run_io(sandbox_manager.db.get_sandbox_template, tid) or row
     return TemplateDefinitionResponse(**_row_to_response(row))
 
 
@@ -135,6 +141,8 @@ async def register_template_from_dockerfile(
             request.env,
             request.start_cmd or "",
         )
+        if bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)):
+            reg_env[ENVD_TEMPLATE_BAKED_ENV] = "1"
         
     elif mode == "kaniko":
         from orchestrator.kaniko_builder import build_with_kaniko
@@ -149,16 +157,22 @@ async def register_template_from_dockerfile(
                 template_id=tid,
                 context_tar_gzip=ctx,
                 image_tag=request.image_tag,
+                registry_host=cfg.KANIKO_REGISTRY_HOST,
+                image_pull_host=cfg.KANIKO_IMAGE_PULL_HOST,
+                namespace=cfg.K8S_NAMESPACE,
+                api_service_host=cfg.KANIKO_API_SERVICE_HOST,
+                embed_envd=bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)),
             )
         except RuntimeError as ex:
             raise HTTPException(status_code=400, detail=str(ex)) from ex
             
-        reg_env, _ = _fields_from_dockerfile_request(
+        reg_env, reg_start = _fields_from_dockerfile_request(
             request.dockerfile,
             request.env,
             request.start_cmd or "",
         )
-        reg_start = ""  # Pre-baked into image via Kaniko
+        if bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)):
+            reg_env[ENVD_TEMPLATE_BAKED_ENV] = "1"
 
     if mode in ("docker_cli", "kaniko"):
         if kind == "firecracker":

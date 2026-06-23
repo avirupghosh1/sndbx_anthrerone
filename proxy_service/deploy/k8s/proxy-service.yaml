@@ -16,7 +16,7 @@ spec:
       containers:
         - name: proxy-service
           image: proxy-service:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
           ports:
             - containerPort: 8080
               name: http
@@ -49,7 +49,7 @@ metadata:
   namespace: sandboxes
 data:
   SANDBOX_DOMAIN: "sndbx.com"
-  SANDBOX_INGRESS_DEBUG: "false"
+  SANDBOX_INGRESS_DEBUG: "true"
   CONTROL_PLANE_URL: "http://api-service:8000"
   K8S_NAMESPACE: "sandboxes"
   K8S_POD_SERVICE_TEMPLATE: "sandbox-{sandbox_id}.{namespace}.svc.cluster.local"
