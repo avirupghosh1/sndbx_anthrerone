@@ -139,6 +139,19 @@ def k8s_guest_upstream_target(config: Any, sandbox_id: str, guest_port: int) -> 
     }
 
 
+def k8s_guest_upstream_target_for_host(host: str, guest_port: int, *, kind: str) -> Dict[str, Any]:
+    p = max(1, min(65535, int(guest_port)))
+    h = (host or "").strip()
+    return {
+        "scheme": "http",
+        "host": h,
+        "port": p,
+        "guest_port": p,
+        "kind": kind,
+        "upstream_http": f"http://{h}:{p}",
+    }
+
+
 def is_k8s_runtime_config(config: Any) -> bool:
     fn = getattr(config, "is_k8s_runtime", None)
     if callable(fn):
@@ -191,7 +204,20 @@ def build_guest_routing_record(
             ports = [envd_p]
 
     if is_k8s_runtime_config(cfg):
-        return {str(p): k8s_guest_upstream_target(cfg, sid, p) for p in ports}
+        cid = (row.get("container_id") or "").strip()
+        pod_ip = ""
+        if cid:
+            try:
+                pod_ip = (manager.execution.get_container_internal_ipv4(cid) or "").strip()
+            except Exception:
+                pod_ip = ""
+        out: Dict[str, Any] = {}
+        for p in ports:
+            if pod_ip:
+                out[str(p)] = k8s_guest_upstream_target_for_host(pod_ip, p, kind="k8s_pod_ip")
+            else:
+                out[str(p)] = k8s_guest_upstream_target(cfg, sid, p)
+        return out
 
     execution = manager.execution
     kind = execution.get_backend_kind()
@@ -221,7 +247,19 @@ def resolve_guest_upstream_http(manager: "SandboxManager", sandbox_id: str, gues
 
     if is_k8s_runtime_config(cfg):
         meta = row.get("metadata") or {}
+        guest_routing = meta.get("guest_routing") if isinstance(meta.get("guest_routing"), dict) else {}
+        target = guest_routing.get(str(p)) if isinstance(guest_routing, dict) else None
+        if isinstance(target, dict):
+            upstream = (target.get("upstream_http") or "").strip()
+            if upstream:
+                return upstream
+            host = (target.get("host") or "").strip()
+            if host:
+                return f"http://{host}:{p}"
         k8s = meta.get("k8s") if isinstance(meta.get("k8s"), dict) else {}
+        pod_ip = (k8s.get("pod_ip") or "").strip()
+        if pod_ip:
+            return f"http://{pod_ip}:{p}"
         host = (k8s.get("service_host") or "").strip() or k8s_pod_service_host(cfg, sid)
         return f"http://{host}:{p}"
 

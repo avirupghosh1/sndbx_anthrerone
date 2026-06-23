@@ -144,7 +144,7 @@ data:
   K8S_POD_SERVICE_TEMPLATE: "sandbox-{sandbox_id}.{namespace}.svc.cluster.local"
   # Mac minikube: omit gVisor runtime class (not installed by default).
   SANDBOX_ISOLATION: "docker"
-  SANDBOX_WARM_POOL_SIZE: "0"
+  SANDBOX_WARM_POOL_SIZE: "2"
   ENVD_ALWAYS_ON: "true"
   ENVD_PUBLISH_PORT: "false"
   DATABASE_PATH: "/var/lib/api/sandboxes.db"

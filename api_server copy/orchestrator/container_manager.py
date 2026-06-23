@@ -56,6 +56,10 @@ class ContainerConfig:
     e2b_agent_port: int = 8765
     publish_envd_port: bool = False
     envd_port: int = 49983
+    # K8s-only: optional PID 1 command override used to launch guest daemons before pod readiness.
+    startup_command: Optional[List[str]] = None
+    # K8s-only: optional readiness TCP socket port. When set, pod Ready waits for the guest listener.
+    readiness_tcp_port: Optional[int] = None
 
 
 class ContainerManager:

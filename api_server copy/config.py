@@ -253,6 +253,9 @@ class Config:
     SANDBOX_DATA_PLANE_DEBUG: bool = _env_bool("SANDBOX_DATA_PLANE_DEBUG", False)
     SANDBOX_DEFAULT_ALLOW_PUBLIC_TRAFFIC: bool = _env_bool("SANDBOX_DEFAULT_ALLOW_PUBLIC_TRAFFIC", False)
     ENVD_ALWAYS_ON: bool = _env_bool("ENVD_ALWAYS_ON", True)
+    # K8s: when true, start envd + template ``start_cmd`` as part of container PID 1 and let pod
+    # readiness wait on the agent port instead of serializing that work after the pod becomes Ready.
+    K8S_TEMPLATE_BOOTSTRAP_IN_POD: bool = _env_bool("K8S_TEMPLATE_BOOTSTRAP_IN_POD", True)
     # TCP port clients connect to on the proxy (debug: e.g. 8080; prod: 443 or omit).
     SANDBOX_DATA_PLANE_HTTP_PORT: int = int(os.getenv("SANDBOX_DATA_PLANE_HTTP_PORT", "8080"))
     SANDBOX_DATA_PLANE_LISTEN_PORT: Optional[int] = (

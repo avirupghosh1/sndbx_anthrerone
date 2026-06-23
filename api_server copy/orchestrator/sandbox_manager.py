@@ -294,6 +294,54 @@ class SandboxManager:
         raw = str((row.get("env") or {}).get(ENVD_TEMPLATE_BAKED_ENV) or "").strip().lower()
         return raw in ("1", "true", "yes", "on")
 
+    def _k8s_in_pod_bootstrap_spec(
+        self,
+        template_id: str,
+        *,
+        start_envd: bool,
+        envd_port: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not is_k8s_execution(self.execution):
+            return None
+        if not bool(getattr(self._config, "K8S_TEMPLATE_BOOTSTRAP_IN_POD", True)):
+            return None
+
+        sc, _img_ref, tpl_env, guest_port = self._resolve_template_start_spec(template_id)
+        if not sc and not start_envd:
+            return None
+        if start_envd and not self._template_declares_envd_baked(template_id):
+            return None
+
+        p = max(1, min(65535, int(envd_port)))
+        parts = [
+            "set -eu",
+            ": > /tmp/template-start.log",
+            ": > /tmp/envd.log",
+        ]
+        if start_envd:
+            parts.append(uvicorn_envd_start_background_script(p))
+        if sc:
+            parts.append(
+                "if command -v setsid >/dev/null 2>&1; then\n"
+                f"  setsid -f /bin/sh -c {shlex.quote(sc)} >>/tmp/template-start.log 2>&1 &\n"
+                "else\n"
+                f"  nohup /bin/sh -c {shlex.quote(sc)} >>/tmp/template-start.log 2>&1 &\n"
+                "fi"
+            )
+        parts.append("while true; do sleep 3600; done")
+        try:
+            gp = int(str(tpl_env.get("PORT") or "0").strip() or "0")
+        except ValueError:
+            gp = 0
+        if gp <= 0:
+            gp = guest_port
+        return {
+            "startup_command": ["/bin/sh", "-lc", "\n".join(parts)],
+            "readiness_tcp_port": gp if 1 <= gp <= 65535 else None,
+            "start_cmd": sc,
+            "guest_port": gp if 1 <= gp <= 65535 else guest_port,
+        }
+
     def _bootstrap_envd_daemon(
         self, sandbox_id: str, container_id: str, port: int, *, template_id: str = "", wait_for_listen: bool | None = None
     ) -> bool:
@@ -446,9 +494,19 @@ class SandboxManager:
         sid = (sandbox_id or "").strip()
         md: Dict[str, Any] = {}
         if getattr(self._config, "is_k8s_runtime", None) and self._config.is_k8s_runtime():
+            pod_ip = ""
+            row = self.get_sandbox(sid)
+            if row:
+                cid = (row.get("container_id") or "").strip()
+                if cid:
+                    try:
+                        pod_ip = (self.execution.get_container_internal_ipv4(cid) or "").strip()
+                    except Exception:
+                        pod_ip = ""
             md["k8s"] = {
                 "namespace": (getattr(self._config, "K8S_NAMESPACE", None) or "sandboxes").strip(),
                 "service_host": k8s_pod_service_host(self._config, sid),
+                "pod_ip": pod_ip,
             }
         record = build_guest_routing_record(self, sid)
         if record:
@@ -587,6 +645,47 @@ class SandboxManager:
         publish_envd_legacy = bool(getattr(self._config, "ENVD_PUBLISH_PORT", False))
         start_envd = envd_always or publish_envd_legacy
         auto_start_envd = start_envd and getattr(self._config, "ENVD_AUTO_START", True)
+        in_pod_boot = None
+        if auto_start_envd or template_id:
+            in_pod_boot = self._k8s_in_pod_bootstrap_spec(
+                template_id,
+                start_envd=auto_start_envd,
+                envd_port=envd_port_cfg,
+            )
+        if in_pod_boot is not None:
+            guest_port = int(in_pod_boot.get("guest_port") or 0)
+            if 1 <= guest_port <= 65535:
+                wt = self.execution.run_command(
+                    container_id,
+                    guest_tcp_wait_loop_script(
+                        guest_port,
+                        max_seconds=self._guest_bootstrap_agent_wait_seconds(),
+                        poll_seconds=self._guest_bootstrap_poll_seconds(),
+                        log_path="/tmp/template-start.log",
+                    ),
+                    timeout=self._guest_bootstrap_agent_wait_seconds() + 10.0,
+                )
+                if int(wt.get("exit_code") or 0) != 0:
+                    logger.warning(
+                        "k8s in-pod bootstrap: agent :%s not ready sandbox=%s template=%s log=%s",
+                        guest_port,
+                        sandbox_id,
+                        template_id,
+                        (wt.get("stderr") or wt.get("stdout") or "")[:2500],
+                    )
+                    return False
+            if in_pod_boot.get("start_cmd"):
+                logger.info(
+                    "template start_cmd bootstrapped in-pod sandbox=%s template=%r cmd=%r port=%s",
+                    sandbox_id,
+                    template_id,
+                    str(in_pod_boot.get("start_cmd"))[:120],
+                    in_pod_boot.get("guest_port") or "?",
+                )
+            if auto_start_envd:
+                logger.info("envd auto-start: sandbox %s guest tcp/%s ready (in-pod)", sandbox_id, envd_port_cfg)
+            self.refresh_guest_routing_metadata(sandbox_id)
+            return True
 
         if (
             is_k8s_execution(self.execution)
@@ -1212,6 +1311,14 @@ class SandboxManager:
         if is_container_backend and data_plane_enabled_for_config(self._config):
             traffic_token = secrets.token_urlsafe(32)
 
+        k8s_boot = None
+        if is_k8s_execution(self.execution):
+            k8s_boot = self._k8s_in_pod_bootstrap_spec(
+                template_id,
+                start_envd=start_envd,
+                envd_port=envd_port_cfg,
+            )
+
         config = ContainerConfig(
             image=image,
             cpu_limit=cpu_limit,
@@ -1223,6 +1330,8 @@ class SandboxManager:
             guest_ports=guest_ports,
             publish_envd_port=publish_envd,
             envd_port=envd_port_cfg,
+            startup_command=list(k8s_boot.get("startup_command") or []) if k8s_boot else None,
+            readiness_tcp_port=(k8s_boot.get("readiness_tcp_port") if k8s_boot else None),
         )
 
         container_id = self.execution.create_container(container_name, config)

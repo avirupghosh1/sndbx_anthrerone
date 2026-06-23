@@ -165,6 +165,27 @@ class K8sPodManager:
         logger.error("Pod %s not ready within %.0fs", pod_name, timeout_sec)
         return False
 
+    def _wait_pod_phase_running(self, pod_name: str, *, timeout_sec: float = 180.0) -> bool:
+        assert self._core is not None
+        poll = float(getattr(self._cfg, "K8S_POD_READY_POLL_SEC", 0.2) or 0.2)
+        poll = max(0.1, min(2.0, poll))
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            try:
+                pod = self._core.read_namespaced_pod(pod_name, self._namespace)
+            except ApiException:
+                time.sleep(poll)
+                continue
+            phase = (pod.status.phase or "").strip()
+            if phase == "Running":
+                return True
+            if phase in ("Failed", "Succeeded"):
+                logger.error("Pod %s entered terminal phase %s", pod_name, phase)
+                return False
+            time.sleep(poll)
+        logger.error("Pod %s not running within %.0fs", pod_name, timeout_sec)
+        return False
+
     def _ensure_headless_service(self, pod_name: str, sandbox_id: str, ports: List[int]) -> bool:
         assert self._core is not None
         svc_name = self._service_name(pod_name)
@@ -217,6 +238,17 @@ class K8sPodManager:
             [client.V1LocalObjectReference(name=pull_secret)] if pull_secret else None
         )
         pull_policy = (getattr(self._cfg, "K8S_SANDBOX_IMAGE_PULL_POLICY", None) or "Never").strip()
+        startup_cmd = list(config.startup_command or []) or None
+        readiness_port = int(config.readiness_tcp_port or 0) if config.readiness_tcp_port else 0
+        readiness_probe = None
+        if 1 <= readiness_port <= 65535:
+            readiness_probe = client.V1Probe(
+                tcp_socket=client.V1TCPSocketAction(port=readiness_port),
+                initial_delay_seconds=0,
+                period_seconds=1,
+                timeout_seconds=1,
+                failure_threshold=120,
+            )
 
         pod = client.V1Pod(
             metadata=client.V1ObjectMeta(
@@ -235,10 +267,11 @@ class K8sPodManager:
                         name=SANDBOX_CONTAINER_NAME,
                         image=config.image,
                         image_pull_policy=pull_policy or None,
-                        command=["/bin/bash"],
+                        command=startup_cmd or ["/bin/bash"],
                         stdin=True,
                         tty=True,
                         env=env_list or None,
+                        readiness_probe=readiness_probe,
                         ports=[
                             client.V1ContainerPort(container_port=int(p), name=f"p{int(p)}")
                             for p in guest_ports
@@ -268,7 +301,11 @@ class K8sPodManager:
             return None
 
         timeout_sec = float(getattr(self._cfg, "K8S_POD_READY_TIMEOUT_SEC", 180.0) or 180.0)
-        if not self._wait_pod_running(pod_name, timeout_sec=timeout_sec):
+        if startup_cmd:
+            ready_ok = self._wait_pod_phase_running(pod_name, timeout_sec=timeout_sec)
+        else:
+            ready_ok = self._wait_pod_running(pod_name, timeout_sec=timeout_sec)
+        if not ready_ok:
             self.kill_container(pod_name, force=True)
             return None
 
