@@ -93,11 +93,23 @@ class Config:
     TEMPLATE_BUILD_MEMORY: str = os.getenv("TEMPLATE_BUILD_MEMORY", "2g")
     # After settle, repeatedly run ``ready_cmd`` (shell) until exit 0 or this timeout (0 = skip).
     TEMPLATE_READY_TIMEOUT_SEC: int = int(os.getenv("TEMPLATE_READY_TIMEOUT_SEC", "600"))
-    # ``POST /templates/from-dockerfile`` — ``docker build`` wall-clock cap (``docker_cli`` mode only).
+    # ``POST /templates/from-dockerfile`` — real Docker Engine build wall-clock cap (``docker_cli`` mode).
     TEMPLATE_DOCKER_BUILD_TIMEOUT_SEC: int = int(os.getenv("TEMPLATE_DOCKER_BUILD_TIMEOUT_SEC", "3600"))
     # ``parsed`` (default): Dockerfile parsed → exec in build container → ``docker commit`` + warm snapshot.
-    # ``docker_cli``: legacy ``docker build`` on the API host.
+    # ``docker_cli``: Docker SDK build against the configured Docker Engine (local or remote ``DOCKER_HOST``).
     TEMPLATE_DOCKERFILE_BUILD_MODE: str = os.getenv("TEMPLATE_DOCKERFILE_BUILD_MODE", "parsed").strip().lower()
+    # Runtime-gateway architecture: forward template build execution to the gateway pod, where the
+    # resulting images persist in the same Docker graph used for sandbox creation.
+    TEMPLATE_BUILD_VIA_RUNTIME_GATEWAY: bool = _env_bool("TEMPLATE_BUILD_VIA_RUNTIME_GATEWAY", True)
+    RUNTIME_GATEWAY_URL: str = (
+        os.getenv("RUNTIME_GATEWAY_URL") or "http://runtime-gateway.sandboxes.svc.cluster.local:8080"
+    ).strip().rstrip("/")
+    RUNTIME_GATEWAY_API_KEY: str = (
+        os.getenv("RUNTIME_GATEWAY_API_KEY")
+        or os.getenv("CONTROL_PLANE_API_KEY")
+        or os.getenv("API_KEY")
+        or ""
+    ).strip()
     # Per-``RUN`` exec timeout during parsed Dockerfile builds.
     TEMPLATE_DOCKERFILE_RUN_TIMEOUT_SEC: float = float(os.getenv("TEMPLATE_DOCKERFILE_RUN_TIMEOUT_SEC", "7200"))
     # Docker SDK HTTP timeout (``docker commit`` on large images can exceed 60s default).
@@ -245,11 +257,11 @@ class Config:
     ENVD_DOCKERFILE_RESTORE_USER: str = (os.getenv("ENVD_DOCKERFILE_RESTORE_USER") or "auto").strip()
 
     # --- Service role (this tree is the control-plane ``api-service`` pod) ---
-    # ``control``: lifecycle + metadata only; data-plane traffic goes through ``proxy-service``.
+    # ``control``: lifecycle + metadata only; data-plane traffic goes through ``runtime-gateway``.
     # ``combined``: legacy single-process API + ingress middleware (not used in this deployment).
     API_SERVICE_ROLE: str = (os.getenv("API_SERVICE_ROLE") or "control").strip().lower()
 
-    # --- Data plane (client-facing URLs; resolved by proxy-service, not this pod) ---
+    # --- Data plane (client-facing URLs; resolved by runtime-gateway, not this pod) ---
     SANDBOX_DATA_PLANE_ENABLED: bool = _env_bool("SANDBOX_DATA_PLANE_ENABLED", True)
     SANDBOX_DATA_PLANE_DOMAIN: str = (
         os.getenv("SANDBOX_DATA_PLANE_DOMAIN") or "sndbx.com"

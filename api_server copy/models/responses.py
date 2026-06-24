@@ -122,7 +122,7 @@ class SandboxGuestConnectionResponse(BaseModel):
     sandbox_id: str
     guest_port: int = Field(..., description="Guest TCP port inside the sandbox")
     scheme: str = Field(..., description="``ws`` or ``http``")
-    url: str = Field(..., description="Client URL via proxy-service + ingress")
+    url: str = Field(..., description="Client URL via runtime-gateway + ingress")
     data_plane_host: str = Field(
         ...,
         description="Host authority for ``{port}-{sandbox_id}.{domain}`` routing",
@@ -138,7 +138,7 @@ class SandboxE2bConnectionResponse(BaseModel):
 
     sandbox_id: str = Field(..., description="Logical sandbox id")
     agent_port: int = Field(..., description="Guest WebSocket port (from request, not a default)")
-    ws_url: str = Field(..., description="Data-plane WebSocket URL via proxy-service")
+    ws_url: str = Field(..., description="Data-plane WebSocket URL via runtime-gateway")
     traffic_access_token: str = Field(..., description="Send as header ``e2b-traffic-access-token``")
     e2b_style_host: str = Field(..., description="Host authority for ingress routing")
 

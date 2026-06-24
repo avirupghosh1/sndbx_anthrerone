@@ -1,4 +1,4 @@
-"""Sandbox data-plane URL helpers and guest upstream resolution for proxy-service."""
+"""Sandbox data-plane URL helpers and guest upstream resolution for runtime-gateway."""
 
 from __future__ import annotations
 

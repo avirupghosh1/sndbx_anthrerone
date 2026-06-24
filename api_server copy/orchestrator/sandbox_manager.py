@@ -45,6 +45,10 @@ from .envd_template_bake import (
 from .firecracker_plane import FC_WARM_DOCKERLESS_MARKER
 from .lima_plane import LIMA_WARM_DOCKERLESS_MARKER
 from .template_image import resolve_sandbox_image
+from .runtime_gateway_templates import (
+    build_template_snapshot_via_gateway,
+    gateway_template_build_enabled,
+)
 from database import Database
 
 if TYPE_CHECKING:
@@ -198,7 +202,7 @@ class SandboxManager:
         return workload_blocker_message(self.execution)
 
     def get_e2b_agent_upstream_ws_uri(self, sandbox_id: str) -> Optional[str]:
-        """Deprecated on control-plane — clients use proxy-service data-plane URLs."""
+        """Deprecated on control-plane — clients use runtime-gateway data-plane URLs."""
         return None
 
     def get_traffic_access_token(self, sandbox_id: str) -> Optional[str]:
@@ -537,7 +541,7 @@ class SandboxManager:
         )
 
     def refresh_guest_routing_metadata(self, sandbox_id: str) -> None:
-        """Store upstream targets for proxy-service (K8s Service DNS or Docker bridge)."""
+        """Store upstream targets for runtime-gateway (K8s Service DNS or Docker bridge)."""
         from orchestrator.sandbox_connections import build_guest_routing_record, k8s_pod_service_host
 
         sid = (sandbox_id or "").strip()
@@ -973,6 +977,38 @@ class SandboxManager:
                     return True
 
             cfg = self._config
+            if gateway_template_build_enabled(cfg):
+                try:
+                    result = build_template_snapshot_via_gateway(
+                        cfg,
+                        template_id=template_id,
+                        base_image=str(row.get("base_image") or ""),
+                        env=dict(row.get("env") or {}),
+                        start_cmd=str(row.get("start_cmd") or ""),
+                        settle_seconds=int(row.get("settle_seconds") or 20),
+                        ready_cmd=str(row.get("ready_cmd") or ""),
+                        embed_envd=bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)),
+                        envd_pip_timeout_sec=float(
+                            getattr(cfg, "ENVD_BOOTSTRAP_PIP_TIMEOUT_SEC", 300.0) or 300.0
+                        ),
+                        snapshot_repo=str(
+                            getattr(cfg, "SANDBOX_SNAPSHOT_REPO", "mysandbox-snap") or "mysandbox-snap"
+                        ),
+                    )
+                except RuntimeError as ex:
+                    self.db.set_template_build_error(template_id, str(ex))
+                    return False
+                image_ref = str(result.get("image_ref") or "").strip()
+                if not image_ref:
+                    self.db.set_template_build_error(
+                        template_id, "runtime-gateway template snapshot produced no image"
+                    )
+                    return False
+                self.db.set_template_warm_snapshot(template_id, image_ref, None)
+                logger.info("Template %s warm snapshot (runtime-gateway): %s", template_id, image_ref)
+                self.sync_warm_pool_default_segment(template_id, image_ref)
+                return True
+
             name = f"tpl-build-{uuid.uuid4().hex[:10]}"
             env = dict(row.get("env") or {})
             build_timeout = max(int(row.get("settle_seconds") or 20) + 900, 1800)

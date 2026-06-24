@@ -24,6 +24,14 @@ In production there is no port-forward. The ingress is the only public entry poi
 - `api.<your-domain>` -> ingress public IP / LB
 - `*.<your-domain>` -> same ingress public IP / LB
 
+## Ingress requirements
+
+Any ingress/controller is fine if it preserves the request `Host` header, supports wildcard host routing,
+passes WebSocket upgrades through unchanged, and forwards traffic to:
+
+- `api.<your-domain>` -> `api-service`
+- `{port}-{sandbox_id}.<your-domain>` -> `runtime-gateway`
+
 ## Required secrets
 
 Create `sandbox-secrets` with at least:
@@ -40,8 +48,15 @@ Create `sandbox-secrets` with at least:
   This keeps runtime-gateway routing authoritative and avoids reconstructing upstreams inside the data plane.
 - `SANDBOX_LEASE_REAPER_INTERVAL_SEC=5`
   The API enforces TTL by killing expired sandboxes.
-- `TEMPLATE_DOCKERFILE_BUILD_MODE=parsed`
-  Template builds use the same remote Docker execution plane as sandbox creation so warm snapshots land in the runtime daemon image store.
+- `TEMPLATE_DOCKERFILE_BUILD_MODE=docker_cli`
+  Template builds run as real Docker Engine builds against the same runtime-gateway daemon used for sandbox execution, so large Dockerfiles use normal layer caching instead of parsed step replay.
+- `TEMPLATE_BUILD_VIA_RUNTIME_GATEWAY=true`
+  `api-service` keeps the public template API and SQLite metadata, but the actual template build and warm snapshot execution happen inside `runtime-gateway`.
+
+## Template Build Visibility
+
+For interactive builds, use `POST /templates/from-dockerfile/stream` on `api-service`.
+It streams Docker build logs from `runtime-gateway` as SSE and ends with the registered template payload.
 
 ## Architectural limit
 

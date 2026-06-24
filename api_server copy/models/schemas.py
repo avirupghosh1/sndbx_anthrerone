@@ -128,9 +128,10 @@ class RegisterTemplateFromDockerfileRequest(BaseModel):
     tag in ``warm_snapshot_image``. **Firecracker** sandboxes export that image to a host
     ``*.ext4`` (see ``docs/FIRECRACKER.md``) and store that path in ``warm_snapshot_image``.
 
-    **Legacy** (``TEMPLATE_DOCKERFILE_BUILD_MODE=docker_cli``): runs ``docker build`` on the host and
-    registers the produced tag. **Firecracker** again materializes ``warm_snapshot_image`` as an
-    ext4 path instead of the OCI tag.
+    **Recommended for remote runtimes** (``TEMPLATE_DOCKERFILE_BUILD_MODE=docker_cli``): the API uses
+    Docker SDK to send the full build context to the configured Docker Engine (including a remote
+    ``DOCKER_HOST`` such as the runtime-gateway dockerd), then registers the produced tag.
+    **Firecracker** again materializes ``warm_snapshot_image`` as an ext4 path instead of the OCI tag.
     """
 
     template_id: str = Field(

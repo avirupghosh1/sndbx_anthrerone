@@ -73,6 +73,11 @@ spec:
                 secretKeyRef:
                   name: sandbox-secrets
                   key: CONTROL_PLANE_API_KEY
+            - name: INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: CONTROL_PLANE_API_KEY
           readinessProbe:
             httpGet:
               path: /health
@@ -99,6 +104,8 @@ data:
   SANDBOX_INGRESS_DEBUG: "false"
   CONTROL_PLANE_URL: "http://api-service:8000"
   CONTROL_PLANE_TIMEOUT_SEC: "10"
+  DOCKER_HOST: "tcp://127.0.0.1:2375"
+  ENVD_EMBED_AT_TEMPLATE_BUILD: "true"
   UPSTREAM_RESOLVE_MODE: "control_plane"
   PORT: "8080"
   HOST: "0.0.0.0"

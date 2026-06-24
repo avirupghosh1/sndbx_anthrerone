@@ -5,3 +5,6 @@ sandboxes.db
 results.csv
 .venv
 minikube-linux-amd64
+__pycache__/
+*.pyc
+.pytest_cache/

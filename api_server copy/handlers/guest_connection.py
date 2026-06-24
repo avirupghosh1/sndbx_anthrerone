@@ -79,7 +79,7 @@ async def get_guest_connection(
     api_key: str = Depends(validate_api_key),
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
-    """Return data-plane URL + ``traffic_access_token`` for any guest port (via proxy-service)."""
+    """Return data-plane URL + ``traffic_access_token`` for any guest port (via runtime-gateway)."""
     return await _connection_for_port(
         sandbox_id=sandbox_id,
         port=port,

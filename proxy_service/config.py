@@ -33,7 +33,17 @@ class Config:
     # Control plane (api-service) for auth + lifecycle checks.
     CONTROL_PLANE_URL: str = (os.getenv("CONTROL_PLANE_URL") or "http://api-service:8000").strip().rstrip("/")
     CONTROL_PLANE_API_KEY: str = (os.getenv("CONTROL_PLANE_API_KEY") or os.getenv("API_KEY") or "").strip()
+    INTERNAL_API_KEY: str = (
+        os.getenv("INTERNAL_API_KEY")
+        or os.getenv("CONTROL_PLANE_API_KEY")
+        or os.getenv("API_KEY")
+        or ""
+    ).strip()
     CONTROL_PLANE_TIMEOUT_SEC: float = max(1.0, float(os.getenv("CONTROL_PLANE_TIMEOUT_SEC", "10")))
+    DOCKER_HOST: str = (os.getenv("DOCKER_HOST") or "tcp://127.0.0.1:2375").strip()
+    TEMPLATE_DOCKER_BUILD_TIMEOUT_SEC: int = int(os.getenv("TEMPLATE_DOCKER_BUILD_TIMEOUT_SEC", "3600"))
+    ENVD_EMBED_AT_TEMPLATE_BUILD: bool = _env_bool("ENVD_EMBED_AT_TEMPLATE_BUILD", True)
+    ENVD_DOCKERFILE_RESTORE_USER: str = (os.getenv("ENVD_DOCKERFILE_RESTORE_USER") or "auto").strip()
 
     # Legacy K8s direct-resolution settings. Runtime-gateway deployments should prefer
     # ``UPSTREAM_RESOLVE_MODE=control_plane`` and trust the route returned by api-service.

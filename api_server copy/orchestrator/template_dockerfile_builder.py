@@ -68,7 +68,7 @@ def _parse_env_like_line(value: str) -> Dict[str, str]:
 
 def _expand_vars(s: str, env: Dict[str, str]) -> str:
     def braced(m: re.Match[str]) -> str:
-        return env.get(m.group(1), "")
+        return env.get(m.group(1), m.group(0))
 
     s = re.sub(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}", braced, s)
 
@@ -387,8 +387,19 @@ def apply_dockerfile_inside_container(
                     logs.append(f"{instr} {src!r} -> {dest_root!r} (context tree)")
                     continue
 
-                if hp.is_dir() and _dest_wants_dir_contents(dest, src_stripped):
-                    dest_root = resolve_dest_path(dest.rstrip("/") if dest.rstrip().endswith("/") else dest)
+                if hp.is_dir():
+                    # Docker copies directory *contents* into the destination path for
+                    # ``COPY dir /dst`` and ``COPY dir/ /dst``. Only multi-source COPY
+                    # targets preserve each source basename under the destination dir.
+                    if len(sources) > 1:
+                        dest_root = os.path.join(
+                            resolve_dest_path(dest.rstrip("/")),
+                            os.path.basename(str(hp)),
+                        )
+                    else:
+                        dest_root = resolve_dest_path(
+                            dest.rstrip("/") if dest.rstrip().endswith("/") else dest
+                        )
                     _put_tree_from_dir(hp, dest_root, label=src_stripped)
                     continue
 

@@ -1,9 +1,11 @@
 """Logical sandbox templates (Docker): base image + env + start_cmd + one-time warm snapshot."""
 
 import base64
+import json
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from typing import List
 
 from async_runner import run_io
@@ -12,6 +14,11 @@ from models import RegisterTemplateFromDockerfileRequest, RegisterTemplateReques
 from models.responses import TemplateDefinitionResponse
 from middleware import validate_api_key
 from orchestrator import SandboxManager
+from orchestrator.runtime_gateway_templates import (
+    build_dockerfile_template_via_gateway,
+    gateway_template_build_enabled,
+    stream_dockerfile_template_via_gateway,
+)
 from orchestrator.sandbox_manager import ENVD_TEMPLATE_BAKED_ENV
 from orchestrator.template_docker_build import build_image_from_dockerfile
 
@@ -110,6 +117,45 @@ async def register_template_from_dockerfile(
 
     cfg = get_config()
     mode = (cfg.TEMPLATE_DOCKERFILE_BUILD_MODE or "parsed").strip().lower()
+    if gateway_template_build_enabled(cfg):
+        try:
+            build_res = await run_io(
+                build_dockerfile_template_via_gateway,
+                cfg,
+                template_id=tid,
+                dockerfile=request.dockerfile,
+                image_tag=request.image_tag,
+                build_args=request.build_args,
+                context_tar_gzip_base64=request.context_tar_gzip_base64,
+                build_mode=mode,
+                embed_envd=bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)),
+            )
+        except RuntimeError as ex:
+            raise HTTPException(status_code=400, detail=str(ex)) from ex
+
+        tag = str(build_res.get("image_tag") or "").strip()
+        if not tag:
+            raise HTTPException(status_code=400, detail="runtime-gateway build produced no image tag")
+        reg_env, reg_start = _fields_from_dockerfile_request(
+            request.dockerfile,
+            request.env,
+            request.start_cmd or "",
+        )
+        if bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)):
+            reg_env[ENVD_TEMPLATE_BAKED_ENV] = "1"
+        row = await run_io(
+            sandbox_manager.db.upsert_sandbox_template,
+            tid,
+            tag,
+            reg_env,
+            reg_start,
+            int(request.settle_seconds),
+            (request.ready_cmd or "").strip(),
+        )
+        await run_io(sandbox_manager.db.set_template_warm_snapshot, tid, tag, None)
+        await run_io(sandbox_manager.sync_warm_pool_default_segment, tid, tag)
+        return TemplateDefinitionResponse(**_row_to_response(row))
+
     if mode != "docker_cli" and not ctx:
         if re.search(r"^\s*COPY\s", request.dockerfile, re.I | re.M) or re.search(
             r"^\s*ADD\s+(?!https?://)", request.dockerfile, re.I | re.M
@@ -228,6 +274,65 @@ async def register_template_from_dockerfile(
     except RuntimeError as ex:
         raise HTTPException(status_code=400, detail=str(ex)) from ex
     return TemplateDefinitionResponse(**_row_to_response(row))
+
+
+@router.post("/from-dockerfile/stream")
+async def register_template_from_dockerfile_stream(
+    request: RegisterTemplateFromDockerfileRequest,
+    api_key: str = Depends(validate_api_key),
+    sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
+):
+    del api_key
+    cfg = get_config()
+    if not gateway_template_build_enabled(cfg):
+        raise HTTPException(
+            status_code=400,
+            detail="Streaming template build requires TEMPLATE_BUILD_VIA_RUNTIME_GATEWAY=true",
+        )
+    tid = _validate_template_id(request.template_id)
+    mode = (cfg.TEMPLATE_DOCKERFILE_BUILD_MODE or "parsed").strip().lower()
+
+    async def _events():
+        try:
+            async for event in stream_dockerfile_template_via_gateway(
+                cfg,
+                template_id=tid,
+                dockerfile=request.dockerfile,
+                image_tag=request.image_tag,
+                build_args=request.build_args,
+                context_tar_gzip_base64=request.context_tar_gzip_base64,
+                build_mode=mode,
+                embed_envd=bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)),
+            ):
+                if event.get("type") == "result":
+                    tag = str(event.get("image_tag") or "").strip()
+                    reg_env, reg_start = _fields_from_dockerfile_request(
+                        request.dockerfile,
+                        request.env,
+                        request.start_cmd or "",
+                    )
+                    if bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)):
+                        reg_env[ENVD_TEMPLATE_BAKED_ENV] = "1"
+                    row = await run_io(
+                        sandbox_manager.db.upsert_sandbox_template,
+                        tid,
+                        tag,
+                        reg_env,
+                        reg_start,
+                        int(request.settle_seconds),
+                        (request.ready_cmd or "").strip(),
+                    )
+                    await run_io(sandbox_manager.db.set_template_warm_snapshot, tid, tag, None)
+                    await run_io(sandbox_manager.sync_warm_pool_default_segment, tid, tag)
+                    event = {
+                        "type": "registered",
+                        "template": _row_to_response(row),
+                    }
+                yield f"data: {json.dumps(event, ensure_ascii=True)}\n\n"
+        except Exception as ex:  # noqa: BLE001
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(ex)}, ensure_ascii=True)}\n\n"
+
+    return StreamingResponse(_events(), media_type="text/event-stream")
 
 
 @router.get("", response_model=List[TemplateDefinitionResponse])

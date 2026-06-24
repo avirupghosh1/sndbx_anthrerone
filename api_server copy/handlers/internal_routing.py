@@ -1,4 +1,4 @@
-"""Internal routing registry for proxy-service (control plane → guest upstream)."""
+"""Internal routing registry for runtime-gateway (control plane -> guest upstream)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ async def get_sandbox_route(
     api_key: str = Depends(validate_api_key),
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
-    """Return dialable upstream for proxy-service. Not for SDK clients — use data-plane hostnames."""
+    """Return dialable upstream for runtime-gateway. Not for SDK clients; use data-plane hostnames."""
     sid = sandbox_id.strip()
     row = await run_io(sandbox_manager.get_sandbox, sid)
     if not row:

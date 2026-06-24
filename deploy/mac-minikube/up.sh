@@ -19,6 +19,10 @@
 #        SANDBOX_DATA_PLANE_URL=http://127.0.0.1:18080
 #        SANDBOX_INGRESS_DEBUG=false
 #        kubectl port-forward -n sandboxes svc/runtime-gateway 18080:8080
+#   5. Production-style local ingress mode (additional mode; direct port-forwards still work):
+#        ./deploy/mac-minikube/enable-ingress-domain.sh
+#        export SANDBOX_API_URL=http://api.127-0-0-1.sslip.io
+#        unset SANDBOX_DATA_PLANE_URL
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -46,7 +50,7 @@ minikube addons enable ingress
 echo "==> Building images inside minikube Docker"
 eval "$(minikube docker-env)"
 docker build -t api-service:latest -f "$API_DIR/Dockerfile.api-service" "$API_DIR"
-docker build -t runtime-gateway:latest -f "$PROXY_DIR/Dockerfile" "$PROXY_DIR"
+docker build -t runtime-gateway:latest -f "$PROXY_DIR/Dockerfile" "$ROOT"
 
 echo "==> Applying Kubernetes manifests"
 kubectl apply -f "$API_DIR/deploy/k8s/api-service.yaml"
@@ -60,6 +64,13 @@ kubectl rollout status deployment/runtime-gateway -n sandboxes --timeout=180s
 
 echo ""
 kubectl get pods,svc,ingress -n sandboxes
+echo ""
+echo "Direct local mode remains:"
+echo "  api   -> kubectl port-forward -n sandboxes svc/api-service 8001:8000"
+echo "  data  -> kubectl port-forward -n sandboxes svc/runtime-gateway 18080:8080"
+echo ""
+echo "Production-style ingress mode:"
+echo "  ./deploy/mac-minikube/enable-ingress-domain.sh"
 echo ""
 
 if ! grep -q 'api\.sndbx\.com' /etc/hosts 2>/dev/null; then

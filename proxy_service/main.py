@@ -16,6 +16,7 @@ from starlette.routing import Route
 
 from config import get_config
 from middleware import SandboxDataPlaneMiddleware
+from template_routes import build_dockerfile, build_dockerfile_stream, build_template_snapshot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,6 +51,9 @@ async def root(_request: Request) -> JSONResponse:
 routes = [
     Route("/health", health),
     Route("/", root),
+    Route("/internal/templates/build/dockerfile", build_dockerfile, methods=["POST"]),
+    Route("/internal/templates/build/dockerfile/stream", build_dockerfile_stream, methods=["POST"]),
+    Route("/internal/templates/build/snapshot", build_template_snapshot, methods=["POST"]),
 ]
 
 app = Starlette(routes=routes)
