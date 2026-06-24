@@ -1,4 +1,4 @@
-"""Sandbox data-plane proxy-service (Kubernetes + nginx ingress)."""
+"""Sandbox data-plane gateway (standalone proxy-service or runtime-gateway sidecar)."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ async def health(_request: Request) -> JSONResponse:
     return JSONResponse(
         {
             "status": "ok",
-            "role": "proxy-service",
+            "role": "runtime-gateway",
             "sandbox_domain": cfg.SANDBOX_DOMAIN,
             "upstream_resolve_mode": cfg.UPSTREAM_RESOLVE_MODE,
             "control_plane_url": cfg.CONTROL_PLANE_URL,
@@ -40,7 +40,7 @@ async def health(_request: Request) -> JSONResponse:
 async def root(_request: Request) -> JSONResponse:
     return JSONResponse(
         {
-            "message": "Sandbox data-plane proxy",
+            "message": "Sandbox data-plane gateway",
             "health": "/health",
             "routing": "{port}-{sandbox_id}." + get_config().SANDBOX_DOMAIN,
         }

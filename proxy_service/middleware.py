@@ -5,7 +5,7 @@ from __future__ import annotations
 import hmac
 import logging
 from typing import Dict, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from starlette.requests import Request
@@ -45,6 +45,8 @@ class SandboxDataPlaneMiddleware:
             sandbox_id_header=sandbox_id_hdr,
             guest_port_header=guest_port_hdr,
         )
+        if not parsed:
+            parsed = _parse_local_query_route(scope, host)
         if not parsed:
             await self.app(scope, receive, send)
             return
@@ -211,6 +213,27 @@ def _layer2_deny(cfg, headers: Dict[str, str]) -> Optional[Tuple[int, str]]:
     if not hmac.compare_digest(provided, expected):
         return 401, "invalid X-Access-Token"
     return None
+
+
+def _parse_local_query_route(scope: Scope, host_header: str) -> Optional[Tuple[int, str]]:
+    """Route localhost port-forward traffic that encodes sandbox identity in query params."""
+    host = (host_header or "").split(",")[0].strip().lower()
+    if ":" in host and not host.startswith("["):
+        host = host.rpartition(":")[0]
+    if host not in ("127.0.0.1", "localhost", "::1", "[::1]"):
+        return None
+    raw_qs = (scope.get("query_string") or b"").decode("latin-1")
+    if not raw_qs:
+        return None
+    params = parse_qs(raw_qs, keep_blank_values=False)
+    sid = ((params.get("sandbox_id") or [""])[0]).strip()
+    port_s = ((params.get("guest_port") or params.get("port") or [""])[0]).strip()
+    if not sid or not port_s.isdigit():
+        return None
+    guest_port = int(port_s)
+    if not (1 <= guest_port <= 65535):
+        return None
+    return guest_port, sid
 
 
 def _layer3_deny(route: SandboxRoute, headers: Dict[str, str]) -> Optional[Tuple[int, str]]:

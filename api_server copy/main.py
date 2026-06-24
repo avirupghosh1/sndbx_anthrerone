@@ -91,6 +91,7 @@ async def health_check():
         "version": config.API_VERSION,
         "api_service_role": getattr(config, "API_SERVICE_ROLE", "control"),
         "sandbox_runtime": sm.get_execution_kind() if sm else None,
+        "docker_host": getattr(config, "DOCKER_HOST", None),
     }
     if sm is not None:
         blocker = sm.describe_docker_workload_blocker()
@@ -126,10 +127,10 @@ async def startup_event():
     logger.info(f"API Key: {config.API_KEY}")
     logger.info(f"Database: {config.DATABASE_PATH}")
     logger.info(f"Execution plane: {sandbox_manager.get_execution_kind()}")
+    logger.info("Docker host: %s", getattr(config, "DOCKER_HOST", "") or "<default local engine>")
     wp = getattr(sandbox_manager, "warm_pool", None)
     if wp is not None:
         logger.info("Warm sandbox pool: %s", wp.stats())
-    logger.info(f"K8s namespace: {getattr(config, 'K8S_NAMESPACE', 'sandboxes')}")
     logger.info(f"Data plane domain: {getattr(config, 'SANDBOX_DATA_PLANE_DOMAIN', 'sndbx.com')}")
     hint = sandbox_manager.describe_docker_workload_blocker()
     if hint:
@@ -147,6 +148,10 @@ async def shutdown_event():
             wp.stop()
         except Exception as ex:  # noqa: BLE001
             logger.warning("Warm pool stop: %s", ex)
+    try:
+        sandbox_manager.stop_background_work()
+    except Exception as ex:  # noqa: BLE001
+        logger.warning("Background worker stop: %s", ex)
 
     # Cleanup agents
     all_agents = agent_runtime.list_agents()

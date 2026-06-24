@@ -1,4 +1,4 @@
-"""Configuration for the sandbox data-plane proxy-service (Kubernetes)."""
+"""Configuration for the sandbox data-plane gateway."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 class Config:
-    """proxy-service settings."""
+    """Runtime gateway / proxy-service settings."""
 
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8080"))
@@ -35,14 +35,14 @@ class Config:
     CONTROL_PLANE_API_KEY: str = (os.getenv("CONTROL_PLANE_API_KEY") or os.getenv("API_KEY") or "").strip()
     CONTROL_PLANE_TIMEOUT_SEC: float = max(1.0, float(os.getenv("CONTROL_PLANE_TIMEOUT_SEC", "10")))
 
-    # Kubernetes: one pod per sandbox, guest port == containerPort (no Docker publish mapping).
+    # Legacy K8s direct-resolution settings. Runtime-gateway deployments should prefer
+    # ``UPSTREAM_RESOLVE_MODE=control_plane`` and trust the route returned by api-service.
     K8S_NAMESPACE: str = (os.getenv("K8S_NAMESPACE") or "sandboxes").strip()
-    # Headless Service DNS per sandbox pod, e.g. ``sandbox-sb-abc123.sandboxes.svc.cluster.local``.
     K8S_POD_SERVICE_TEMPLATE: str = (
         os.getenv("K8S_POD_SERVICE_TEMPLATE") or "sandbox-{sandbox_id}.{namespace}.svc.cluster.local"
     ).strip()
 
-    # ``k8s_dns``: dial pod Service at guest port (default on Linux K8s).
+    # ``k8s_dns``: reconstruct K8s pod/service upstreams locally.
     # ``control_plane``: use ``upstream_http`` from api-service ``/internal/.../route``.
     UPSTREAM_RESOLVE_MODE: str = (os.getenv("UPSTREAM_RESOLVE_MODE") or "k8s_dns").strip().lower()
 

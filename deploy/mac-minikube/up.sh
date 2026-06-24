@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy api-service + proxy-service + HTTP ingress on Mac minikube.
+# Deploy api-service + runtime-gateway + HTTP ingress on Mac minikube.
 #
 # Prerequisites: minikube, kubectl, docker (minikube driver or eval minikube docker-env)
 #
@@ -16,13 +16,15 @@
 #        SANDBOX_INGRESS_DEBUG=false
 #   4. Custodian direct mode (api on Mac :8001, pods still in cluster):
 #        SANDBOX_API_URL=http://127.0.0.1:8001
-#        SANDBOX_DATA_PLANE_URL=http://127.0.0.1
+#        SANDBOX_DATA_PLANE_URL=http://127.0.0.1:18080
 #        SANDBOX_INGRESS_DEBUG=false
+#        kubectl port-forward -n sandboxes svc/runtime-gateway 18080:8080
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 API_DIR="$ROOT/api_server copy"
 PROXY_DIR="$ROOT/proxy_service"
+RUNTIME_DIR="$ROOT/deploy/runtime-gateway"
 START_TUNNEL=false
 
 for arg in "$@"; do
@@ -41,23 +43,20 @@ minikube start --cpus=2 --memory=4096 2>/dev/null || minikube start
 echo "==> Enabling ingress addon"
 minikube addons enable ingress
 
-echo "==> Enabling registry addon (required for Kaniko template builds)"
-minikube addons enable registry
-
 echo "==> Building images inside minikube Docker"
 eval "$(minikube docker-env)"
 docker build -t api-service:latest -f "$API_DIR/Dockerfile.api-service" "$API_DIR"
-docker build -t proxy-service:latest -f "$PROXY_DIR/Dockerfile" "$PROXY_DIR"
+docker build -t runtime-gateway:latest -f "$PROXY_DIR/Dockerfile" "$PROXY_DIR"
 
 echo "==> Applying Kubernetes manifests"
 kubectl apply -f "$API_DIR/deploy/k8s/api-service.yaml"
 kubectl apply -f "$API_DIR/deploy/k8s/secrets.yaml"
-kubectl apply -f "$PROXY_DIR/deploy/k8s/proxy-service.yaml"
-kubectl apply -f "$PROXY_DIR/deploy/k8s/ingress-http-minikube.yaml"
+kubectl apply -f "$RUNTIME_DIR/runtime-gateway.yaml"
+kubectl apply -f "$RUNTIME_DIR/ingress-http-minikube.yaml"
 
 echo "==> Waiting for deployments"
 kubectl rollout status deployment/api-service -n sandboxes --timeout=180s
-kubectl rollout status deployment/proxy-service -n sandboxes --timeout=180s
+kubectl rollout status deployment/runtime-gateway -n sandboxes --timeout=180s
 
 echo ""
 kubectl get pods,svc,ingress -n sandboxes

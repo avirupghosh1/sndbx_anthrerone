@@ -2,9 +2,13 @@
 
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from threading import Lock
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class Database:
@@ -17,6 +21,10 @@ class Database:
         if "runtime" not in cols:
             cursor.execute(
                 "ALTER TABLE sandboxes ADD COLUMN runtime TEXT NOT NULL DEFAULT 'docker'"
+            )
+        if "lease_expires_at" not in cols:
+            cursor.execute(
+                "ALTER TABLE sandboxes ADD COLUMN lease_expires_at TEXT"
             )
 
     @staticmethod
@@ -50,7 +58,8 @@ class Database:
                     metadata TEXT,
                     cpu_limit TEXT,
                     memory_limit TEXT,
-                    timeout INTEGER
+                    timeout INTEGER,
+                    lease_expires_at TEXT
                 )
             """)
 
@@ -155,7 +164,10 @@ class Database:
         runtime: str = "docker",
     ) -> Dict[str, Any]:
         """Create sandbox record."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now_iso()
+        lease_expires_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=max(60, int(timeout)))
+        ).isoformat().replace("+00:00", "Z")
         metadata_json = json.dumps(metadata or {})
 
         with self._lock:
@@ -164,8 +176,8 @@ class Database:
 
             cursor.execute("""
                 INSERT INTO sandboxes
-                (sandbox_id, container_id, state, template_id, created_at, updated_at, metadata, cpu_limit, memory_limit, timeout, runtime)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (sandbox_id, container_id, state, template_id, created_at, updated_at, metadata, cpu_limit, memory_limit, timeout, lease_expires_at, runtime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 sandbox_id,
                 container_id,
@@ -177,6 +189,7 @@ class Database:
                 cpu_limit,
                 memory_limit,
                 timeout,
+                lease_expires_at,
                 runtime,
             ))
 
@@ -227,7 +240,7 @@ class Database:
 
     def update_sandbox_state(self, sandbox_id: str, state: str) -> bool:
         """Update sandbox state."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now_iso()
 
         with self._lock:
             conn = sqlite3.connect(self.db_path)
@@ -247,7 +260,7 @@ class Database:
         """Merge ``updates`` into existing JSON metadata (and strip internal ``_warm_pool`` flag)."""
         if updates is None:
             updates = {}
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now_iso()
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -269,19 +282,44 @@ class Database:
         return rowcount > 0
 
     def update_sandbox_timeout(self, sandbox_id: str, timeout_seconds: int) -> bool:
-        """Update recorded sandbox lease timeout (seconds)."""
-        now = datetime.utcnow().isoformat() + "Z"
+        """Update recorded sandbox lease timeout (seconds) and extend the lease from now."""
+        now = _utc_now_iso()
+        lease_expires_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=max(60, int(timeout_seconds)))
+        ).isoformat().replace("+00:00", "Z")
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE sandboxes SET timeout = ?, updated_at = ? WHERE sandbox_id = ?",
-                (int(timeout_seconds), now, sandbox_id),
+                "UPDATE sandboxes SET timeout = ?, lease_expires_at = ?, updated_at = ? WHERE sandbox_id = ?",
+                (int(timeout_seconds), lease_expires_at, now, sandbox_id),
             )
             n = cursor.rowcount
             conn.commit()
             conn.close()
         return n > 0
+
+    def list_expired_sandboxes(self, now_iso: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return running sandboxes whose lease has elapsed."""
+        cutoff = now_iso or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM sandboxes
+                WHERE state = 'running'
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at <= ?
+                ORDER BY lease_expires_at ASC
+                LIMIT ?
+                """,
+                (cutoff, int(limit)),
+            )
+            rows = cursor.fetchall()
+            out = [self._sandbox_dict_from_row(cursor, row) for row in rows]
+            conn.close()
+        return out
 
     def delete_sandbox(self, sandbox_id: str) -> bool:
         """Delete sandbox."""
@@ -316,7 +354,7 @@ class Database:
         image_ref: str,
         label: Optional[str],
     ) -> Dict[str, Any]:
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now_iso()
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -391,7 +429,7 @@ class Database:
         ready_cmd: str = "",
     ) -> Dict[str, Any]:
         """Register or replace a logical template (Docker: used for one-time warm snapshot build)."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now_iso()
         env_json = json.dumps(env or {})
         settle_seconds = max(0, min(int(settle_seconds), 600))
         ready_cmd = (ready_cmd or "").strip()
@@ -452,7 +490,7 @@ class Database:
         image_ref: str,
         build_error: Optional[str] = None,
     ) -> bool:
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now_iso()
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -470,7 +508,7 @@ class Database:
         return n > 0
 
     def set_template_build_error(self, template_id: str, message: str) -> bool:
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now_iso()
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -504,7 +542,7 @@ class Database:
         config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create agent record."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now_iso()
         config_json = json.dumps(config or {})
 
         with self._lock:
@@ -583,7 +621,7 @@ class Database:
 
     def update_agent_state(self, agent_id: str, state: str) -> bool:
         """Update agent state."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now_iso()
 
         with self._lock:
             conn = sqlite3.connect(self.db_path)
@@ -601,7 +639,7 @@ class Database:
 
     def update_agent_heartbeat(self, agent_id: str) -> bool:
         """Update agent heartbeat."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now_iso()
 
         with self._lock:
             conn = sqlite3.connect(self.db_path)
@@ -639,7 +677,7 @@ class Database:
         content: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Add agent message."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now_iso()
         content_json = json.dumps(content)
 
         with self._lock:
@@ -718,7 +756,7 @@ class Database:
         execution_time: float,
     ) -> bool:
         """Add command to history."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now_iso()
 
         with self._lock:
             conn = sqlite3.connect(self.db_path)

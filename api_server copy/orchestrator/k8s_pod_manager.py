@@ -334,7 +334,21 @@ class K8sPodManager:
             exec_cmd = ["/bin/sh", "-c", f"cd {shlex.quote(cwd)} && {command}"]
         if user == "root":
             inner = exec_cmd[-1]
-            exec_cmd = ["/bin/sh", "-c", f"exec sudo -E -n sh -c {shlex.quote(inner)}"]
+            inner_q = shlex.quote(inner)
+            exec_cmd = [
+                "/bin/sh",
+                "-c",
+                (
+                    'if [ "$(id -u)" = "0" ]; then '
+                    f"exec /bin/sh -c {inner_q}; "
+                    "elif command -v sudo >/dev/null 2>&1; then "
+                    f"exec sudo -E -n sh -c {inner_q}; "
+                    "else "
+                    "echo 'root exec requested but sudo is unavailable and current user is not root' >&2; "
+                    "exit 1; "
+                    "fi"
+                ),
+            ]
         elif user:
             inner = exec_cmd[-1]
             target = shlex.quote(user)

@@ -28,6 +28,14 @@ logger = logging.getLogger(__name__)
 PoolKey = Tuple[str, str, str, int]
 
 
+def _compatible_pool_shape(
+    template_id: str,
+    cpu_limit: str,
+    memory_limit: str,
+) -> tuple[str, str, str]:
+    return (template_id.strip(), str(cpu_limit), str(memory_limit))
+
+
 class WarmSandboxPool:
     """Maintains ``pool_size`` idle sandboxes for one (template_id, cpu, mem, timeout) profile."""
 
@@ -134,7 +142,7 @@ class WarmSandboxPool:
             return None
         if template_id.strip() != self._logical_template_id:
             return None
-        if str(cpu_limit) != self._cpu or str(memory_limit) != self._mem or int(timeout) != int(self._timeout):
+        if str(cpu_limit) != self._cpu or str(memory_limit) != self._mem:
             return None
         with self._lock:
             if not self._available:
@@ -149,6 +157,7 @@ class WarmSandboxPool:
             prev.pop("_warm_pool", None)
             merged = {**prev, **merged}
         self._manager.db.merge_sandbox_metadata(sid, merged)
+        self._manager.db.update_sandbox_timeout(sid, int(timeout))
         logger.info("Warm pool: handed sandbox %s (template=%s)", sid, self._logical_template_id)
         return sid
 
@@ -277,6 +286,7 @@ class MultiWarmSandboxPool:
     ) -> None:
         if self._size <= 0:
             return
+        wanted_shape = _compatible_pool_shape(logical_template_id, cpu_limit, memory_limit)
         key: PoolKey = (
             logical_template_id.strip(),
             str(cpu_limit),
@@ -292,6 +302,11 @@ class MultiWarmSandboxPool:
                 cur = self._pools.get(key)
                 if cur is not None and cur.from_snapshot_image == snap:
                     return
+                for existing_key, existing_pool in self._pools.items():
+                    if _compatible_pool_shape(*existing_key[:3]) != wanted_shape:
+                        continue
+                    if existing_pool.from_snapshot_image == snap:
+                        return
                 if cur is not None:
                     del self._pools[key]
                     old = cur
@@ -329,6 +344,12 @@ class MultiWarmSandboxPool:
         )
         with self._pools_lock:
             pool = self._pools.get(key)
+            if pool is None:
+                want_shape = _compatible_pool_shape(template_id, cpu_limit, memory_limit)
+                for existing_key, existing_pool in self._pools.items():
+                    if _compatible_pool_shape(*existing_key[:3]) == want_shape:
+                        pool = existing_pool
+                        break
         if pool is None:
             return None
         return pool.try_acquire(template_id, metadata, cpu_limit, memory_limit, timeout)

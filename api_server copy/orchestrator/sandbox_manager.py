@@ -94,6 +94,8 @@ class SandboxManager:
         self._sandbox_io_locks: Dict[str, threading.Lock] = {}
         self._template_build_guard = threading.Lock()
         self._template_build_locks: Dict[str, threading.Lock] = {}
+        self._lease_reaper_stop = threading.Event()
+        self._lease_reaper_thread: Optional[threading.Thread] = None
         self.warm_pool: Optional[Any] = None
         try:
             cfg = self._config
@@ -110,12 +112,59 @@ class SandboxManager:
                 self.warm_pool.start()
         except Exception as ex:  # noqa: BLE001
             logger.warning("Warm sandbox pool not started: %s", ex)
+        try:
+            self._start_lease_reaper()
+        except Exception as ex:  # noqa: BLE001
+            logger.warning("Sandbox lease reaper not started: %s", ex)
 
     def _template_lock(self, template_id: str) -> threading.Lock:
         with self._template_build_guard:
             if template_id not in self._template_build_locks:
                 self._template_build_locks[template_id] = threading.Lock()
             return self._template_build_locks[template_id]
+
+    def _start_lease_reaper(self) -> None:
+        if self._lease_reaper_thread and self._lease_reaper_thread.is_alive():
+            return
+        self._lease_reaper_stop.clear()
+        self._lease_reaper_thread = threading.Thread(
+            target=self._lease_reaper_loop,
+            name="sandbox-lease-reaper",
+            daemon=True,
+        )
+        self._lease_reaper_thread.start()
+
+    def stop_background_work(self, timeout: float = 5.0) -> None:
+        self._lease_reaper_stop.set()
+        if self._lease_reaper_thread and self._lease_reaper_thread.is_alive():
+            self._lease_reaper_thread.join(timeout=timeout)
+
+    def _lease_reaper_loop(self) -> None:
+        interval = max(
+            1.0,
+            float(getattr(self._config, "SANDBOX_LEASE_REAPER_INTERVAL_SEC", 5.0) or 5.0),
+        )
+        while not self._lease_reaper_stop.wait(interval):
+            try:
+                self.reap_expired_sandboxes(limit=100)
+            except Exception as ex:  # noqa: BLE001
+                logger.warning("Sandbox lease reaper cycle failed: %s", ex)
+
+    def reap_expired_sandboxes(self, limit: int = 100) -> int:
+        expired = self.db.list_expired_sandboxes(limit=limit)
+        reaped = 0
+        for row in expired:
+            sid = str(row.get("sandbox_id") or "").strip()
+            if not sid:
+                continue
+            logger.info(
+                "Sandbox lease expired: sandbox_id=%s lease_expires_at=%s",
+                sid,
+                row.get("lease_expires_at"),
+            )
+            if self.kill_sandbox(sid, force=True):
+                reaped += 1
+        return reaped
 
     def discard_from_warm_pool(self, sandbox_id: str) -> None:
         """If ``sandbox_id`` was sitting in the warm deque, remove it (e.g. before kill)."""
@@ -1649,6 +1698,7 @@ class SandboxManager:
             "timeout_seconds": int(sandbox["timeout"])
             if sandbox.get("timeout") is not None
             else None,
+            "lease_expires_at": sandbox.get("lease_expires_at"),
         }
 
     def refresh_sandbox_timeout(self, sandbox_id: str, timeout_seconds: int) -> bool:

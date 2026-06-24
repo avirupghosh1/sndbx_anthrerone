@@ -106,17 +106,23 @@ def build_with_kaniko(
     pull_ref = f"{pull_reg}/{tag}"
     
     job_name = job_id
+    cfg = get_config()
+    api_key_secret_name = (getattr(cfg, "KANIKO_API_KEY_SECRET_NAME", "") or "sandbox-secrets").strip()
+    api_key_secret_key = (getattr(cfg, "KANIKO_API_KEY_SECRET_KEY", "") or "API_KEY").strip()
+    job_timeout_sec = max(60, int(getattr(cfg, "KANIKO_JOB_TIMEOUT_SEC", 1800) or 1800))
     
     init_cmd = (
-        f"apk add --no-cache curl tar && "
-        f"curl -sSf http://{api_service_host}/internal/contexts/{job_id} -o /tmp/ctx.tar.gz && "
-        f"tar -xzf /tmp/ctx.tar.gz -C /workspace"
+        "apk add --no-cache curl tar && "
+        f"curl -sSf -H \"X-API-Key: $API_KEY\" http://{api_service_host}/internal/contexts/{job_id} -o /tmp/ctx.tar.gz && "
+        "tar -xzf /tmp/ctx.tar.gz -C /workspace"
     )
     
     job_spec = client.V1Job(
         metadata=client.V1ObjectMeta(name=job_name, namespace=namespace),
         spec=client.V1JobSpec(
             backoff_limit=0,
+            ttl_seconds_after_finished=300,
+            active_deadline_seconds=job_timeout_sec,
             template=client.V1PodTemplateSpec(
                 metadata=client.V1ObjectMeta(labels={"app": "kaniko-builder"}),
                 spec=client.V1PodSpec(
@@ -126,6 +132,17 @@ def build_with_kaniko(
                             name="fetch-context",
                             image="alpine:3.19",
                             command=["sh", "-c", init_cmd],
+                            env=[
+                                client.V1EnvVar(
+                                    name="API_KEY",
+                                    value_from=client.V1EnvVarSource(
+                                        secret_key_ref=client.V1SecretKeySelector(
+                                            name=api_key_secret_name,
+                                            key=api_key_secret_key,
+                                        )
+                                    ),
+                                )
+                            ],
                             volume_mounts=[
                                 client.V1VolumeMount(name="workspace", mount_path="/workspace")
                             ]
@@ -165,7 +182,8 @@ def build_with_kaniko(
         raise RuntimeError(f"Failed to create Kaniko job: {e}")
         
     try:
-        for _ in range(300):
+        poll_count = max(30, int(job_timeout_sec / 2))
+        for _ in range(poll_count):
             job = batch_api.read_namespaced_job_status(name=job_name, namespace=namespace)
             if job.status.succeeded:
                 try:
@@ -180,7 +198,7 @@ def build_with_kaniko(
             if job.status.failed:
                 raise RuntimeError(f"Kaniko job failed: {job.status.conditions}")
             time.sleep(2)
-        raise RuntimeError("Kaniko job timed out after 10 minutes")
+        raise RuntimeError(f"Kaniko job timed out after {job_timeout_sec} seconds")
     finally:
         if os.path.exists(context_path):
             os.remove(context_path)

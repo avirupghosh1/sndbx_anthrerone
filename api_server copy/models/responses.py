@@ -11,6 +11,10 @@ class SandboxResponse(BaseModel):
     state: str = Field(..., description="Sandbox state")
     created_at: str = Field(..., description="Creation timestamp")
     updated_at: str = Field(..., description="Update timestamp")
+    lease_expires_at: Optional[str] = Field(
+        default=None,
+        description="Absolute UTC lease expiry timestamp used by the timeout reaper.",
+    )
     metadata: Optional[Dict[str, Any]] = Field(default={}, description="Custom metadata")
     container_id: Optional[str] = Field(default=None, description="Container ID")
     runtime: str = Field(
@@ -72,6 +76,10 @@ class SandboxLifecycleResponse(BaseModel):
     timeout_seconds: Optional[int] = Field(
         default=None,
         description="Recorded lease / wall-clock budget from create (refreshed via POST …/timeout).",
+    )
+    lease_expires_at: Optional[str] = Field(
+        default=None,
+        description="Absolute UTC lease expiry timestamp used by the timeout reaper.",
     )
 
 

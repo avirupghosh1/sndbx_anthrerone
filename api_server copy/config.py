@@ -60,6 +60,10 @@ class Config:
     DEFAULT_CPU_LIMIT: str = os.getenv("DEFAULT_CPU_LIMIT", "1")
     DEFAULT_MEMORY_LIMIT: str = os.getenv("DEFAULT_MEMORY_LIMIT", "512m")
     DEFAULT_TIMEOUT: int = int(os.getenv("DEFAULT_TIMEOUT", 3600))
+    SANDBOX_LEASE_REAPER_INTERVAL_SEC: float = max(
+        1.0,
+        float(os.getenv("SANDBOX_LEASE_REAPER_INTERVAL_SEC", "5")),
+    )
 
     # Warm pool: pre-create sandboxes matching this profile for faster POST /sandboxes (Docker or Firecracker engine).
     SANDBOX_WARM_POOL_SIZE: int = int(os.getenv("SANDBOX_WARM_POOL_SIZE", "0"))
@@ -304,6 +308,13 @@ class Config:
     KANIKO_API_SERVICE_HOST: str = (
         os.getenv("KANIKO_API_SERVICE_HOST") or "api-service.sandboxes.svc.cluster.local:8000"
     ).strip()
+    KANIKO_API_KEY_SECRET_NAME: str = (
+        os.getenv("KANIKO_API_KEY_SECRET_NAME") or "sandbox-secrets"
+    ).strip()
+    KANIKO_API_KEY_SECRET_KEY: str = (
+        os.getenv("KANIKO_API_KEY_SECRET_KEY") or "API_KEY"
+    ).strip()
+    KANIKO_JOB_TIMEOUT_SEC: int = max(60, int(os.getenv("KANIKO_JOB_TIMEOUT_SEC", "1800")))
 
     def is_k8s_runtime(self) -> bool:
         rt = (self.SANDBOX_RUNTIME or "").strip().lower()

@@ -1067,6 +1067,9 @@ class ContainerManager:
             container.remove()
             logger.info(f"Container killed: {container_id[:12]}")
             return True
+        except docker.errors.NotFound:
+            logger.info("Container already absent: %s", container_id[:12])
+            return True
 
         except Exception as e:
             logger.error(f"Failed to kill container {container_id}: {e}")

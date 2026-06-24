@@ -1,15 +1,17 @@
 """Internal handlers for API orchestration."""
 
 import os
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
+
+from middleware import validate_api_key
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 
 CONTEXTS_DIR = "/var/lib/api/contexts"
 
 @router.get("/contexts/{job_id}")
-async def get_context(job_id: str):
+async def get_context(job_id: str, _api_key: str = Depends(validate_api_key)):
     """Serve a Kaniko build context tarball."""
     if not job_id.replace('-', '').isalnum():
         raise HTTPException(status_code=400, detail="Invalid job ID")
