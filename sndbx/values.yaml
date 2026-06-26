@@ -1,0 +1,200 @@
+api:
+  deployment: apps/v1
+  ingress: networking.k8s.io/v1
+  poddisruptionbudget: policy/v1
+  service: v1
+  configmap: v1
+  secret: v1
+  pvc: v1
+  serviceaccount: v1
+  role: rbac.authorization.k8s.io/v1
+  rolebinding: rbac.authorization.k8s.io/v1
+
+namespace: spr-apps
+tier: tier1
+replicas:
+  apiService: 1
+  runtimeGateway: 1
+linkerd: disabled
+cloudProvider: gcp
+k8sClusterName: apps-gke
+chartName: sndbx
+releaseName: sndbx-tier1
+branchName: master
+releaseVersion: NA
+itopsTicket: NA
+buildJobUrl: NA
+
+imagePullSecrets:
+  - spr-nexus
+
+serviceAccount:
+  create: true
+  name: sandbox-controller
+
+images:
+  apiService:
+    repo: prod-nexus.sprinklr.com:8123
+    name: api-service
+    tag: CHANGE_ME
+    pullPolicy: IfNotPresent
+  runtimeGateway:
+    repo: prod-nexus.sprinklr.com:8123
+    name: runtime-gateway
+    tag: CHANGE_ME
+    pullPolicy: IfNotPresent
+  dockerDind:
+    repo: docker.io
+    name: docker
+    tag: 27-dind
+    pullPolicy: IfNotPresent
+
+service:
+  apiService:
+    port: 8000
+  runtimeGateway:
+    httpPort: 8080
+    dockerPort: 2375
+
+apiService:
+  resources:
+    requests:
+      cpu: "500m"
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  livenessProbe:
+    initialDelaySeconds: 20
+    periodSeconds: 30
+  persistence:
+    size: 20Gi
+    accessModes:
+      - ReadWriteOnce
+    storageClassName: ""
+
+runtimeGateway:
+  resources:
+    requests:
+      cpu: "250m"
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  readinessProbe:
+    initialDelaySeconds: 3
+    periodSeconds: 10
+  livenessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 30
+  docker:
+    args:
+      - --host=tcp://0.0.0.0:2375
+      - --storage-driver=overlay2
+      - --tls=false
+    resources:
+      requests:
+        cpu: "1000m"
+        memory: 2Gi
+      limits:
+        cpu: "4"
+        memory: 8Gi
+    readinessProbe:
+      initialDelaySeconds: 5
+      periodSeconds: 5
+    livenessProbe:
+      initialDelaySeconds: 15
+      periodSeconds: 15
+    persistence:
+      size: 50Gi
+      accessModes:
+        - ReadWriteOnce
+      storageClassName: ""
+
+config:
+  apiService:
+    API_SERVICE_ROLE: "control"
+    SANDBOX_ENGINE: "docker"
+    SANDBOX_RUNTIME: "docker"
+    DOCKER_HOST: "tcp://{{ include \"sndbx.runtimeGatewayServiceFqdn\" . }}:2375"
+    TEMPLATE_DOCKERFILE_BUILD_MODE: "docker_cli"
+    TEMPLATE_BUILD_VIA_RUNTIME_GATEWAY: "true"
+    RUNTIME_GATEWAY_URL: "http://{{ include \"sndbx.runtimeGatewayServiceFqdn\" . }}:8080"
+    SANDBOX_DATA_PLANE_ENABLED: "true"
+    SANDBOX_DATA_PLANE_DOMAIN: "sndbx.example.com"
+    SANDBOX_DATA_PLANE_SCHEME: "https"
+    SANDBOX_DATA_PLANE_DEBUG: "false"
+    SANDBOX_DEFAULT_ALLOW_PUBLIC_TRAFFIC: "false"
+    SANDBOX_LEASE_REAPER_INTERVAL_SEC: "5"
+    SANDBOX_LOST_RETENTION_SEC: "86400"
+    RUNTIME_EXITED_CONTAINER_RETENTION_SEC: "1800"
+    TEMPLATE_IMAGE_RETENTION_SEC: "172800"
+    SANDBOX_ISOLATION: "docker"
+    SANDBOX_WARM_POOL_SIZE: "2"
+    SANDBOX_WARM_POOL_TEMPLATE_ID: "custodian-agentlib-sandbox-dev-avirup-ghosh"
+    SANDBOX_WARM_POOL_PROVISION_CONCURRENCY: "1"
+    ENVD_ALWAYS_ON: "true"
+    ENVD_PUBLISH_PORT: "false"
+    DATABASE_PATH: "/var/lib/api/sandboxes.db"
+    PORT: "8000"
+    HOST: "0.0.0.0"
+  runtimeGateway:
+    SANDBOX_DOMAIN: "sndbx.example.com"
+    SANDBOX_INGRESS_DEBUG: "false"
+    CONTROL_PLANE_URL: "http://{{ include \"sndbx.apiServiceFqdn\" . }}:8000"
+    CONTROL_PLANE_TIMEOUT_SEC: "10"
+    DOCKER_HOST: "tcp://127.0.0.1:2375"
+    ENVD_EMBED_AT_TEMPLATE_BUILD: "true"
+    UPSTREAM_RESOLVE_MODE: "control_plane"
+    PORT: "8080"
+    HOST: "0.0.0.0"
+
+rbac:
+  rules:
+    - apiGroups: [""]
+      resources: ["pods", "pods/exec", "pods/log", "services"]
+      verbs: ["create", "delete", "get", "list", "watch", "patch"]
+    - apiGroups: ["batch"]
+      resources: ["jobs", "jobs/status"]
+      verbs: ["create", "delete", "get", "list", "watch", "patch"]
+
+secrets:
+  create: false
+  name: ""
+  data:
+    apiKey: ""
+    internalApiKey: ""
+    portalSessionSecret: ""
+
+ingress:
+  enabled: true
+  className: ingress-nginx-office
+  annotations:
+    kubernetes.io/tls-acme: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-body-size: 100m
+  apiHosts:
+    - api.sndbx.example.com
+  sandboxHosts:
+    - "*.sndbx.example.com"
+  tls:
+    enabled: true
+    secretName: sndbx-example-com-tls
+    hosts:
+      - api.sndbx.example.com
+      - "*.sndbx.example.com"
+
+podDisruptionBudget:
+  enabled: true
+  apiService:
+    minAvailable: 1
+  runtimeGateway:
+    minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

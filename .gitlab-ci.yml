@@ -1,0 +1,250 @@
+# Pipeline triggers:
+# 1. Manually from GitLab UI (CI/CD > Pipelines > Run pipeline)
+# 2. Manually through API/CLI for branch deploy validation
+# 3. Automatically on push to main when app source, Dockerfiles, or chart files change
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
+
+stages:
+  - build
+  - deploy
+
+variables:
+  DEPLOY_SNDBX:
+    value: "false"
+    options:
+      - "false"
+      - "true"
+    description: "Build sndbx images and deploy the Helm release"
+  JENKINS_URL: "https://qa6-build-int.sprinklr.com/jenkins"
+  JENKINS_BUILD_JOB_PATH: "job/build-deploy-jobs/job/ci-docker-image-builder"
+  JENKINS_DEPLOY_JOB_PATH: "job/itops-noc-jobs/job/custom-k8s-helm-deployment"
+  GIT_REPO_URL: "git@prod-gitlab.sprinklr.com:<group>/<cont_in_vm-repo>.git"
+  HELM_GIT_REPO_URL: "git@prod-gitlab.sprinklr.com:<group>/<helm-repo>.git"
+  KUBE_CLUSTER: "apps-gke"
+  CHART_NAME: "sndbx"
+  CHART_RELEASE_NAME: "qa6-tier1"
+  CHART_NAMESPACE: "spr-apps"
+  CHART_REPO_BRANCH: "origin/main"
+  DEPLOY_ITOPS_REPO_BRANCH: "origin/custom-helm-deploy"
+  ITOPS_REPO_BRANCH: "master"
+  DOCKER_REPO: "asia-south1-docker.pkg.dev/gc-qa6/gc-qa6"
+  API_SERVICE_IMAGE_NAME: "api-service"
+  RUNTIME_GATEWAY_IMAGE_NAME: "runtime-gateway"
+  POLL_INTERVAL: "15"
+  MAX_WAIT_SECONDS: "1200"
+
+.trigger-jenkins-and-wait:
+  stage: build
+  image: asia-south1-docker.pkg.dev/gc-qa6/gc-qa6/curl:latest
+  allow_failure: false
+  needs: []
+  script:
+    - |
+      set -euo pipefail
+
+      echo "Triggering Jenkins build for $IMAGE_NAME ..."
+      RESPONSE=$(curl -X POST "$JENKINS_URL/$JENKINS_BUILD_JOB_PATH/buildWithParameters" \
+        --user "$QA6_JENKINS_USER:$QA6_JENKINS_TOKEN" \
+        --data-urlencode "GIT_REPO_URL=$GIT_REPO_URL" \
+        --data-urlencode "REPO_BRANCH=$CI_COMMIT_REF_NAME" \
+        --data-urlencode "DOCKERFILE_PATH=$DOCKERFILE_PATH" \
+        --data-urlencode "DOCKER_CONTEXT_PATH=$DOCKER_CONTEXT_PATH" \
+        --data-urlencode "IMAGE_NAME=$IMAGE_NAME" \
+        --data-urlencode "ITOPS_REPO_BRANCH=$ITOPS_REPO_BRANCH" \
+        -s -D - -o /dev/null -w "\n%{http_code}")
+
+      HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+      QUEUE_URL=$(echo "$RESPONSE" | grep -i "^Location:" | sed 's/Location: *//;s/\r//')
+
+      if [ "$HTTP_CODE" -ne 201 ]; then
+        echo "ERROR: Failed to trigger Jenkins job (HTTP $HTTP_CODE)"
+        exit 1
+      fi
+
+      if [ -z "$QUEUE_URL" ]; then
+        echo "ERROR: No queue URL in response headers"
+        exit 1
+      fi
+
+      BUILD_URL=""
+      ELAPSED=0
+      while [ -z "$BUILD_URL" ] && [ "$ELAPSED" -lt "$MAX_WAIT_SECONDS" ]; do
+        sleep "$POLL_INTERVAL"
+        ELAPSED=$((ELAPSED + POLL_INTERVAL))
+        QUEUE_JSON=$(curl -s --user "$QA6_JENKINS_USER:$QA6_JENKINS_TOKEN" "${QUEUE_URL}api/json" || true)
+        BUILD_URL=$(echo "$QUEUE_JSON" | grep -o '"executable":{[^}]*}' | grep -o '"url":"[^"]*"' | sed 's/"url":"//;s/"//' || true)
+        if echo "$QUEUE_JSON" | grep -q '"cancelled":true' 2>/dev/null; then
+          echo "ERROR: Jenkins build was cancelled in queue"
+          exit 1
+        fi
+      done
+
+      if [ -z "$BUILD_URL" ]; then
+        echo "ERROR: Timed out waiting for build to start"
+        exit 1
+      fi
+
+      BUILD_URL=$(echo "$BUILD_URL" | sed 's|https://qa6-build.sprinklr.com|https://qa6-build-int.sprinklr.com|')
+      BUILDING="true"
+      while [ "$BUILDING" = "true" ] && [ "$ELAPSED" -lt "$MAX_WAIT_SECONDS" ]; do
+        sleep "$POLL_INTERVAL"
+        ELAPSED=$((ELAPSED + POLL_INTERVAL))
+        BUILD_JSON=$(curl -s --user "$QA6_JENKINS_USER:$QA6_JENKINS_TOKEN" "${BUILD_URL}api/json" || true)
+        BUILDING=$(echo "$BUILD_JSON" | grep -o '"building":[a-z]*' | sed 's/"building"://' || echo "true")
+      done
+
+      if [ "$BUILDING" = "true" ]; then
+        echo "ERROR: Timed out waiting for build to finish"
+        exit 1
+      fi
+
+      RESULT=$(echo "$BUILD_JSON" | grep -o '"result":"[A-Z]*"' | sed 's/"result":"//;s/"//' || echo "UNKNOWN")
+      curl -s --user "$QA6_JENKINS_USER:$QA6_JENKINS_TOKEN" "${BUILD_URL}consoleText" -o /tmp/console.log || true
+
+      if [ "$RESULT" != "SUCCESS" ]; then
+        echo "ERROR: Jenkins build failed with result: $RESULT"
+        tail -120 /tmp/console.log || true
+        exit 1
+      fi
+
+      DONE_LINE=$(grep -v "echo" /tmp/console.log | grep "DONE:" | tail -1 || true)
+      IMAGE_NAME_TAG=""
+      if [ -n "$DONE_LINE" ]; then
+        IMAGE_NAME_TAG=$(echo "$DONE_LINE" | sed 's|.*DONE: *||' | sed 's|.*/||' | tr -d '\r\n ' || true)
+      fi
+
+      if [ -z "$IMAGE_NAME_TAG" ]; then
+        echo "ERROR: Could not extract image name:tag from build console output"
+        tail -30 /tmp/console.log
+        exit 1
+      fi
+
+      IMAGE_TAG=$(echo "$IMAGE_NAME_TAG" | sed 's|^[^:]*:||')
+      {
+        echo "${DOTENV_IMAGE_NAME_VAR}=$IMAGE_NAME"
+        echo "${DOTENV_IMAGE_TAG_VAR}=$IMAGE_TAG"
+      } > build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+
+build-api-service:
+  extends: .trigger-jenkins-and-wait
+  variables:
+    DOCKERFILE_PATH: "api-service/Dockerfile.api-service"
+    DOCKER_CONTEXT_PATH: "api-service"
+    IMAGE_NAME: "$API_SERVICE_IMAGE_NAME"
+    DOTENV_IMAGE_NAME_VAR: "API_SERVICE_BUILT_IMAGE_NAME"
+    DOTENV_IMAGE_TAG_VAR: "API_SERVICE_BUILT_IMAGE_TAG"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
+    - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
+      changes:
+        - .gitlab-ci.yml
+        - api-service/**/*
+        - sndbx/**/*
+
+build-runtime-gateway:
+  extends: .trigger-jenkins-and-wait
+  variables:
+    DOCKERFILE_PATH: "runtime-gateway/Dockerfile"
+    DOCKER_CONTEXT_PATH: "."
+    IMAGE_NAME: "$RUNTIME_GATEWAY_IMAGE_NAME"
+    DOTENV_IMAGE_NAME_VAR: "RUNTIME_GATEWAY_BUILT_IMAGE_NAME"
+    DOTENV_IMAGE_TAG_VAR: "RUNTIME_GATEWAY_BUILT_IMAGE_TAG"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
+    - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
+      changes:
+        - .gitlab-ci.yml
+        - runtime-gateway/**/*
+        - api-service/envd_guest/**/*
+        - sndbx/**/*
+
+deploy-qa6:
+  stage: deploy
+  image: asia-south1-docker.pkg.dev/gc-qa6/gc-qa6/curl:latest
+  allow_failure: false
+  needs:
+    - job: build-api-service
+      artifacts: true
+    - job: build-runtime-gateway
+      artifacts: true
+  script:
+    - set -euo pipefail
+    - |
+      EXTRA_VALUES="--set images.apiService.repo=${DOCKER_REPO},images.apiService.name=${API_SERVICE_BUILT_IMAGE_NAME},images.apiService.tag=${API_SERVICE_BUILT_IMAGE_TAG},images.runtimeGateway.repo=${DOCKER_REPO},images.runtimeGateway.name=${RUNTIME_GATEWAY_BUILT_IMAGE_NAME},images.runtimeGateway.tag=${RUNTIME_GATEWAY_BUILT_IMAGE_TAG}"
+
+      RESPONSE=$(curl -X POST "$JENKINS_URL/$JENKINS_DEPLOY_JOB_PATH/buildWithParameters" \
+        --user "$QA6_JENKINS_USER:$QA6_JENKINS_TOKEN" \
+        --data-urlencode "GIT_REPO_URL=$HELM_GIT_REPO_URL" \
+        --data-urlencode "KUBE_CLUSTER=$KUBE_CLUSTER" \
+        --data-urlencode "CHART_NAME=$CHART_NAME" \
+        --data-urlencode "CHART_RELEASE_NAME=$CHART_RELEASE_NAME" \
+        --data-urlencode "CHART_NAMESPACE=$CHART_NAMESPACE" \
+        --data-urlencode "EXTRA_VALUES=$EXTRA_VALUES" \
+        --data-urlencode "CHART_REPO_BRANCH=$CHART_REPO_BRANCH" \
+        --data-urlencode "ITOPS_REPO_BRANCH=$DEPLOY_ITOPS_REPO_BRANCH" \
+        -s -D - -o /dev/null -w "\n%{http_code}")
+
+      HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+      QUEUE_URL=$(echo "$RESPONSE" | grep -i "^Location:" | sed 's/Location: *//;s/\r//')
+
+      if [ "$HTTP_CODE" -ne 201 ]; then
+        echo "ERROR: Failed to trigger Jenkins deploy job (HTTP $HTTP_CODE)"
+        exit 1
+      fi
+
+      if [ -z "$QUEUE_URL" ]; then
+        echo "ERROR: No queue URL in deploy response headers"
+        exit 1
+      fi
+
+      BUILD_URL=""
+      ELAPSED=0
+      while [ -z "$BUILD_URL" ] && [ "$ELAPSED" -lt "$MAX_WAIT_SECONDS" ]; do
+        sleep "$POLL_INTERVAL"
+        ELAPSED=$((ELAPSED + POLL_INTERVAL))
+        QUEUE_JSON=$(curl -s --user "$QA6_JENKINS_USER:$QA6_JENKINS_TOKEN" "${QUEUE_URL}api/json" || true)
+        BUILD_URL=$(echo "$QUEUE_JSON" | grep -o '"executable":{[^}]*}' | grep -o '"url":"[^"]*"' | sed 's/"url":"//;s/"//' || true)
+      done
+
+      if [ -z "$BUILD_URL" ]; then
+        echo "ERROR: Timed out waiting for deploy to start"
+        exit 1
+      fi
+
+      BUILD_URL=$(echo "$BUILD_URL" | sed 's|https://qa6-build.sprinklr.com|https://qa6-build-int.sprinklr.com|')
+      BUILDING="true"
+      while [ "$BUILDING" = "true" ] && [ "$ELAPSED" -lt "$MAX_WAIT_SECONDS" ]; do
+        sleep "$POLL_INTERVAL"
+        ELAPSED=$((ELAPSED + POLL_INTERVAL))
+        BUILD_JSON=$(curl -s --user "$QA6_JENKINS_USER:$QA6_JENKINS_TOKEN" "${BUILD_URL}api/json" || true)
+        BUILDING=$(echo "$BUILD_JSON" | grep -o '"building":[a-z]*' | sed 's/"building"://' || echo "true")
+      done
+
+      if [ "$BUILDING" = "true" ]; then
+        echo "ERROR: Timed out waiting for deploy to finish"
+        exit 1
+      fi
+
+      RESULT=$(echo "$BUILD_JSON" | grep -o '"result":"[A-Z]*"' | sed 's/"result":"//;s/"//' || echo "UNKNOWN")
+      if [ "$RESULT" != "SUCCESS" ]; then
+        echo "ERROR: Jenkins deploy failed with result: $RESULT"
+        exit 1
+      fi
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
+    - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
+      changes:
+        - .gitlab-ci.yml
+        - api-service/**/*
+        - runtime-gateway/**/*
+        - sndbx/**/*

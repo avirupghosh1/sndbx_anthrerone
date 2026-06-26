@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Portal Login</title>
+    <link rel="stylesheet" href="/portal/static/portal.css" />
+  </head>
+  <body class="portal-auth-body">
+    <main class="portal-auth-card">
+      <div class="brand-block">
+        <div class="brand-mark">E2B</div>
+        <div class="brand-subtitle">Sandbox Control Portal</div>
+      </div>
+      <h1>{{ "Client Login" if mode == "login" else "Register Client" }}</h1>
+      {% if error %}
+      <div class="notice error">{{ error }}</div>
+      {% endif %}
+      <form method="post" action="{{ '/portal/login' if mode == 'login' else '/portal/register' }}">
+        <label>Email</label>
+        <input type="email" name="email" required />
+        {% if mode == "register" %}
+        <label>Display Name</label>
+        <input type="text" name="display_name" placeholder="Team or owner name" />
+        {% endif %}
+        <label>Password</label>
+        <input type="password" name="password" minlength="8" required />
+        <button type="submit">{{ "Login" if mode == "login" else "Create Client" }}</button>
+      </form>
+      <div class="switch-copy">
+        {% if mode == "login" %}
+        <a href="/portal/register">Need an account?</a>
+        {% else %}
+        <a href="/portal/login">Already registered?</a>
+        {% endif %}
+      </div>
+    </main>
+  </body>
+</html>

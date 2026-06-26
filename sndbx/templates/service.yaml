@@ -1,0 +1,41 @@
+apiVersion: {{ .Values.api.service | quote }}
+kind: Service
+metadata:
+  name: {{ include "sndbx.apiServiceName" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Chart.Name }}
+    tier: {{ .Values.tier }}
+    component: api-service
+  ports:
+    - name: http
+      port: {{ .Values.service.apiService.port }}
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: {{ .Values.api.service | quote }}
+kind: Service
+metadata:
+  name: {{ include "sndbx.runtimeGatewayName" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Chart.Name }}
+    tier: {{ .Values.tier }}
+    component: runtime-gateway
+  ports:
+    - name: http
+      port: {{ .Values.service.runtimeGateway.httpPort }}
+      targetPort: http
+      protocol: TCP
+    - name: docker
+      port: {{ .Values.service.runtimeGateway.dockerPort }}
+      targetPort: docker
+      protocol: TCP

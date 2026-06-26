@@ -1,0 +1,23 @@
+apiVersion: {{ .Values.api.configmap | quote }}
+kind: ConfigMap
+metadata:
+  name: {{ include "sndbx.apiServiceName" . }}-config
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+data:
+{{- range $key, $value := .Values.config.apiService }}
+  {{ $key }}: {{ tpl ($value | toString) $ | quote }}
+{{- end }}
+---
+apiVersion: {{ .Values.api.configmap | quote }}
+kind: ConfigMap
+metadata:
+  name: {{ include "sndbx.runtimeGatewayName" . }}-config
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+data:
+{{- range $key, $value := .Values.config.runtimeGateway }}
+  {{ $key }}: {{ tpl ($value | toString) $ | quote }}
+{{- end }}

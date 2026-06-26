@@ -1,0 +1,31 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+kind: PodDisruptionBudget
+apiVersion: {{ .Values.api.poddisruptionbudget | quote }}
+metadata:
+  name: {{ include "sndbx.apiServiceName" . }}-pdb
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.apiService.minAvailable }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+      tier: {{ .Values.tier }}
+      component: api-service
+---
+kind: PodDisruptionBudget
+apiVersion: {{ .Values.api.poddisruptionbudget | quote }}
+metadata:
+  name: {{ include "sndbx.runtimeGatewayName" . }}-pdb
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.runtimeGateway.minAvailable }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+      tier: {{ .Values.tier }}
+      component: runtime-gateway
+{{- end }}

@@ -1,0 +1,9 @@
+apiVersion: v2
+name: sndbx
+description: Control-plane and runtime-gateway deployment for the sandbox platform
+version: 0.1.0
+appVersion: "1.0"
+kubeVersion: "^1.24.0-0"
+maintainers:
+  - name: ITOps
+    email: itoperations@sprinklr.com
