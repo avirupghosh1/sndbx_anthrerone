@@ -1,0 +1,97 @@
+kind: Deployment
+apiVersion: {{ .Values.api.deployment | quote }}
+metadata:
+  name: {{ include "sndbx.apiServiceName" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.replicas.apiService }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+      tier: {{ .Values.tier }}
+      component: api-service
+  template:
+    metadata:
+      labels:
+        app: {{ .Chart.Name }}
+        tier: {{ .Values.tier }}
+        component: api-service
+      annotations:
+        checksum/configmap: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum | quote }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum | quote }}
+        linkerd.io/inject: {{ .Values.linkerd | default "disabled" | quote }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+      {{- range .Values.imagePullSecrets }}
+        - name: {{ . }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 8 }}
+      {{- end }}
+      {{- if .Values.tolerations }}
+      tolerations:
+{{ toYaml .Values.tolerations | indent 8 }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+{{ toYaml .Values.affinity | indent 8 }}
+      {{- end }}
+      containers:
+        - name: api-service
+          image: {{ include "sndbx.image" .Values.images.apiService }}
+          imagePullPolicy: {{ .Values.images.apiService.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.apiService.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "sndbx.apiServiceName" . }}-config
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sndbx.secretName" . }}
+                  key: API_KEY
+            - name: INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sndbx.secretName" . }}
+                  key: INTERNAL_API_KEY
+            - name: RUNTIME_GATEWAY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sndbx.secretName" . }}
+                  key: INTERNAL_API_KEY
+            - name: PORTAL_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sndbx.secretName" . }}
+                  key: PORTAL_SESSION_SECRET
+          volumeMounts:
+            - name: api-service-data
+              mountPath: /var/lib/api
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .Values.apiService.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.apiService.readinessProbe.periodSeconds }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .Values.apiService.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.apiService.livenessProbe.periodSeconds }}
+          resources:
+{{ toYaml .Values.apiService.resources | indent 12 }}
+      volumes:
+        - name: api-service-data
+          persistentVolumeClaim:
+            claimName: {{ include "sndbx.apiServiceName" . }}-data

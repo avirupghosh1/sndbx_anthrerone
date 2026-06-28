@@ -1,0 +1,33 @@
+apiVersion: {{ .Values.api.pvc | quote }}
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "sndbx.apiServiceName" . }}-data
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+spec:
+  accessModes:
+{{ toYaml .Values.apiService.persistence.accessModes | indent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.apiService.persistence.size | quote }}
+  {{- if .Values.apiService.persistence.storageClassName }}
+  storageClassName: {{ .Values.apiService.persistence.storageClassName | quote }}
+  {{- end }}
+---
+apiVersion: {{ .Values.api.pvc | quote }}
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "sndbx.runtimeGatewayName" . }}-docker-graph
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+spec:
+  accessModes:
+{{ toYaml .Values.runtimeGateway.docker.persistence.accessModes | indent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.runtimeGateway.docker.persistence.size | quote }}
+  {{- if .Values.runtimeGateway.docker.persistence.storageClassName }}
+  storageClassName: {{ .Values.runtimeGateway.docker.persistence.storageClassName | quote }}
+  {{- end }}

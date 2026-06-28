@@ -1,0 +1,180 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandboxes
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-controller
+  namespace: sandboxes
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-controller
+  namespace: sandboxes
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "pods/log", "services"]
+    verbs: ["create", "delete", "get", "list", "watch", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "jobs/status"]
+    verbs: ["create", "delete", "get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandbox-controller
+  namespace: sandboxes
+subjects:
+  - kind: ServiceAccount
+    name: sandbox-controller
+    namespace: sandboxes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-controller
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: api-service-data
+  namespace: sandboxes
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-service
+  namespace: sandboxes
+spec:
+  selector:
+    app: api-service
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-service
+  namespace: sandboxes
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-service
+  template:
+    metadata:
+      labels:
+        app: api-service
+    spec:
+      serviceAccountName: sandbox-controller
+      containers:
+        - name: api-service
+          image: api-service:prod
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: api-service-config
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: API_KEY
+            - name: INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: INTERNAL_API_KEY
+            - name: RUNTIME_GATEWAY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: INTERNAL_API_KEY
+            - name: PORTAL_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: PORTAL_SESSION_SECRET
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/api
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: api-service-data
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-service-config
+  namespace: sandboxes
+data:
+  API_SERVICE_ROLE: "control"
+  SANDBOX_ENGINE: "docker"
+  SANDBOX_RUNTIME: "docker"
+  DOCKER_HOST: "tcp://runtime-gateway.sandboxes.svc.cluster.local:2375"
+  TEMPLATE_DOCKERFILE_BUILD_MODE: "docker_cli"
+  TEMPLATE_BUILD_VIA_RUNTIME_GATEWAY: "true"
+  RUNTIME_GATEWAY_URL: "http://runtime-gateway.sandboxes.svc.cluster.local:8080"
+  SANDBOX_DATA_PLANE_ENABLED: "true"
+  SANDBOX_DATA_PLANE_DOMAIN: "sndbx.example.com"
+  SANDBOX_DATA_PLANE_SCHEME: "https"
+  SANDBOX_DATA_PLANE_DEBUG: "false"
+  SANDBOX_DEFAULT_ALLOW_PUBLIC_TRAFFIC: "false"
+  SANDBOX_LEASE_REAPER_INTERVAL_SEC: "5"
+  SANDBOX_LOST_RETENTION_SEC: "86400"
+  RUNTIME_EXITED_CONTAINER_RETENTION_SEC: "1800"
+  TEMPLATE_IMAGE_RETENTION_SEC: "172800"
+  SANDBOX_ISOLATION: "gvisor"
+  SANDBOX_DOCKER_OCI_RUNTIME: "runsc"
+  SANDBOX_WARM_POOL_SIZE: "2"
+  SANDBOX_WARM_POOL_TEMPLATE_ID: "custodian-agentlib-sandbox-dev-avirup-ghosh"
+  SANDBOX_WARM_POOL_PROVISION_CONCURRENCY: "1"
+  ENVD_ALWAYS_ON: "true"
+  ENVD_PUBLISH_PORT: "false"
+  DATABASE_PATH: "/var/lib/api/sandboxes.db"
+  PORT: "8000"
+  HOST: "0.0.0.0"
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-service
+  namespace: sandboxes
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: api-service

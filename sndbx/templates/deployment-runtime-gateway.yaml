@@ -1,0 +1,112 @@
+kind: Deployment
+apiVersion: {{ .Values.api.deployment | quote }}
+metadata:
+  name: {{ include "sndbx.runtimeGatewayName" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.replicas.runtimeGateway }}
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+      tier: {{ .Values.tier }}
+      component: runtime-gateway
+  template:
+    metadata:
+      labels:
+        app: {{ .Chart.Name }}
+        tier: {{ .Values.tier }}
+        component: runtime-gateway
+      annotations:
+        checksum/configmap: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum | quote }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum | quote }}
+        linkerd.io/inject: {{ .Values.linkerd | default "disabled" | quote }}
+    spec:
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+      {{- range .Values.imagePullSecrets }}
+        - name: {{ . }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 8 }}
+      {{- end }}
+      {{- if .Values.tolerations }}
+      tolerations:
+{{ toYaml .Values.tolerations | indent 8 }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+{{ toYaml .Values.affinity | indent 8 }}
+      {{- end }}
+      containers:
+        - name: dockerd
+          image: {{ include "sndbx.image" .Values.images.dockerDind }}
+          imagePullPolicy: {{ .Values.images.dockerDind.pullPolicy }}
+          securityContext:
+            privileged: true
+          args:
+{{ toYaml .Values.runtimeGateway.docker.args | indent 12 }}
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          ports:
+            - name: docker
+              containerPort: {{ .Values.service.runtimeGateway.dockerPort }}
+              protocol: TCP
+          volumeMounts:
+            - name: docker-graph
+              mountPath: /var/lib/docker
+          readinessProbe:
+            tcpSocket:
+              port: docker
+            initialDelaySeconds: {{ .Values.runtimeGateway.docker.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.runtimeGateway.docker.readinessProbe.periodSeconds }}
+          livenessProbe:
+            tcpSocket:
+              port: docker
+            initialDelaySeconds: {{ .Values.runtimeGateway.docker.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.runtimeGateway.docker.livenessProbe.periodSeconds }}
+          resources:
+{{ toYaml .Values.runtimeGateway.docker.resources | indent 12 }}
+        - name: runtime-gateway
+          image: {{ include "sndbx.image" .Values.images.runtimeGateway }}
+          imagePullPolicy: {{ .Values.images.runtimeGateway.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.runtimeGateway.httpPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "sndbx.runtimeGatewayName" . }}-config
+          env:
+            - name: CONTROL_PLANE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sndbx.secretName" . }}
+                  key: INTERNAL_API_KEY
+            - name: INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sndbx.secretName" . }}
+                  key: INTERNAL_API_KEY
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .Values.runtimeGateway.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.runtimeGateway.readinessProbe.periodSeconds }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .Values.runtimeGateway.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.runtimeGateway.livenessProbe.periodSeconds }}
+          resources:
+{{ toYaml .Values.runtimeGateway.resources | indent 12 }}
+      volumes:
+        - name: docker-graph
+          persistentVolumeClaim:
+            claimName: {{ include "sndbx.runtimeGatewayName" . }}-docker-graph
