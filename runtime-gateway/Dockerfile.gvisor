@@ -1,0 +1,41 @@
+# dockerd + gVisor (runsc) for runtime-gateway DinD sidecar.
+#
+# Online build (downloads runsc inside the image; ~171MB):
+#   cd cont_in_vm
+#   docker build -f runtime-gateway/Dockerfile.gvisor -t dockerd-gvisor:27 .
+#
+# Offline build (if Docker build network cannot reach storage.googleapis.com):
+#   ./runtime-gateway/download-gvisor-bin.sh amd64
+#   docker build -f runtime-gateway/Dockerfile.gvisor.offline -t dockerd-gvisor:27 .
+
+FROM docker:27-dind
+
+RUN apk add --no-cache curl ca-certificates
+
+# gVisor buckets use x86_64 / aarch64. TARGETARCH is set by BuildKit; legacy
+# docker build leaves it empty — we fall back to uname -m.
+ARG TARGETARCH=
+RUN set -ex; \
+    ARCH="${TARGETARCH:-}"; \
+    if [ -z "${ARCH}" ]; then \
+      case "$(uname -m)" in \
+        x86_64) ARCH=amd64 ;; \
+        aarch64|arm64) ARCH=arm64 ;; \
+        *) echo "unsupported machine $(uname -m); pass --build-arg TARGETARCH=amd64|arm64" >&2; exit 1 ;; \
+      esac; \
+    fi; \
+    case "${ARCH}" in \
+      amd64)  GV_ARCH=x86_64 ;; \
+      arm64)  GV_ARCH=aarch64 ;; \
+      *) echo "unsupported TARGETARCH=${ARCH}" >&2; exit 1 ;; \
+    esac; \
+    BASE="https://storage.googleapis.com/gvisor/releases/release/latest/${GV_ARCH}"; \
+    echo "Downloading gVisor (${GV_ARCH}) from ${BASE} …"; \
+    curl -fL --connect-timeout 30 --max-time 900 --retry 3 --retry-delay 5 \
+      --progress-bar -o /usr/local/bin/runsc "${BASE}/runsc"; \
+    curl -fL --connect-timeout 30 --max-time 600 --retry 3 --retry-delay 5 \
+      --progress-bar -o /usr/local/bin/containerd-shim-runsc-v1 "${BASE}/containerd-shim-runsc-v1"; \
+    chmod a+rx /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1; \
+    /usr/local/bin/runsc --version; \
+    /usr/local/bin/runsc install; \
+    echo "gVisor install complete"

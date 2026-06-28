@@ -43,7 +43,7 @@ spec:
     spec:
       containers:
         - name: dockerd
-          image: docker:27-dind
+          image: dockerd-gvisor:27
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true

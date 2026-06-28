@@ -4,6 +4,9 @@
 {{- if or (eq (default "" .Values.images.runtimeGateway.tag) "") (eq .Values.images.runtimeGateway.tag "CHANGE_ME") -}}
 {{- fail "images.runtimeGateway.tag must be set by Jenkins EXTRA_VALUES or release values" -}}
 {{- end -}}
+{{- if or (eq (default "" .Values.images.dockerDind.tag) "") (eq .Values.images.dockerDind.tag "CHANGE_ME") -}}
+{{- fail "images.dockerDind.tag must be set (gVisor DinD image) by Jenkins EXTRA_VALUES or release values" -}}
+{{- end -}}
 {{- if and (not .Values.secrets.create) (eq (default "" .Values.secrets.name) "") -}}
 {{- fail "set secrets.name to an existing Kubernetes Secret or enable secrets.create" -}}
 {{- end -}}

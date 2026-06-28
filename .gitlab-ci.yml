@@ -12,6 +12,14 @@ stages:
   - build
   - deploy
 
+# Shared change set so all image builds and the deploy trigger together.
+# Keeps deploy-qa6 `needs` satisfied (api-service, runtime-gateway, gvisor).
+.sndbx-changes: &sndbx-changes
+  - .gitlab-ci.yml
+  - api-service/**/*
+  - runtime-gateway/**/*
+  - sndbx/**/*
+
 variables:
   DEPLOY_SNDBX:
     value: "false"
@@ -34,6 +42,7 @@ variables:
   DOCKER_REPO: "asia-south1-docker.pkg.dev/gc-qa6/gc-qa6"
   API_SERVICE_IMAGE_NAME: "api-service"
   RUNTIME_GATEWAY_IMAGE_NAME: "runtime-gateway"
+  GVISOR_IMAGE_NAME: "dockerd-gvisor"
   POLL_INTERVAL: "15"
   MAX_WAIT_SECONDS: "1200"
 
@@ -144,10 +153,22 @@ build-api-service:
     - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
-      changes:
-        - .gitlab-ci.yml
-        - api-service/**/*
-        - sndbx/**/*
+      changes: *sndbx-changes
+
+build-gvisor-image:
+  extends: .trigger-jenkins-and-wait
+  variables:
+    DOCKERFILE_PATH: "runtime-gateway/Dockerfile.gvisor"
+    DOCKER_CONTEXT_PATH: "runtime-gateway"
+    IMAGE_NAME: "$GVISOR_IMAGE_NAME"
+    DOTENV_IMAGE_NAME_VAR: "GVISOR_BUILT_IMAGE_NAME"
+    DOTENV_IMAGE_TAG_VAR: "GVISOR_BUILT_IMAGE_TAG"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
+    - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
+      changes: *sndbx-changes
+
 
 build-runtime-gateway:
   extends: .trigger-jenkins-and-wait
@@ -161,11 +182,7 @@ build-runtime-gateway:
     - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
-      changes:
-        - .gitlab-ci.yml
-        - runtime-gateway/**/*
-        - api-service/envd_guest/**/*
-        - sndbx/**/*
+      changes: *sndbx-changes
 
 deploy-qa6:
   stage: deploy
@@ -176,10 +193,12 @@ deploy-qa6:
       artifacts: true
     - job: build-runtime-gateway
       artifacts: true
+    - job: build-gvisor-image
+      artifacts: true
   script:
     - set -euo pipefail
     - |
-      EXTRA_VALUES="--set images.apiService.repo=${DOCKER_REPO},images.apiService.name=${API_SERVICE_BUILT_IMAGE_NAME},images.apiService.tag=${API_SERVICE_BUILT_IMAGE_TAG},images.runtimeGateway.repo=${DOCKER_REPO},images.runtimeGateway.name=${RUNTIME_GATEWAY_BUILT_IMAGE_NAME},images.runtimeGateway.tag=${RUNTIME_GATEWAY_BUILT_IMAGE_TAG}"
+      EXTRA_VALUES="--set images.apiService.repo=${DOCKER_REPO},images.apiService.name=${API_SERVICE_BUILT_IMAGE_NAME},images.apiService.tag=${API_SERVICE_BUILT_IMAGE_TAG},images.runtimeGateway.repo=${DOCKER_REPO},images.runtimeGateway.name=${RUNTIME_GATEWAY_BUILT_IMAGE_NAME},images.runtimeGateway.tag=${RUNTIME_GATEWAY_BUILT_IMAGE_TAG},images.dockerDind.repo=${DOCKER_REPO},images.dockerDind.name=${GVISOR_BUILT_IMAGE_NAME},images.dockerDind.tag=${GVISOR_BUILT_IMAGE_TAG}"
 
       RESPONSE=$(curl -X POST "$JENKINS_URL/$JENKINS_DEPLOY_JOB_PATH/buildWithParameters" \
         --user "$QA6_JENKINS_USER:$QA6_JENKINS_TOKEN" \
@@ -243,8 +262,4 @@ deploy-qa6:
     - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
-      changes:
-        - .gitlab-ci.yml
-        - api-service/**/*
-        - runtime-gateway/**/*
-        - sndbx/**/*
+      changes: *sndbx-changes
