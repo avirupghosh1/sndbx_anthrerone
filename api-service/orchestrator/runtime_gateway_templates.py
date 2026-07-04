@@ -27,8 +27,9 @@ def build_dockerfile_template_via_gateway(
     context_tar_gzip_base64: Optional[str],
     build_mode: str,
     embed_envd: bool,
+    gateway_api_base: Optional[str] = None,
 ) -> dict[str, Any]:
-    base = (getattr(config, "RUNTIME_GATEWAY_URL", None) or "").strip().rstrip("/")
+    base = (gateway_api_base or getattr(config, "RUNTIME_GATEWAY_URL", None) or "").strip().rstrip("/")
     if not base:
         raise RuntimeError("RUNTIME_GATEWAY_URL is not configured")
     body = {
@@ -71,8 +72,9 @@ def build_template_snapshot_via_gateway(
     embed_envd: bool,
     envd_pip_timeout_sec: float,
     snapshot_repo: str,
+    gateway_api_base: Optional[str] = None,
 ) -> dict[str, Any]:
-    base = (getattr(config, "RUNTIME_GATEWAY_URL", None) or "").strip().rstrip("/")
+    base = (gateway_api_base or getattr(config, "RUNTIME_GATEWAY_URL", None) or "").strip().rstrip("/")
     if not base:
         raise RuntimeError("RUNTIME_GATEWAY_URL is not configured")
     body = {
@@ -114,8 +116,9 @@ async def stream_dockerfile_template_via_gateway(
     context_tar_gzip_base64: Optional[str],
     build_mode: str,
     embed_envd: bool,
+    gateway_api_base: Optional[str] = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    base = (getattr(config, "RUNTIME_GATEWAY_URL", None) or "").strip().rstrip("/")
+    base = (gateway_api_base or getattr(config, "RUNTIME_GATEWAY_URL", None) or "").strip().rstrip("/")
     if not base:
         raise RuntimeError("RUNTIME_GATEWAY_URL is not configured")
     body = {

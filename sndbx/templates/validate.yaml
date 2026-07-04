@@ -19,3 +19,35 @@
 {{- if eq (len .Values.ingress.sandboxHosts) 0 -}}
 {{- fail "ingress.sandboxHosts must contain at least one host" -}}
 {{- end -}}
+{{- if and (eq (default "" .Values.database.url) "") (eq (default "" .Values.database.existingSecretName) "") -}}
+{{- fail "PostgreSQL is required: set database.url or database.existingSecretName" -}}
+{{- end -}}
+{{- if and (ne (default "" .Values.database.url) "") (not (or (hasPrefix "postgres://" .Values.database.url) (hasPrefix "postgresql://" .Values.database.url))) -}}
+{{- fail "database.url must use postgres:// or postgresql://" -}}
+{{- end -}}
+{{- $registryLayout := default "auto" .Values.templateRegistry.layout -}}
+{{- if not (has $registryLayout (list "auto" "repository_per_template" "single_repository")) -}}
+{{- fail "templateRegistry.layout must be auto, repository_per_template, or single_repository" -}}
+{{- end -}}
+{{- $internalRegistryMode := "auto" -}}
+{{- if and .Values.templateRegistry.internal (hasKey .Values.templateRegistry.internal "enabled") -}}
+{{- $internalRegistryMode = (toString .Values.templateRegistry.internal.enabled | lower) -}}
+{{- end -}}
+{{- if not (has $internalRegistryMode (list "auto" "true" "false")) -}}
+{{- fail "templateRegistry.internal.enabled must be auto, true, or false" -}}
+{{- end -}}
+{{- $internalRegistryEnabled := eq (include "sndbx.templateRegistryInternalEnabled" .) "true" -}}
+{{- if and .Values.templateRegistry.pushEnabled (eq (default "" .Values.templateRegistry.repoPrefix) "") (not $internalRegistryEnabled) -}}
+{{- fail "templateRegistry.pushEnabled=true requires templateRegistry.repoPrefix or templateRegistry.internal.enabled=auto/true" -}}
+{{- end -}}
+{{- $repoPrefix := default "" .Values.templateRegistry.repoPrefix -}}
+{{- if and .Values.templateRegistry.pushEnabled (ne $repoPrefix "") (or (contains "public.ecr.aws" $repoPrefix) (contains ".dkr.ecr." $repoPrefix)) (not .Values.templateRegistry.authRequired) -}}
+{{- fail "AWS ECR templateRegistry.repoPrefix requires templateRegistry.authRequired=true with registry credentials, or omit repoPrefix to use the internal registry" -}}
+{{- end -}}
+{{- $registrySecretName := .Values.templateRegistry.existingSecretName | default .Values.secrets.name -}}
+{{- if and (eq (include "sndbx.templateRegistryAuthRequired" .) "true") (not .Values.secrets.create) (eq (default "" $registrySecretName) "") -}}
+{{- fail "templateRegistry.authRequired=true requires either secrets.create=true with registryUsername/registryPassword or templateRegistry.existingSecretName/secrets.name" -}}
+{{- end -}}
+{{- if and (eq (include "sndbx.templateRegistryAuthRequired" .) "true") .Values.secrets.create (eq (default "" .Values.templateRegistry.existingSecretName) "") (or (eq (default "" .Values.secrets.data.registryUsername) "") (eq (default "" .Values.secrets.data.registryPassword) "")) -}}
+{{- fail "templateRegistry.authRequired=true with secrets.create=true requires secrets.data.registryUsername and secrets.data.registryPassword" -}}
+{{- end -}}

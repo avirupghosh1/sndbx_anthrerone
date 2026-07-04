@@ -1,4 +1,4 @@
-kind: Deployment
+kind: StatefulSet
 apiVersion: {{ .Values.api.deployment | quote }}
 metadata:
   name: {{ include "sndbx.runtimeGatewayName" . }}
@@ -6,6 +6,7 @@ metadata:
   labels:
 {{ include "sndbx.labels" . | indent 4 }}
 spec:
+  serviceName: {{ include "sndbx.runtimeGatewayHeadlessName" . }}
   replicas: {{ .Values.replicas.runtimeGateway }}
   selector:
     matchLabels:
@@ -49,6 +50,9 @@ spec:
             privileged: true
           args:
 {{ toYaml .Values.runtimeGateway.docker.args | indent 12 }}
+            {{- if eq (include "sndbx.templateRegistryInternalEnabled" .) "true" }}
+            - --insecure-registry={{ include "sndbx.templateRegistryServer" . }}
+            {{- end }}
           env:
             - name: DOCKER_TLS_CERTDIR
               value: ""
@@ -64,11 +68,15 @@ spec:
               port: docker
             initialDelaySeconds: {{ .Values.runtimeGateway.docker.readinessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.runtimeGateway.docker.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.runtimeGateway.docker.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.runtimeGateway.docker.readinessProbe.failureThreshold }}
           livenessProbe:
             tcpSocket:
               port: docker
             initialDelaySeconds: {{ .Values.runtimeGateway.docker.livenessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.runtimeGateway.docker.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.runtimeGateway.docker.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.runtimeGateway.docker.livenessProbe.failureThreshold }}
           resources:
 {{ toYaml .Values.runtimeGateway.docker.resources | indent 12 }}
         - name: runtime-gateway
@@ -92,21 +100,65 @@ spec:
                 secretKeyRef:
                   name: {{ include "sndbx.secretName" . }}
                   key: INTERNAL_API_KEY
+            - name: GATEWAY_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TEMPLATE_REGISTRY_SERVER
+              value: {{ include "sndbx.templateRegistryServer" . | quote }}
+            {{- $registrySecretName := .Values.templateRegistry.existingSecretName | default (include "sndbx.secretName" .) }}
+            {{- if eq (include "sndbx.templateRegistryAuthRequired" .) "true" }}
+            - name: TEMPLATE_REGISTRY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $registrySecretName }}
+                  key: {{ .Values.templateRegistry.usernameSecretKey | quote }}
+            - name: TEMPLATE_REGISTRY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $registrySecretName }}
+                  key: {{ .Values.templateRegistry.passwordSecretKey | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: docker-graph
+              mountPath: /var/lib/docker
+              readOnly: true
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: http
             initialDelaySeconds: {{ .Values.runtimeGateway.readinessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.runtimeGateway.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.runtimeGateway.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.runtimeGateway.readinessProbe.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /health
               port: http
             initialDelaySeconds: {{ .Values.runtimeGateway.livenessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.runtimeGateway.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.runtimeGateway.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.runtimeGateway.livenessProbe.failureThreshold }}
           resources:
 {{ toYaml .Values.runtimeGateway.resources | indent 12 }}
+      {{- if not .Values.runtimeGateway.docker.persistence.enabled }}
       volumes:
         - name: docker-graph
-          persistentVolumeClaim:
-            claimName: {{ include "sndbx.runtimeGatewayName" . }}-docker-graph
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.runtimeGateway.docker.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: docker-graph
+        labels:
+{{ include "sndbx.labels" . | indent 10 }}
+      spec:
+        accessModes:
+{{ toYaml .Values.runtimeGateway.docker.persistence.accessModes | indent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.runtimeGateway.docker.persistence.size | quote }}
+        {{- if .Values.runtimeGateway.docker.persistence.storageClassName }}
+        storageClassName: {{ .Values.runtimeGateway.docker.persistence.storageClassName | quote }}
+        {{- end }}
+  {{- end }}

@@ -5,7 +5,6 @@ api:
   service: v1
   configmap: v1
   secret: v1
-  pvc: v1
   serviceaccount: v1
   role: rbac.authorization.k8s.io/v1
   rolebinding: rbac.authorization.k8s.io/v1
@@ -27,6 +26,12 @@ buildJobUrl: NA
 
 imagePullSecrets:
   - spr-nexus
+
+database:
+  # Postgres is required; set either url or existingSecretName.
+  url: ""
+  existingSecretName: ""
+  existingSecretKey: DATABASE_URL
 
 serviceAccount:
   create: true
@@ -70,14 +75,13 @@ apiService:
   readinessProbe:
     initialDelaySeconds: 5
     periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 6
   livenessProbe:
     initialDelaySeconds: 20
     periodSeconds: 30
-  persistence:
-    size: 20Gi
-    accessModes:
-      - ReadWriteOnce
-    storageClassName: ""
+    timeoutSeconds: 3
+    failureThreshold: 5
 
 runtimeGateway:
   resources:
@@ -90,9 +94,13 @@ runtimeGateway:
   readinessProbe:
     initialDelaySeconds: 3
     periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 6
   livenessProbe:
     initialDelaySeconds: 10
     periodSeconds: 30
+    timeoutSeconds: 3
+    failureThreshold: 5
   docker:
     args:
       - --host=tcp://0.0.0.0:2375
@@ -108,11 +116,17 @@ runtimeGateway:
     readinessProbe:
       initialDelaySeconds: 5
       periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 6
     livenessProbe:
       initialDelaySeconds: 15
       periodSeconds: 15
+      timeoutSeconds: 3
+      failureThreshold: 5
     persistence:
+      enabled: true
       size: 50Gi
+      capacityBytes: "107374182400"
       accessModes:
         - ReadWriteOnce
       storageClassName: ""
@@ -122,7 +136,7 @@ config:
     API_SERVICE_ROLE: "control"
     SANDBOX_ENGINE: "docker"
     SANDBOX_RUNTIME: "docker"
-    DOCKER_HOST: "tcp://{{ include \"sndbx.runtimeGatewayServiceFqdn\" . }}:2375"
+    DOCKER_HOST: "tcp://{{ include \"sndbx.runtimeGatewayName\" . }}-0.{{ include \"sndbx.runtimeGatewayHeadlessName\" . }}.{{ .Values.namespace }}.svc.cluster.local:2375"
     TEMPLATE_DOCKERFILE_BUILD_MODE: "docker_cli"
     TEMPLATE_BUILD_VIA_RUNTIME_GATEWAY: "true"
     RUNTIME_GATEWAY_URL: "http://{{ include \"sndbx.runtimeGatewayServiceFqdn\" . }}:8080"
@@ -140,13 +154,31 @@ config:
     # images.dockerDind image is gVisor-capable either way (runsc unused under runc).
     SANDBOX_ISOLATION: "docker"
     SANDBOX_DOCKER_OCI_RUNTIME: ""
-    SANDBOX_WARM_POOL_SIZE: "2"
-    SANDBOX_WARM_POOL_PROVISION_CONCURRENCY: "1"
+    SANDBOX_WARM_POOL_SIZE: "5"
+    SANDBOX_WARM_POOL_PROVISION_CONCURRENCY: "2"
+    SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC: "180.0"
+    GUEST_BOOTSTRAP_AGENT_WAIT_SEC: "30.0"
+    SANDBOX_COLD_CREATE_READY_WAIT_SEC: "0.5"
+    SANDBOX_ROUTE_READY_WAIT_SEC: "12.0"
+    SANDBOX_WARM_POOL_INFLIGHT_STALE_SEC: "300.0"
     ENVD_ALWAYS_ON: "true"
     ENVD_PUBLISH_PORT: "false"
-    DATABASE_PATH: "/var/lib/api/sandboxes.db"
     PORT: "8000"
     HOST: "0.0.0.0"
+    K8S_NAMESPACE: "{{ .Values.namespace }}"
+    RUNTIME_GATEWAY_SHARD_COUNT: "{{ .Values.replicas.runtimeGateway }}"
+    RUNTIME_GATEWAY_STATEFULSET_NAME: "{{ include \"sndbx.runtimeGatewayName\" . }}"
+    RUNTIME_GATEWAY_HEADLESS_SERVICE: "{{ include \"sndbx.runtimeGatewayHeadlessName\" . }}"
+    RUNTIME_GATEWAY_SERVICE_PORT: "{{ .Values.service.runtimeGateway.httpPort }}"
+    RUNTIME_GATEWAY_DOCKER_PORT: "{{ .Values.service.runtimeGateway.dockerPort }}"
+    TEMPLATE_REGISTRY_PUSH_ENABLED: "{{ .Values.templateRegistry.pushEnabled }}"
+    TEMPLATE_REGISTRY_REPO_PREFIX: "{{ include \"sndbx.templateRegistryRepoPrefix\" . }}"
+    API_SERVICE_INSTANCE_ID: ""
+    WARM_POOL_COORDINATOR_LEASE_NAME: "warm-pool-coordinator"
+    WARM_POOL_COORDINATOR_LEASE_TTL_SEC: "15"
+    RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO: "0.15"
+    RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC: "2.0"
+    WARM_POOL_IMAGE_PREFETCH_ENABLED: "true"
   runtimeGateway:
     SANDBOX_DOMAIN: "sndbx.example.com"
     SANDBOX_INGRESS_DEBUG: "false"
@@ -155,8 +187,49 @@ config:
     DOCKER_HOST: "tcp://127.0.0.1:2375"
     ENVD_EMBED_AT_TEMPLATE_BUILD: "true"
     UPSTREAM_RESOLVE_MODE: "control_plane"
+    K8S_NAMESPACE: "{{ .Values.namespace }}"
     PORT: "8080"
     HOST: "0.0.0.0"
+    DOCKER_GRAPH_PATH: "/var/lib/docker"
+    DOCKER_GRAPH_CAPACITY_BYTES: "{{ .Values.runtimeGateway.docker.persistence.capacityBytes }}"
+    TEMPLATE_REGISTRY_PUSH_ENABLED: "{{ .Values.templateRegistry.pushEnabled }}"
+    TEMPLATE_REGISTRY_REPO_PREFIX: "{{ include \"sndbx.templateRegistryRepoPrefix\" . }}"
+    TEMPLATE_REGISTRY_AUTH_REQUIRED: "{{ include \"sndbx.templateRegistryAuthRequired\" . }}"
+    TEMPLATE_REGISTRY_LAYOUT: "{{ .Values.templateRegistry.layout }}"
+
+templateRegistry:
+  # Enable this before expecting custom built templates to move freely across multiple
+  # runtime-gateway shards. Without it, template images remain pinned to their build owner.
+  pushEnabled: false
+  authRequired: false
+  repoPrefix: ""
+  # auto keeps Artifact Registry/GCR-style repo-per-template refs and uses a single
+  # configured repository with template-specific tags for AWS ECR hosts.
+  layout: auto
+  server: ""
+  existingSecretName: ""
+  usernameSecretKey: TEMPLATE_REGISTRY_USERNAME
+  passwordSecretKey: TEMPLATE_REGISTRY_PASSWORD
+  internal:
+    # auto enables the in-cluster registry when pushEnabled=true and repoPrefix is empty.
+    # Set false to require an external registry; set true to force the internal registry.
+    enabled: auto
+    image: registry:2
+    pullPolicy: IfNotPresent
+    servicePort: 5000
+    persistence:
+      enabled: true
+      size: 20Gi
+      accessModes:
+        - ReadWriteOnce
+      storageClassName: ""
+    resources:
+      requests:
+        cpu: "100m"
+        memory: 128Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
 
 rbac:
   rules:
@@ -174,6 +247,8 @@ secrets:
     apiKey: ""
     internalApiKey: ""
     portalSessionSecret: ""
+    registryUsername: ""
+    registryPassword: ""
 
 ingress:
   enabled: true

@@ -67,6 +67,24 @@ class Config:
     INGRESS_SHARED_TOKEN_HEADER: str = (
         os.getenv("INGRESS_SHARED_TOKEN_HEADER") or "X-Ingress-Access-Token"
     ).strip()
+    GATEWAY_INSTANCE_ID: str = (
+        os.getenv("GATEWAY_INSTANCE_ID") or os.getenv("HOSTNAME") or "runtime-gateway"
+    ).strip()
+    DOCKER_GRAPH_PATH: str = (os.getenv("DOCKER_GRAPH_PATH") or "/var/lib/docker").strip()
+    DOCKER_GRAPH_CAPACITY_BYTES: int = max(0, int(os.getenv("DOCKER_GRAPH_CAPACITY_BYTES", "0") or "0"))
+    TEMPLATE_REGISTRY_PUSH_ENABLED: bool = _env_bool("TEMPLATE_REGISTRY_PUSH_ENABLED", False)
+    TEMPLATE_REGISTRY_REPO_PREFIX: str = (
+        os.getenv("TEMPLATE_REGISTRY_REPO_PREFIX") or ""
+    ).strip().rstrip("/")
+    TEMPLATE_REGISTRY_LAYOUT: str = (
+        os.getenv("TEMPLATE_REGISTRY_LAYOUT") or "auto"
+    ).strip().lower().replace("-", "_")
+    TEMPLATE_REGISTRY_SERVER: str = (
+        os.getenv("TEMPLATE_REGISTRY_SERVER") or ""
+    ).strip().rstrip("/")
+    TEMPLATE_REGISTRY_AUTH_REQUIRED: bool = _env_bool("TEMPLATE_REGISTRY_AUTH_REQUIRED", False)
+    TEMPLATE_REGISTRY_USERNAME: str = (os.getenv("TEMPLATE_REGISTRY_USERNAME") or "").strip()
+    TEMPLATE_REGISTRY_PASSWORD: str = (os.getenv("TEMPLATE_REGISTRY_PASSWORD") or "").strip()
 
 
 _config: Optional[Config] = None

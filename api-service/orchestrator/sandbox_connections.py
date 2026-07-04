@@ -219,7 +219,8 @@ def build_guest_routing_record(
                 out[str(p)] = k8s_guest_upstream_target(cfg, sid, p)
         return out
 
-    execution = manager.execution
+    execution_for_row = getattr(manager, "_execution_for_row", None)
+    execution = execution_for_row(row) if callable(execution_for_row) else manager.execution
     kind = execution.get_backend_kind()
     if not supports_data_plane_routing(kind):
         return None
@@ -263,7 +264,8 @@ def resolve_guest_upstream_http(manager: "SandboxManager", sandbox_id: str, gues
         host = (k8s.get("service_host") or "").strip() or k8s_pod_service_host(cfg, sid)
         return f"http://{host}:{p}"
 
-    execution = manager.execution
+    execution_for_row = getattr(manager, "_execution_for_row", None)
+    execution = execution_for_row(row) if callable(execution_for_row) else manager.execution
     kind = execution.get_backend_kind()
     if not supports_data_plane_routing(kind):
         return None

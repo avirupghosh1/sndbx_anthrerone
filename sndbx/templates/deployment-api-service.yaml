@@ -74,24 +74,35 @@ spec:
                 secretKeyRef:
                   name: {{ include "sndbx.secretName" . }}
                   key: PORTAL_SESSION_SECRET
-          volumeMounts:
-            - name: api-service-data
-              mountPath: /var/lib/api
+            - name: API_SERVICE_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- if .Values.database.existingSecretName }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecretName }}
+                  key: {{ .Values.database.existingSecretKey | quote }}
+            {{- else }}
+            - name: DATABASE_URL
+              value: {{ .Values.database.url | quote }}
+            {{- end }}
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: http
             initialDelaySeconds: {{ .Values.apiService.readinessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.apiService.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.apiService.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.apiService.readinessProbe.failureThreshold }}
           livenessProbe:
             httpGet:
               path: /health
               port: http
             initialDelaySeconds: {{ .Values.apiService.livenessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.apiService.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.apiService.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.apiService.livenessProbe.failureThreshold }}
           resources:
 {{ toYaml .Values.apiService.resources | indent 12 }}
-      volumes:
-        - name: api-service-data
-          persistentVolumeClaim:
-            claimName: {{ include "sndbx.apiServiceName" . }}-data

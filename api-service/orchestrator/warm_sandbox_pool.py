@@ -15,9 +15,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Deque, Dict, Optional, Set, Tuple
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 if TYPE_CHECKING:
     from config import Config
@@ -34,6 +34,22 @@ def _compatible_pool_shape(
     memory_limit: str,
 ) -> tuple[str, str, str]:
     return (template_id.strip(), str(cpu_limit), str(memory_limit))
+
+
+def warm_pool_key_string(
+    template_id: str,
+    cpu_limit: str,
+    memory_limit: str,
+    timeout: int,
+) -> str:
+    return "|".join(
+        [
+            template_id.strip(),
+            str(cpu_limit),
+            str(memory_limit),
+            str(int(timeout)),
+        ]
+    )
 
 
 class WarmSandboxPool:
@@ -60,10 +76,15 @@ class WarmSandboxPool:
         self._from_snapshot = (from_snapshot_image or "").strip() or None
         self._provision_concurrency = max(1, int(provision_concurrency))
         self._lock = threading.Lock()
-        self._available: Deque[str] = deque()
-        self._warm_ids: Set[str] = set()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._pending_futures: set[Future[tuple[Optional[str], str, int]]] = set()
+        self._pending_futures_lock = threading.Lock()
+        self._pending_gateway_bytes: Dict[str, int] = {}
+        self._pending_gateway_counts: Dict[str, int] = {}
+        self._wake = threading.Event()
+        self._last_inventory_reconcile_at = 0.0
 
     @property
     def from_snapshot_image(self) -> Optional[str]:
@@ -74,10 +95,18 @@ class WarmSandboxPool:
     def pool_key(self) -> PoolKey:
         return (self._logical_template_id, self._cpu, self._mem, self._timeout)
 
+    @property
+    def pool_key_string(self) -> str:
+        return warm_pool_key_string(self._logical_template_id, self._cpu, self._mem, self._timeout)
+
     def start(self) -> None:
         if self._size <= 0:
             return
         self._stop.clear()
+        self._executor = ThreadPoolExecutor(
+            max_workers=self._provision_concurrency,
+            thread_name_prefix=f"warm-pool-{self._logical_template_id[:12]}",
+        )
         self._thread = threading.Thread(
             target=self._run,
             name=f"warm-pool-{self._logical_template_id[:16]}",
@@ -99,36 +128,25 @@ class WarmSandboxPool:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=timeout)
-        with self._lock:
-            ids = list(self._available)
-            self._available.clear()
-            self._warm_ids.clear()
-        for sid in ids:
-            try:
-                self._manager.kill_sandbox(sid)
-            except Exception as ex:  # noqa: BLE001
-                logger.warning("Warm pool shutdown: failed to kill %s: %s", sid, ex)
+        executor = self._executor
+        self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def discard(self, sandbox_id: str) -> None:
-        with self._lock:
-            try:
-                self._available.remove(sandbox_id)
-            except ValueError:
-                pass
-            self._warm_ids.discard(sandbox_id)
+        return None
 
     def stats(self) -> dict[str, Any]:
-        with self._lock:
-            return {
-                "template_id": self._logical_template_id,
-                "target_size": self._size,
-                "ready": len(self._available),
-                "from_snapshot_image": self._from_snapshot,
-                "cpu_limit": self._cpu,
-                "memory_limit": self._mem,
-                "timeout": self._timeout,
-                "provision_concurrency": self._provision_concurrency,
-            }
+        return {
+            "template_id": self._logical_template_id,
+            "target_size": self._size,
+            "ready": self._manager.warm_pool_ready_count(self.pool_key_string),
+            "from_snapshot_image": self._from_snapshot,
+            "cpu_limit": self._cpu,
+            "memory_limit": self._mem,
+            "timeout": self._timeout,
+            "provision_concurrency": self._provision_concurrency,
+        }
 
     def try_acquire(
         self,
@@ -137,6 +155,8 @@ class WarmSandboxPool:
         cpu_limit: str,
         memory_limit: str,
         timeout: int,
+        owner_client_id: Optional[str] = None,
+        owner_api_key_id: Optional[str] = None,
     ) -> Optional[str]:
         if self._size <= 0:
             return None
@@ -144,20 +164,42 @@ class WarmSandboxPool:
             return None
         if str(cpu_limit) != self._cpu or str(memory_limit) != self._mem:
             return None
-        with self._lock:
-            if not self._available:
-                return None
-            sid = self._available.popleft()
-            self._warm_ids.discard(sid)
-        merged = dict(metadata or {})
-        merged.pop("_warm_pool", None)
-        base = self._manager.get_sandbox(sid)
-        if base:
-            prev = dict(base.get("metadata") or {})
-            prev.pop("_warm_pool", None)
-            merged = {**prev, **merged}
-        self._manager.db.merge_sandbox_metadata(sid, merged)
-        self._manager.db.update_sandbox_timeout(sid, int(timeout))
+        wait_sec = float(getattr(self._manager._config, "SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC", 0.0) or 0.0)
+        deadline = time.monotonic() + wait_sec
+        claimed = None
+        waited_for_ready = False
+        acquire_started = time.monotonic()
+        while not self._stop.is_set():
+            claim_metadata = dict(metadata or {})
+            claim_metadata.pop("_warm_pool", None)
+            claim_metadata["sandbox_allocation_source"] = (
+                "cold_create" if waited_for_ready else "warm_pool_acquire"
+            )
+            claim_metadata["sandbox_allocation_pool_key"] = self.pool_key_string
+            claim_metadata["sandbox_allocation_acquire_wait_seconds"] = round(
+                max(0.0, time.monotonic() - acquire_started),
+                3,
+            )
+            claimed = self._manager.acquire_warm_pool_sandbox(
+                template_id=template_id,
+                cpu_limit=cpu_limit,
+                memory_limit=memory_limit,
+                timeout=self._timeout,
+                owner_client_id=owner_client_id,
+                owner_api_key_id=owner_api_key_id,
+                handoff_metadata=claim_metadata,
+                handoff_timeout=int(timeout),
+            )
+            if claimed:
+                break
+            waited_for_ready = True
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.15)
+        if not claimed:
+            return None
+        sid = str(claimed.get("sandbox_id") or "").strip()
+        self._wake.set()
         logger.info("Warm pool: handed sandbox %s (template=%s)", sid, self._logical_template_id)
         return sid
 
@@ -167,9 +209,38 @@ class WarmSandboxPool:
                 self._top_up()
             except Exception as ex:  # noqa: BLE001
                 logger.exception("Warm pool top-up error: %s", ex)
-            time.sleep(1.5)
+            self._wake.wait(1.5)
+            self._wake.clear()
 
-    def _provision_one(self) -> Optional[str]:
+    @contextmanager
+    def _leader_keepalive(self):
+        stop = threading.Event()
+        ttl = max(
+            5.0,
+            float(getattr(self._manager._config, "WARM_POOL_COORDINATOR_LEASE_TTL_SEC", 15) or 15),
+        )
+        interval = max(1.0, min(ttl / 3.0, ttl - 1.0))
+
+        def _refresh_loop() -> None:
+            while not stop.wait(interval):
+                try:
+                    self._manager.is_warm_pool_leader()
+                except Exception:
+                    logger.debug("Warm pool leader keepalive refresh failed", exc_info=True)
+
+        th = threading.Thread(
+            target=_refresh_loop,
+            name=f"warm-pool-lease-{self._logical_template_id[:16]}",
+            daemon=True,
+        )
+        th.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            th.join(timeout=2.0)
+
+    def _provision_one(self, gateway_instance_id: str, reserved_bytes: int) -> tuple[Optional[str], str, int]:
         try:
             row = self._manager.db.get_sandbox_template(self._logical_template_id)
             if row:
@@ -183,77 +254,189 @@ class WarmSandboxPool:
                 self._logical_template_id,
                 exc_info=True,
             )
-        return self._manager._create_sandbox_fresh(
+        sid = self._manager._create_sandbox_fresh(
             template_id=self._logical_template_id,
             metadata={"_warm_pool": True},
             cpu_limit=self._cpu,
             memory_limit=self._mem,
             timeout=self._timeout,
             from_snapshot_image=self._from_snapshot,
+            is_warm_pool=True,
+            warm_pool_key=self.pool_key_string,
+            forced_gateway_instance_id=gateway_instance_id,
         )
+        return sid, gateway_instance_id, reserved_bytes
+
+    def _provision_batch_slots_available(self) -> int:
+        with self._pending_futures_lock:
+            pending = len(self._pending_futures)
+        return max(0, self._provision_concurrency - pending)
+
+    def _planned_target(self) -> tuple[Optional[str], int]:
+        target = self._manager.select_gateway_target_for_pool_create(
+            template_id=self._logical_template_id,
+            cpu_limit=self._cpu,
+            memory_limit=self._mem,
+            timeout=self._timeout,
+            extra_used_bytes_by_gateway=dict(self._pending_gateway_bytes),
+            extra_warm_counts_by_gateway=dict(self._pending_gateway_counts),
+        )
+        if target is None:
+            return None, 0
+        image_ref = self._from_snapshot or self._logical_template_id
+        reserved = self._manager._estimated_sandbox_reservation_bytes(
+            target,
+            template_id=self._logical_template_id,
+            image_ref=image_ref,
+            force_refresh=True,
+        )
+        return target.instance_id, reserved
+
+    def _submit_provision(self, gateway_instance_id: str, reserved_bytes: int) -> bool:
+        executor = self._executor
+        if executor is None:
+            return False
+        future = executor.submit(self._provision_one, gateway_instance_id, reserved_bytes)
+        with self._pending_futures_lock:
+            self._pending_futures.add(future)
+            self._pending_gateway_bytes[gateway_instance_id] = (
+                int(self._pending_gateway_bytes.get(gateway_instance_id) or 0) + max(0, int(reserved_bytes))
+            )
+            self._pending_gateway_counts[gateway_instance_id] = (
+                int(self._pending_gateway_counts.get(gateway_instance_id) or 0) + 1
+            )
+        return True
+
+    def _drain_completed_provisions(self) -> None:
+        completed: list[Future[tuple[Optional[str], str, int]]] = []
+        with self._pending_futures_lock:
+            for future in list(self._pending_futures):
+                if future.done():
+                    self._pending_futures.remove(future)
+                    completed.append(future)
+        for future in completed:
+            sid: Optional[str] = None
+            gateway_instance_id = ""
+            reserved_bytes = 0
+            try:
+                sid, gateway_instance_id, reserved_bytes = future.result()
+                if not sid:
+                    self._manager.db.set_warm_pool_segment_error(
+                        self.pool_key_string,
+                        self._manager.get_last_create_error() or "warm pool provisioning failed",
+                    )
+                    logger.warning("Warm pool: failed to provision (template=%s)", self._logical_template_id)
+                    continue
+                row = self._manager.get_sandbox(sid)
+                gateway_instance_id = str((row or {}).get("gateway_instance_id") or "").strip()
+                if gateway_instance_id:
+                    self._manager.db.set_warm_pool_segment_preferred_gateway(
+                        self.pool_key_string,
+                        gateway_instance_id,
+                        clear_error=True,
+                    )
+                if row and bool(row.get("is_warm_pool")):
+                    nready = self._manager.warm_pool_ready_count(self.pool_key_string)
+                    logger.info(
+                        "Warm pool: provisioned %s for template=%s (ready=%s)",
+                        sid,
+                        self._logical_template_id,
+                        nready,
+                    )
+            except Exception as ex:  # noqa: BLE001
+                self._manager.db.set_warm_pool_segment_error(
+                    self.pool_key_string,
+                    str(ex) or self._manager.get_last_create_error() or "warm pool provisioning failed",
+                )
+                logger.warning("Warm pool: failed to provision (template=%s)", self._logical_template_id)
+            finally:
+                with self._pending_futures_lock:
+                    if gateway_instance_id:
+                        self._pending_gateway_bytes[gateway_instance_id] = max(
+                            0,
+                            int(self._pending_gateway_bytes.get(gateway_instance_id) or 0) - max(0, int(reserved_bytes)),
+                        )
+                        self._pending_gateway_counts[gateway_instance_id] = max(
+                            0,
+                            int(self._pending_gateway_counts.get(gateway_instance_id) or 0) - 1,
+                        )
+                self._manager.db.release_warm_pool_slots(
+                    warm_pool_key=self.pool_key_string,
+                    count=1,
+                )
+
+    def _reconcile_inventory_if_due(self) -> None:
+        interval = float(
+            getattr(self._manager._config, "WARM_POOL_INVENTORY_RECONCILE_SEC", 10.0) or 10.0
+        )
+        if interval <= 0:
+            return
+        now = time.monotonic()
+        if now - self._last_inventory_reconcile_at < interval:
+            return
+        self._last_inventory_reconcile_at = now
+        try:
+            self._manager._live_warm_pool_rows(self.pool_key_string)
+        except Exception:
+            logger.debug(
+                "Warm pool inventory reconcile failed key=%s",
+                self.pool_key_string,
+                exc_info=True,
+            )
 
     def _top_up(self) -> None:
-        with self._lock:
-            need = self._size - len(self._available)
-        if need <= 0:
+        if not self._manager.is_warm_pool_leader():
             return
-
-        conc = max(1, min(self._provision_concurrency, need))
-
-        if conc == 1:
-            for _ in range(need):
-                if self._stop.is_set():
-                    break
-                sid = self._provision_one()
-                if not sid:
-                    logger.warning("Warm pool: failed to provision (template=%s)", self._logical_template_id)
-                    break
-                with self._lock:
-                    self._available.append(sid)
-                    self._warm_ids.add(sid)
-                with self._lock:
-                    nready = len(self._available)
-                logger.info(
-                    "Warm pool: provisioned %s for template=%s (ready=%s)",
-                    sid,
-                    self._logical_template_id,
-                    nready,
-                )
-            return
-
-        remaining = need
-        while remaining > 0 and not self._stop.is_set():
-            batch = min(remaining, conc)
-            with ThreadPoolExecutor(max_workers=batch) as ex:
-                futures = [ex.submit(self._provision_one) for _ in range(batch)]
-                results = [f.result() for f in futures]
-
-            any_fail = any(not sid for sid in results)
-            for sid in results:
-                if not sid:
-                    continue
-                with self._lock:
-                    self._available.append(sid)
-                    self._warm_ids.add(sid)
-                with self._lock:
-                    nready = len(self._available)
-                logger.info(
-                    "Warm pool: provisioned %s for template=%s (ready=%s)",
-                    sid,
-                    self._logical_template_id,
-                    nready,
-                )
-
-            remaining -= batch
-            if any_fail:
-                if any(results):
+        leader_ctx = self._leader_keepalive()
+        with leader_ctx:
+            while not self._stop.is_set():
+                self._drain_completed_provisions()
+                self._reconcile_inventory_if_due()
+                ready_count = self._manager.warm_pool_ready_count(self.pool_key_string)
+                if ready_count > self._size:
+                    self._manager.trim_warm_pool_to_size(self.pool_key_string, self._size)
+                    ready_count = self._manager.warm_pool_ready_count(self.pool_key_string)
+                if self._manager.db.reset_warm_pool_inflight(
+                    warm_pool_key=self.pool_key_string,
+                    stale_after_seconds=float(
+                        getattr(self._manager._config, "SANDBOX_WARM_POOL_INFLIGHT_STALE_SEC", 300.0) or 300.0
+                    ),
+                ):
                     logger.warning(
-                        "Warm pool: partial batch failure (template=%s); will retry on next cycle",
-                        self._logical_template_id,
+                        "Warm pool: cleared stale in-flight reservations key=%s ready=%s target=%s",
+                        self.pool_key_string,
+                        ready_count,
+                        self._size,
                     )
-                else:
-                    logger.warning("Warm pool: failed to provision (template=%s)", self._logical_template_id)
-                break
+                slots_available = self._provision_batch_slots_available()
+                if slots_available <= 0:
+                    return
+                # Ramp brand-new segments with a single first provision. A custom template's
+                # first client cold boot and a full warm-pool fan-out on the same shard can
+                # overload gVisor/Docker startup and make readiness checks fail spuriously.
+                if ready_count <= 0:
+                    slots_available = min(slots_available, 1)
+                reserve = self._manager.db.reserve_warm_pool_slots(
+                    warm_pool_key=self.pool_key_string,
+                    ready_count=ready_count,
+                    batch_max=slots_available,
+                )
+                if reserve <= 0:
+                    return
+                submitted = 0
+                for _ in range(reserve):
+                    gateway_instance_id, reserved_bytes = self._planned_target()
+                    if not gateway_instance_id:
+                        break
+                    if not self._submit_provision(gateway_instance_id, reserved_bytes):
+                        break
+                    submitted += 1
+                if submitted < reserve:
+                    self._manager.db.release_warm_pool_slots(
+                        warm_pool_key=self.pool_key_string,
+                        count=(reserve - submitted),
+                    )
+                    return
 
 
 class MultiWarmSandboxPool:
@@ -266,10 +449,13 @@ class MultiWarmSandboxPool:
         self._pools: Dict[PoolKey, WarmSandboxPool] = {}
         self._pools_lock = threading.Lock()
         self._ensure_key_locks: Dict[PoolKey, threading.Lock] = {}
+        self._sync_stop = threading.Event()
+        self._sync_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
         if self._size <= 0:
             return
+        self._sync_stop.clear()
         tid = (self._cfg.SANDBOX_WARM_POOL_TEMPLATE_ID or self._cfg.DEFAULT_TEMPLATE).strip()
         snap: Optional[str] = None
         try:
@@ -289,6 +475,13 @@ class MultiWarmSandboxPool:
             int(self._cfg.SANDBOX_WARM_POOL_TIMEOUT or self._cfg.DEFAULT_TIMEOUT),
             snap,
         )
+        self._sync_persisted_segments()
+        self._sync_thread = threading.Thread(
+            target=self._sync_loop,
+            name="warm-pool-sync",
+            daemon=True,
+        )
+        self._sync_thread.start()
 
     def ensure_pool_for(
         self,
@@ -328,6 +521,15 @@ class MultiWarmSandboxPool:
             if old is not None:
                 old.stop(timeout=20.0)
 
+            self._manager.note_warm_pool_segment(
+                template_id=key[0],
+                cpu_limit=key[1],
+                memory_limit=key[2],
+                timeout=key[3],
+                desired_size=self._size,
+                ready_image_ref=snap,
+            )
+
             pool = WarmSandboxPool(
                 self._manager,
                 logical_template_id=key[0],
@@ -349,6 +551,8 @@ class MultiWarmSandboxPool:
         cpu_limit: str,
         memory_limit: str,
         timeout: int,
+        owner_client_id: Optional[str] = None,
+        owner_api_key_id: Optional[str] = None,
     ) -> Optional[str]:
         key: PoolKey = (
             template_id.strip(),
@@ -365,8 +569,39 @@ class MultiWarmSandboxPool:
                         pool = existing_pool
                         break
         if pool is None:
-            return None
-        return pool.try_acquire(template_id, metadata, cpu_limit, memory_limit, timeout)
+            claim_metadata = dict(metadata or {})
+            claim_metadata.pop("_warm_pool", None)
+            claim_metadata["sandbox_allocation_source"] = "warm_pool_acquire"
+            claim_metadata["sandbox_allocation_pool_key"] = self._manager.warm_pool_key(
+                template_id,
+                cpu_limit,
+                memory_limit,
+                int(timeout),
+            )
+            claim_metadata["sandbox_allocation_acquire_wait_seconds"] = 0.0
+            claimed = self._manager.acquire_warm_pool_sandbox(
+                template_id=template_id,
+                cpu_limit=cpu_limit,
+                memory_limit=memory_limit,
+                timeout=int(timeout),
+                owner_client_id=owner_client_id,
+                owner_api_key_id=owner_api_key_id,
+                handoff_metadata=claim_metadata,
+                handoff_timeout=int(timeout),
+            )
+            if not claimed:
+                return None
+            sid = str(claimed.get("sandbox_id") or "").strip()
+            return sid
+        return pool.try_acquire(
+            template_id,
+            metadata,
+            cpu_limit,
+            memory_limit,
+            timeout,
+            owner_client_id=owner_client_id,
+            owner_api_key_id=owner_api_key_id,
+        )
 
     def discard(self, sandbox_id: str) -> None:
         with self._pools_lock:
@@ -375,12 +610,52 @@ class MultiWarmSandboxPool:
             p.discard(sandbox_id)
 
     def stop(self, timeout: float = 5.0) -> None:
+        self._sync_stop.set()
+        if self._sync_thread and self._sync_thread.is_alive():
+            self._sync_thread.join(timeout=timeout)
+        self._sync_thread = None
         with self._pools_lock:
             pools = list(self._pools.values())
             self._pools.clear()
             self._ensure_key_locks.clear()
         for p in pools:
             p.stop(timeout=timeout)
+
+    def _sync_loop(self) -> None:
+        while not self._sync_stop.wait(1.5):
+            try:
+                self._sync_persisted_segments()
+            except Exception:
+                logger.debug("warm pool: persisted segment sync failed", exc_info=True)
+
+    def _sync_persisted_segments(self) -> None:
+        tid = (self._cfg.SANDBOX_WARM_POOL_TEMPLATE_ID or self._cfg.DEFAULT_TEMPLATE).strip()
+        default_key = warm_pool_key_string(
+            tid,
+            self._cfg.SANDBOX_WARM_POOL_CPU or self._cfg.DEFAULT_CPU_LIMIT,
+            self._cfg.SANDBOX_WARM_POOL_MEMORY or self._cfg.DEFAULT_MEMORY_LIMIT,
+            int(self._cfg.SANDBOX_WARM_POOL_TIMEOUT or self._cfg.DEFAULT_TIMEOUT),
+        )
+        try:
+            persisted = self._manager.db.list_warm_pool_segments()
+        except Exception:
+            logger.debug("warm pool: could not list persisted segments", exc_info=True)
+            return
+        for segment in persisted:
+            if str(segment.get("warm_pool_key") or "") == default_key:
+                continue
+            if int(segment.get("desired_size") or 0) <= 0:
+                continue
+            seg_tid = str(segment.get("template_id") or "").strip()
+            if not seg_tid:
+                continue
+            self.ensure_pool_for(
+                seg_tid,
+                str(segment.get("cpu_limit") or self._cfg.DEFAULT_CPU_LIMIT),
+                str(segment.get("memory_limit") or self._cfg.DEFAULT_MEMORY_LIMIT),
+                int(segment.get("timeout") or self._cfg.DEFAULT_TIMEOUT),
+                (str(segment.get("ready_image_ref") or "").strip() or None),
+            )
 
     def _ensure_key_lock(self, key: PoolKey) -> threading.Lock:
         with self._pools_lock:

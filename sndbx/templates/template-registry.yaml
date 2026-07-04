@@ -1,0 +1,110 @@
+{{- if eq (include "sndbx.templateRegistryInternalEnabled" .) "true" }}
+apiVersion: {{ .Values.api.service | quote }}
+kind: Service
+metadata:
+  name: {{ include "sndbx.templateRegistryName" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+    component: template-registry
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Chart.Name }}
+    tier: {{ .Values.tier }}
+    component: template-registry
+  ports:
+    - name: registry
+      port: {{ .Values.templateRegistry.internal.servicePort }}
+      targetPort: registry
+      protocol: TCP
+---
+apiVersion: {{ .Values.api.deployment | quote }}
+kind: Deployment
+metadata:
+  name: {{ include "sndbx.templateRegistryName" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+    component: template-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+      tier: {{ .Values.tier }}
+      component: template-registry
+  template:
+    metadata:
+      labels:
+        app: {{ .Chart.Name }}
+        tier: {{ .Values.tier }}
+        component: template-registry
+    spec:
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+      {{- range .Values.imagePullSecrets }}
+        - name: {{ . }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: registry
+          image: {{ .Values.templateRegistry.internal.image | quote }}
+          imagePullPolicy: {{ .Values.templateRegistry.internal.pullPolicy }}
+          ports:
+            - name: registry
+              containerPort: {{ .Values.templateRegistry.internal.servicePort }}
+              protocol: TCP
+          env:
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+          volumeMounts:
+            - name: registry-data
+              mountPath: /var/lib/registry
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: registry
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: registry
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+{{ toYaml .Values.templateRegistry.internal.resources | indent 12 }}
+      volumes:
+        - name: registry-data
+          {{- if .Values.templateRegistry.internal.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "sndbx.templateRegistryName" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- if .Values.templateRegistry.internal.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "sndbx.templateRegistryName" . }}-data
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+    component: template-registry
+spec:
+  accessModes:
+{{ toYaml .Values.templateRegistry.internal.persistence.accessModes | indent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.templateRegistry.internal.persistence.size | quote }}
+  {{- if .Values.templateRegistry.internal.persistence.storageClassName }}
+  storageClassName: {{ .Values.templateRegistry.internal.persistence.storageClassName | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

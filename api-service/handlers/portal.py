@@ -29,7 +29,7 @@ _PBKDF2_ITERS = 240_000
 
 
 def _db() -> Database:
-    return Database(get_config().DATABASE_PATH)
+    return Database(get_config().DATABASE_URL)
 
 
 def _utc_now() -> datetime:

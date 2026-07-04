@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Sandbox Portal</title>
+    <title>Sandbox Console</title>
     <link rel="stylesheet" href="/portal/static/portal.css" />
   </head>
   <body class="portal-shell">
@@ -22,8 +22,9 @@
         </div>
       </details>
     {%- endmacro %}
+
     <aside class="sidebar">
-      <div class="logo-row">E2B</div>
+      <div class="logo-row">SNDBX</div>
       <div class="team-card">
         <div class="team-label">TEAM</div>
         <div class="team-name">{{ client.display_name or client.email }}</div>
@@ -70,192 +71,196 @@
 
       {% if active_section == "sandboxes" %}
       <section class="table-panel">
-        <div class="panel-title">{{ sandboxes|length }} sandbox rows</div>
+        <div class="list-toolbar">
+          <label class="search-box">
+            <input class="table-search" type="search" placeholder="Search by name or ID..." autocomplete="off" aria-label="Search sandboxes" />
+            <kbd>/</kbd>
+          </label>
+          <div class="row-count">{{ sandboxes|length }} SANDBOXES</div>
+        </div>
         <div class="table-wrap">
-        <table class="ops-table sandbox-table">
-          <thead>
-            <tr>
-              <th>Sandbox</th>
-              <th>State</th>
-              <th>Runtime</th>
-              <th>CPU</th>
-              <th>Memory</th>
-              <th>Disk</th>
-              <th>TTL</th>
-              <th>Template</th>
-              <th>Guest Ports</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in sandboxes %}
-            <tr class="summary-row">
-              <td class="primary-cell">
-                <div class="primary-id">
-                  <code class="id-chip" title="{{ row.sandbox_id }}">{{ row.sandbox_id }}</code>
-                </div>
-                {% if row.container_id %}
-                <div class="secondary-line">
-                  <span class="muted-label">Container</span>
-                  {{ popover(row.container_id, 'sub-id', true) }}
-                </div>
-                {% endif %}
-              </td>
-              <td><span class="status-pill">{{ row.state }}</span></td>
-              <td>{{ row.runtime }}</td>
-              <td>{{ row.cpu_limit }}</td>
-              <td>{{ row.memory_limit }}</td>
-              <td>{{ row.disk_limit }}</td>
-              <td>{{ row.ttl_remaining }}</td>
-              <td>{{ popover(row.template_id) }}</td>
-              <td><code class="ports-chip">{{ row.guest_ports }}</code></td>
-            </tr>
-            <tr class="detail-row">
-              <td colspan="9">
-                <div class="detail-grid">
-                  <div><strong>Created</strong><span title="{{ row.created_at }}">{{ row.created_at_display }}</span></div>
-                  <div><strong>Updated</strong><span title="{{ row.updated_at }}">{{ row.updated_at_display }}</span></div>
-                  <div><strong>Lease Expires</strong><span title="{{ row.lease_expires_at }}">{{ row.lease_expires_at_display }}</span></div>
-                  <div><strong>Public Traffic</strong><span>{{ row.allow_public_traffic }}</span></div>
-                </div>
-                <details>
-                  <summary>Metadata</summary>
-                  <pre>{{ row.metadata_pretty }}</pre>
-                </details>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+          <table class="ops-table sandbox-table" data-filter-table>
+            <thead>
+              <tr>
+                <th>Sandbox ID</th>
+                <th>Container</th>
+                <th>State</th>
+                <th>Runtime</th>
+                <th>Template</th>
+                <th>CPU</th>
+                <th>Mem</th>
+                <th>Disk</th>
+                <th>TTL</th>
+                <th>Ports</th>
+                <th>Created</th>
+                <th>Updated</th>
+                <th>Lease</th>
+                <th>Metadata</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in sandboxes %}
+              <tr>
+                <td class="id-cell">{{ popover(row.sandbox_id, 'id-text', true) }}</td>
+                <td class="id-cell">{{ popover(row.container_id or '-', 'id-text muted-code', true) }}</td>
+                <td><span class="status-pill">{{ row.state }}</span></td>
+                <td>{{ row.runtime }}</td>
+                <td>{{ popover(row.template_id) }}</td>
+                <td>{{ row.cpu_limit }}</td>
+                <td>{{ row.memory_limit }}</td>
+                <td>{{ row.disk_limit }}</td>
+                <td class="mono-cell">{{ row.ttl_remaining }}</td>
+                <td>{{ popover(row.guest_ports, 'id-text', true) }}</td>
+                <td class="time-cell" title="{{ row.created_at }}">{{ row.created_at_display }}</td>
+                <td class="time-cell" title="{{ row.updated_at }}">{{ row.updated_at_display }}</td>
+                <td class="time-cell" title="{{ row.lease_expires_at }}">{{ row.lease_expires_at_display }}</td>
+                <td>{{ popover(row.metadata_pretty, 'table-action', true) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
       </section>
       {% elif active_section == "api_keys" %}
       <section class="table-panel">
-        <div class="panel-head-inline">
-          <div class="panel-title">{{ api_keys|length }} API keys</div>
+        <div class="list-toolbar split">
+          <label class="search-box">
+            <input class="table-search" type="search" placeholder="Search by name or prefix..." autocomplete="off" aria-label="Search API keys" />
+            <kbd>/</kbd>
+          </label>
+          <div class="row-count">{{ api_keys|length }} API KEYS</div>
           <form class="create-form" method="post" action="/portal/api-keys">
             <input type="text" name="name" placeholder="Key name" required />
             <button type="submit">Create API Key</button>
           </form>
         </div>
         <div class="table-wrap">
-        <table class="ops-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Prefix</th>
-              <th>Created</th>
-              <th>Last Used</th>
-              <th>Status</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for key in api_keys %}
-            <tr class="summary-row">
-              <td>{{ key.name }}</td>
-              <td><code>{{ key.key_prefix }}</code></td>
-              <td title="{{ key.created_at }}">{{ key.created_at_display }}</td>
-              <td title="{{ key.last_used_at or '-' }}">{{ key.last_used_at_display }}</td>
-              <td><span class="status-pill {% if key.revoked_at %}danger{% endif %}">{{ "revoked" if key.revoked_at else "active" }}</span></td>
-              <td>
-                {% if not key.revoked_at %}
-                <form method="post" action="/portal/api-keys/{{ key.key_id }}/revoke">
-                  <button class="ghost-button" type="submit">Revoke</button>
-                </form>
-                {% endif %}
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+          <table class="ops-table api-key-table" data-filter-table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Prefix</th>
+                <th>Created</th>
+                <th>Last Used</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for key in api_keys %}
+              <tr>
+                <td>{{ popover(key.name) }}</td>
+                <td>{{ popover(key.key_prefix, 'id-text', true) }}</td>
+                <td title="{{ key.created_at }}">{{ key.created_at_display }}</td>
+                <td title="{{ key.last_used_at or '-' }}">{{ key.last_used_at_display }}</td>
+                <td><span class="status-pill {% if key.revoked_at %}danger{% endif %}">{{ "revoked" if key.revoked_at else "active" }}</span></td>
+                <td>
+                  {% if not key.revoked_at %}
+                  <form method="post" action="/portal/api-keys/{{ key.key_id }}/revoke">
+                    <button class="ghost-button" type="submit">Revoke</button>
+                  </form>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
       </section>
       {% elif template_tab == "builds" %}
       <section class="table-panel">
-        <div class="panel-title">{{ build_rows|length }} template builds</div>
+        <div class="list-toolbar">
+          <label class="search-box">
+            <input class="table-search" type="search" placeholder="Search by template, build, image..." autocomplete="off" aria-label="Search builds" />
+            <kbd>/</kbd>
+          </label>
+          <div class="row-count">{{ build_rows|length }} BUILDS</div>
+        </div>
         <div class="table-wrap">
-        <table class="ops-table build-table">
-          <thead>
-            <tr>
-              <th>Template</th>
-              <th>Status</th>
-              <th>Mode</th>
-              <th>Image</th>
-              <th>Started</th>
-              <th>Completed</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in build_rows %}
-            <tr class="summary-row">
-              <td>
-                <div class="primary-id">{{ popover(row.template_id) }}</div>
-                <div class="secondary-line">
-                  <span class="muted-label">Build</span>
-                  {{ popover(row.build_id, 'sub-id', true) }}
-                </div>
-              </td>
-              <td><span class="status-pill {% if row.status == 'failed' %}danger{% elif row.status == 'success' %}success{% endif %}">{{ row.status }}</span></td>
-              <td>{{ popover(row.requested_mode ~ ' / ' ~ (row.effective_mode or '-')) }}</td>
-              <td>{{ popover(row.image_tag or '-', 'id-chip small', true) }}</td>
-              <td title="{{ row.created_at }}">{{ row.created_at_display }}</td>
-              <td title="{{ row.completed_at or '-' }}">{{ row.completed_at_display }}</td>
-            </tr>
-            <tr class="detail-row">
-              <td colspan="6">
-                {% if row.error_text %}
-                <div class="notice error compact">{{ row.error_text }}</div>
-                {% endif %}
-                <details>
-                  <summary>Build Log</summary>
-                  <pre>{{ row.build_log or "No build log captured." }}</pre>
-                </details>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+          <table class="ops-table build-table" data-filter-table>
+            <thead>
+              <tr>
+                <th>Template</th>
+                <th>Build ID</th>
+                <th>Status</th>
+                <th>Mode</th>
+                <th>Image</th>
+                <th>Started</th>
+                <th>Completed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in build_rows %}
+              <tr class="build-click-row" tabindex="0" aria-expanded="false">
+                <td>{{ popover(row.template_id) }}</td>
+                <td>{{ popover(row.build_id, 'id-text', true) }}</td>
+                <td><span class="status-pill {% if row.status == 'failed' %}danger{% elif row.status == 'success' %}success{% endif %}">{{ row.status }}</span></td>
+                <td>{{ popover(row.requested_mode ~ ' / ' ~ (row.effective_mode or '-')) }}</td>
+                <td>{{ popover(row.image_tag or '-', 'id-text', true) }}</td>
+                <td title="{{ row.created_at }}">{{ row.created_at_display }}</td>
+                <td title="{{ row.completed_at or '-' }}">{{ row.completed_at_display }}</td>
+              </tr>
+              <tr class="build-detail-row" hidden>
+                <td colspan="7">
+                  <div class="build-detail">
+                    <div class="build-detail-head">
+                      <span>Build details</span>
+                      <span class="muted-code">{{ row.build_id }}</span>
+                    </div>
+                    {% if row.error_text %}
+                    <div class="notice error compact">{{ row.error_text }}</div>
+                    {% endif %}
+                    <pre>{{ row.build_log or "No build log captured." }}</pre>
+                  </div>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
       </section>
       {% else %}
       <section class="table-panel">
-        <div class="panel-title">{{ templates_rows|length }} templates</div>
+        <div class="list-toolbar">
+          <label class="search-box">
+            <input class="table-search" type="search" placeholder="Search by name or ID..." autocomplete="off" aria-label="Search templates" />
+            <kbd>/</kbd>
+          </label>
+          <div class="row-count">{{ templates_rows|length }} TEMPLATES</div>
+        </div>
         <div class="table-wrap">
-        <table class="ops-table template-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Internal ID</th>
-              <th>Base Image</th>
-              <th>Updated</th>
-              <th>Visibility</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in templates_rows %}
-            <tr class="summary-row">
-              <td>{{ popover(row.template_id) }}</td>
-              <td>{{ popover(row.internal_id, 'id-chip small', true) }}</td>
-              <td>{{ popover(row.base_image) }}</td>
-              <td title="{{ row.updated_at }}">{{ row.updated_at_display }}</td>
-              <td><span class="status-pill neutral">CLIENT</span></td>
-            </tr>
-            <tr class="detail-row">
-              <td colspan="5">
-                <div class="detail-grid">
-                  <div><strong>Created</strong><span title="{{ row.created_at }}">{{ row.created_at_display }}</span></div>
-                  <div><strong>Warm Snapshot</strong><span>{{ popover(row.warm_snapshot_image or '-', 'sub-id', true) }}</span></div>
-                  <div><strong>Start Cmd</strong><span>{{ popover(row.start_cmd or '-', 'detail-inline') }}</span></div>
-                  <div><strong>Ready Cmd</strong><span>{{ popover(row.ready_cmd or '-', 'detail-inline') }}</span></div>
-                </div>
-                {% if row.build_error %}
-                <div class="notice error compact">{{ row.build_error }}</div>
-                {% endif %}
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+          <table class="ops-table template-table" data-filter-table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Internal ID</th>
+                <th>Base Image</th>
+                <th>Snapshot</th>
+                <th>Start</th>
+                <th>Ready</th>
+                <th>Created</th>
+                <th>Updated</th>
+                <th>Visibility</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in templates_rows %}
+              <tr>
+                <td>{{ popover(row.template_id) }}</td>
+                <td>{{ popover(row.internal_id, 'id-text', true) }}</td>
+                <td>{{ popover(row.base_image) }}</td>
+                <td>{{ popover(row.warm_snapshot_image or '-', 'id-text', true) }}</td>
+                <td>{{ popover(row.start_cmd or '-', 'id-text') }}</td>
+                <td>{{ popover(row.ready_cmd or '-', 'id-text') }}</td>
+                <td title="{{ row.created_at }}">{{ row.created_at_display }}</td>
+                <td title="{{ row.updated_at }}">{{ row.updated_at_display }}</td>
+                <td><span class="status-pill neutral">CLIENT</span></td>
+                <td>{{ popover(row.build_error or '-', 'table-action') }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
       </section>
       {% endif %}
@@ -273,6 +278,54 @@
           const details = backdrop.closest(".value-popover");
           if (details) details.removeAttribute("open");
         }
+      });
+      document.addEventListener("toggle", function (event) {
+        const current = event.target;
+        if (!current.matches(".value-popover") || !current.open) return;
+        document.querySelectorAll(".value-popover[open]").forEach(function (details) {
+          if (details !== current) details.removeAttribute("open");
+        });
+      }, true);
+      document.querySelectorAll(".table-panel").forEach(function (panel) {
+        const input = panel.querySelector(".table-search");
+        const table = panel.querySelector("[data-filter-table]");
+        if (!input || !table) return;
+        const rows = Array.from(table.querySelectorAll("tbody tr:not(.build-detail-row)"));
+        input.addEventListener("input", function () {
+          const needle = input.value.trim().toLowerCase();
+          rows.forEach(function (row) {
+            const detail = row.nextElementSibling && row.nextElementSibling.classList.contains("build-detail-row")
+              ? row.nextElementSibling
+              : null;
+            const haystack = ((row.textContent || "") + " " + (detail ? detail.textContent || "" : "")).toLowerCase();
+            const shouldHide = needle !== "" && !haystack.includes(needle);
+            row.hidden = shouldHide;
+            if (detail) detail.hidden = shouldHide || row.getAttribute("aria-expanded") !== "true";
+          });
+        });
+      });
+      document.querySelectorAll(".build-click-row").forEach(function (row) {
+        function toggleBuildRow(event) {
+          if (event && event.target.closest(".value-popover")) return;
+          const detail = row.nextElementSibling;
+          if (!detail || !detail.classList.contains("build-detail-row")) return;
+          const nextOpen = row.getAttribute("aria-expanded") !== "true";
+          row.setAttribute("aria-expanded", String(nextOpen));
+          detail.hidden = !nextOpen;
+        }
+        row.addEventListener("click", toggleBuildRow);
+        row.addEventListener("keydown", function (event) {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          toggleBuildRow(event);
+        });
+      });
+      document.addEventListener("keydown", function (event) {
+        if (event.key !== "/" || event.target.matches("input, textarea")) return;
+        const input = document.querySelector(".table-search");
+        if (!input) return;
+        event.preventDefault();
+        input.focus();
       });
     </script>
   </body>

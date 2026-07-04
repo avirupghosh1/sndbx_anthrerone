@@ -17,6 +17,10 @@ class SandboxResponse(BaseModel):
     )
     metadata: Optional[Dict[str, Any]] = Field(default={}, description="Custom metadata")
     container_id: Optional[str] = Field(default=None, description="Container ID")
+    gateway_instance_id: Optional[str] = Field(
+        default=None,
+        description="Runtime-gateway shard that owns this sandbox workload.",
+    )
     runtime: str = Field(
         default="docker",
         description="Engine label: ``docker``, ``gvisor`` (Docker + ``runsc``), or ``firecracker`` (KVM microVM).",
@@ -92,7 +96,7 @@ class SandboxTimeoutRefreshResponse(BaseModel):
 
 
 class SnapshotRecordResponse(BaseModel):
-    """One row from ``docker commit`` + SQLite ``sandbox_snapshots``."""
+    """One row from ``docker commit`` + ``sandbox_snapshots``."""
 
     snapshot_id: str
     source_sandbox_id: str

@@ -5,6 +5,14 @@ branchName: master
 k8sClusterName: apps-gke
 cloudProvider: gcp
 
+replicas:
+  apiService: 1
+  runtimeGateway: 3
+
+database:
+  existingSecretName: sndbx-qa6-tier1-secret
+  existingSecretKey: DATABASE_URL
+
 images:
   apiService:
     repo: prod-nexus.sprinklr.com:8123
@@ -48,12 +56,19 @@ runtimeGateway:
         cpu: "4"
         memory: 8Gi
 
+templateRegistry:
+  pushEnabled: true
+  authRequired: true
+  repoPrefix: asia-south1-docker.pkg.dev/gc-qa6/gc-qa6/sndbx-templates
+  layout: repository_per_template
+  server: asia-south1-docker.pkg.dev
+  existingSecretName: sndbx-qa6-tier1-secret
+
 config:
   apiService:
     SANDBOX_DATA_PLANE_DOMAIN: "sndbx.sprinklr.com"
     SANDBOX_DATA_PLANE_SCHEME: "https"
     SANDBOX_WARM_POOL_SIZE: "2"
-    DATABASE_PATH: "/var/lib/api/sandboxes.db"
   runtimeGateway:
     SANDBOX_DOMAIN: "sndbx.sprinklr.com"
 

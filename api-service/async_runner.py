@@ -1,4 +1,4 @@
-"""Run blocking I/O (Docker, SQLite) off the main asyncio loop so Uvicorn can still serve /health."""
+"""Run blocking I/O off the main asyncio loop so Uvicorn can still serve /health."""
 
 from __future__ import annotations
 

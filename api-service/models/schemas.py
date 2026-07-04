@@ -59,11 +59,11 @@ class CreateSandboxRequest(BaseModel):
 class CreateSnapshotRequest(BaseModel):
     """Optional label for a filesystem snapshot (Docker ``docker commit``)."""
 
-    label: Optional[str] = Field(default=None, max_length=200, description="Human-readable label stored in SQLite")
+    label: Optional[str] = Field(default=None, max_length=200, description="Human-readable label stored with the snapshot")
 
 
 class RefreshSandboxTimeoutRequest(BaseModel):
-    """E2B-style ``set_timeout`` / lease refresh: updates the stored sandbox timeout in SQLite."""
+    """E2B-style ``set_timeout`` / lease refresh: updates the stored sandbox timeout."""
 
     timeout_seconds: int = Field(
         ...,

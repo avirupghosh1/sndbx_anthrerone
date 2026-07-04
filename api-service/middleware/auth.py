@@ -45,12 +45,12 @@ def api_key_prefix(api_key: str) -> str:
 
 
 @lru_cache(maxsize=4)
-def _db_for_path(db_path: str) -> Database:
-    return Database(db_path)
+def _db_for_url(database_url: str) -> Database:
+    return Database(database_url)
 
 
 def _db() -> Database:
-    return _db_for_path(get_config().DATABASE_PATH)
+    return _db_for_url(get_config().DATABASE_URL)
 
 
 def _internal_expected_key() -> str:

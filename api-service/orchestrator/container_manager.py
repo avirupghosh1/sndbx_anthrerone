@@ -66,8 +66,9 @@ class ContainerConfig:
 class ContainerManager:
     """Manages container lifecycle (Docker Engine; optional ``runsc`` / gVisor OCI runtime)."""
 
-    def __init__(self, oci_runtime: Optional[str] = None):
+    def __init__(self, oci_runtime: Optional[str] = None, base_url: Optional[str] = None):
         self._oci_runtime: Optional[str] = "runsc" if (oci_runtime or "").strip().lower() == "runsc" else None
+        self._base_url = (base_url or "").strip() or None
         self._docker_connect_error: Optional[str] = None
         self.client = None
         # Lazy connect: daemon may start after the API (Colima/Docker); retry on each operation if needed.
@@ -82,15 +83,48 @@ class ContainerManager:
 
             cfg = get_config()
             api_timeout = max(60, int(getattr(cfg, "TEMPLATE_DOCKER_CLIENT_TIMEOUT_SEC", 600) or 600))
-            self.client = docker.from_env(timeout=api_timeout)
+            if self._base_url:
+                self.client = docker.DockerClient(base_url=self._base_url, timeout=api_timeout)
+            else:
+                self.client = docker.from_env(timeout=api_timeout)
             self._docker_connect_error = None
-            logger.info("Docker client connected (docker.from_env)")
+            logger.info(
+                "Docker client connected (%s)",
+                self._base_url or "docker.from_env",
+            )
             return True
         except Exception as e:
             self._docker_connect_error = f"{type(e).__name__}: {e}"
             logger.warning("docker.from_env() failed: %s", self._docker_connect_error)
             self.client = None
             return False
+
+    def _reset_docker_client(self) -> None:
+        client = self.client
+        self.client = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _is_transient_docker_error(exc: Exception) -> bool:
+        text = f"{type(exc).__name__}: {exc}".lower()
+        needles = (
+            "name or service not known",
+            "failed to resolve",
+            "connection refused",
+            "connection aborted",
+            "connection reset",
+            "read timed out",
+            "connect timeout",
+            "max retries exceeded",
+        )
+        return any(n in text for n in needles)
+
+    def _retry_delay(self, attempt: int) -> None:
+        time.sleep(min(2.0, 0.25 * (attempt + 1)))
 
     def describe_docker_unavailable(self) -> Optional[str]:
         """Human-readable reason when ``self.client`` is missing or daemon is down."""
@@ -152,13 +186,29 @@ class ContainerManager:
         
         Returns container ID on success, None on failure.
         """
-        if not self._ensure_docker_client():
-            logger.error(
-                "Docker client not available%s",
-                f": {self._docker_connect_error}" if self._docker_connect_error else "",
-            )
-            return None
+        last_error: Optional[Exception] = None
+        for attempt in range(3):
+            if not self._ensure_docker_client():
+                self._retry_delay(attempt)
+                continue
+            try:
+                return self._create_container_once(name, config)
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                if self._is_transient_docker_error(e) and attempt < 2:
+                    logger.warning("Transient Docker create failure for %s; retrying: %s", name, e)
+                    self._reset_docker_client()
+                    self._retry_delay(attempt)
+                    continue
+                break
+        logger.error(
+            "Failed to create container %s: %s",
+            name,
+            last_error or self._docker_connect_error or "Docker client not available",
+        )
+        return None
 
+    def _create_container_once(self, name: str, config: ContainerConfig) -> Optional[str]:
         try:
             # Ensure image exists
             try:
@@ -172,9 +222,9 @@ class ContainerManager:
             cpu_quota = self._parse_cpu_limit(config.cpu_limit)
 
             logger.info(f"Creating container: {name} (oci_runtime={self._oci_runtime or 'default'})")
+            startup_cmd = [str(part) for part in (config.startup_command or []) if str(part).strip()]
             run_kwargs: Dict[str, Any] = dict(
                 image=config.image,
-                command="/bin/bash",
                 detach=True,
                 stdin_open=True,
                 tty=True,
@@ -188,6 +238,13 @@ class ContainerManager:
                 read_only=False,
                 restart_policy={"Name": "no"},
             )
+            if startup_cmd:
+                # Docker ``command=`` only overrides ``CMD`` and still preserves the image
+                # ``ENTRYPOINT``. Use ``entrypoint=`` here so the startup wrapper is truly PID 1,
+                # matching the K8s pod path.
+                run_kwargs["entrypoint"] = startup_cmd
+            else:
+                run_kwargs["command"] = "/bin/bash"
             ports_map: Dict[str, Any] = dict(run_kwargs.get("ports") or {})
             for gp in config.guest_ports or []:
                 p = max(1, min(65535, int(gp)))
@@ -207,9 +264,8 @@ class ContainerManager:
             logger.info(f"Container created: {container.id[:12]}")
             return container.id
 
-        except Exception as e:
-            logger.error(f"Failed to create container {name}: {e}")
-            return None
+        except Exception:
+            raise
 
     def image_exists(self, image_ref: str) -> bool:
         if not self._ensure_docker_client():
@@ -227,8 +283,14 @@ class ContainerManager:
         removed = 0
         try:
             for container in self.client.containers.list(all=True, filters={"status": "exited"}):
+                name = ""
+                try:
+                    name = str(getattr(container, "name", "") or "").strip()
+                except Exception:
+                    name = ""
+                sandbox_container = name.startswith("sandbox-")
                 finished = (container.attrs.get("State") or {}).get("FinishedAt")
-                if finished:
+                if finished and not sandbox_container:
                     try:
                         ts = datetime.fromisoformat(str(finished).replace("Z", "+00:00")).timestamp()
                     except ValueError:
@@ -301,69 +363,73 @@ class ContainerManager:
         
         Returns dict with exit_code, stdout, stderr, pid.
         """
-        if not self._ensure_docker_client():
-            return {
-                "exit_code": -1,
-                "stdout": "",
-                "stderr": "Docker client not available",
-                "pid": -1,
-            }
+        last_error: Optional[Exception] = None
+        for attempt in range(3):
+            if not self._ensure_docker_client():
+                self._retry_delay(attempt)
+                continue
+            try:
+                container = self.client.containers.get(container_id)
 
-        try:
-            container = self.client.containers.get(container_id)
-
-            def _exec():
-                # Run through a shell so pipelines, redirects, &&, and globs behave like a terminal.
-                exec_cmd = ["/bin/sh", "-c", command]
-                kw: Dict[str, Any] = dict(
-                    cmd=exec_cmd,
-                    workdir=cwd or "/",
-                    user=user or "root",
-                )
-                # Only pass ``environment`` when the caller supplies vars; otherwise inherit the
-                # container's env (e.g. Dockerfile / template ``ENV`` baked into ``containers.run``).
-                if env:
-                    kw["environment"] = env
-                return container.exec_run(**kw)
-
-            # docker-py 7+ removed exec_run(timeout=...); enforce API deadline in the caller thread.
-            exec_timeout = float(timeout) if timeout is not None else 30.0
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                fut = pool.submit(_exec)
-                try:
-                    result = fut.result(timeout=exec_timeout)
-                except FuturesTimeout:
-                    logger.warning(
-                        "Command timed out after %.1fs (exec may still run in container): %s",
-                        exec_timeout,
-                        container_id[:12],
+                def _exec():
+                    # Run through a shell so pipelines, redirects, &&, and globs behave like a terminal.
+                    exec_cmd = ["/bin/sh", "-c", command]
+                    kw: Dict[str, Any] = dict(
+                        cmd=exec_cmd,
+                        workdir=cwd or "/",
+                        user=user or "root",
                     )
-                    return {
-                        "exit_code": 124,
-                        "stdout": "",
-                        "stderr": f"Command timed out after {exec_timeout} seconds",
-                        "pid": -1,
-                    }
+                    # Only pass ``environment`` when the caller supplies vars; otherwise inherit the
+                    # container's env (e.g. Dockerfile / template ``ENV`` baked into ``containers.run``).
+                    if env:
+                        kw["environment"] = env
+                    return container.exec_run(**kw)
 
-            stdout = result.output.decode("utf-8", errors="replace") if result.output else ""
+                # docker-py 7+ removed exec_run(timeout=...); enforce API deadline in the caller thread.
+                exec_timeout = float(timeout) if timeout is not None else 30.0
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    fut = pool.submit(_exec)
+                    try:
+                        result = fut.result(timeout=exec_timeout)
+                    except FuturesTimeout:
+                        logger.warning(
+                            "Command timed out after %.1fs (exec may still run in container): %s",
+                            exec_timeout,
+                            container_id[:12],
+                        )
+                        return {
+                            "exit_code": 124,
+                            "stdout": "",
+                            "stderr": f"Command timed out after {exec_timeout} seconds",
+                            "pid": -1,
+                        }
 
-            logger.info(f"Command executed in {container_id[:12]}: exit_code={result.exit_code}")
+                stdout = result.output.decode("utf-8", errors="replace") if result.output else ""
 
-            return {
-                "exit_code": result.exit_code,
-                "stdout": stdout,
-                "stderr": "",  # Docker doesn't separate stderr
-                "pid": result.exit_code,  # Not real PID from Docker
-            }
+                logger.info(f"Command executed in {container_id[:12]}: exit_code={result.exit_code}")
 
-        except Exception as e:
-            logger.error(f"Failed to execute command in {container_id}: {e}")
-            return {
-                "exit_code": -1,
-                "stdout": "",
-                "stderr": str(e),
-                "pid": -1,
-            }
+                return {
+                    "exit_code": result.exit_code,
+                    "stdout": stdout,
+                    "stderr": "",  # Docker doesn't separate stderr
+                    "pid": result.exit_code,  # Not real PID from Docker
+                }
+
+            except Exception as e:
+                last_error = e
+                if self._is_transient_docker_error(e) and attempt < 2:
+                    logger.warning("Transient Docker exec failure in %s; retrying: %s", container_id[:12], e)
+                    self._reset_docker_client()
+                    self._retry_delay(attempt)
+                    continue
+                break
+        logger.error(f"Failed to execute command in {container_id}: {last_error or 'Docker client not available'}")
+        return {
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": str(last_error or "Docker client not available"),
+            "pid": -1,
+        }
 
     def put_archive_to_container(self, container_id: str, path: str, data: bytes) -> bool:
         """Upload a tarball to ``path`` in the container (same mechanism as ``COPY`` / ``put_archive``).
@@ -372,34 +438,44 @@ class ContainerManager:
         (same as :meth:`write_file`), then runs ``tar xf <file> -C <dest>`` — Engine
         ``put_archive`` often 404s, and ``tar xf -`` over a TTY exec is rejected by GNU tar.
         """
-        if not self._ensure_docker_client():
-            return False
-        try:
-            container = self.client.containers.get(container_id)
-            dest = (path or "/").rstrip("/") or "/"
-            mkdir = container.exec_run(
-                ["/bin/sh", "-c", f"mkdir -p {shlex.quote(dest)}"],
-                user="root",
-            )
-            if mkdir.exit_code != 0:
-                out = mkdir.output
-                err = out.decode("utf-8", errors="replace") if isinstance(out, (bytes, bytearray)) else str(out)
-                logger.error(
-                    "put_archive_to_container mkdir failed %s path=%r exit=%s err=%r",
-                    container_id[:12],
-                    dest,
-                    mkdir.exit_code,
-                    err[:2000],
+        last_error: Optional[Exception] = None
+        for attempt in range(3):
+            if not self._ensure_docker_client():
+                self._retry_delay(attempt)
+                continue
+            try:
+                container = self.client.containers.get(container_id)
+                dest = (path or "/").rstrip("/") or "/"
+                mkdir = container.exec_run(
+                    ["/bin/sh", "-c", f"mkdir -p {shlex.quote(dest)}"],
+                    user="root",
                 )
-                return False
-            if not data:
-                return True
-            if self._oci_runtime == "runsc":
-                return self._put_archive_via_staged_tarfile(container, dest, data)
-            return bool(container.put_archive(dest, data))
-        except Exception as e:
-            logger.error("put_archive_to_container %s path=%r: %s", container_id[:12], path, e)
-            return False
+                if mkdir.exit_code != 0:
+                    out = mkdir.output
+                    err = out.decode("utf-8", errors="replace") if isinstance(out, (bytes, bytearray)) else str(out)
+                    logger.error(
+                        "put_archive_to_container mkdir failed %s path=%r exit=%s err=%r",
+                        container_id[:12],
+                        dest,
+                        mkdir.exit_code,
+                        err[:2000],
+                    )
+                    return False
+                if not data:
+                    return True
+                if self._oci_runtime == "runsc":
+                    return self._put_archive_via_staged_tarfile(container, dest, data)
+                return bool(container.put_archive(dest, data))
+            except Exception as e:
+                last_error = e
+                if self._is_transient_docker_error(e) and attempt < 2:
+                    logger.warning("Transient Docker put_archive failure for %s; retrying: %s", container_id[:12], e)
+                    self._reset_docker_client()
+                    self._retry_delay(attempt)
+                    continue
+                break
+        logger.error("put_archive_to_container %s path=%r: %s", container_id[:12], path, last_error)
+        return False
 
     def _exec_env_list(self, env: Optional[Dict[str, str]]) -> Optional[List[str]]:
         if not env:
@@ -1131,27 +1207,35 @@ class ContainerManager:
 
     def kill_container(self, container_id: str, force: bool = True) -> bool:
         """Kill container."""
-        if not self._ensure_docker_client():
-            return False
+        last_error: Optional[Exception] = None
+        for attempt in range(3):
+            if not self._ensure_docker_client():
+                self._retry_delay(attempt)
+                continue
+            try:
+                container = self.client.containers.get(container_id)
 
-        try:
-            container = self.client.containers.get(container_id)
+                if force:
+                    container.kill()
+                else:
+                    container.stop(timeout=10)
 
-            if force:
-                container.kill()
-            else:
-                container.stop(timeout=10)
-
-            container.remove()
-            logger.info(f"Container killed: {container_id[:12]}")
-            return True
-        except docker.errors.NotFound:
-            logger.info("Container already absent: %s", container_id[:12])
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to kill container {container_id}: {e}")
-            return False
+                container.remove()
+                logger.info(f"Container killed: {container_id[:12]}")
+                return True
+            except docker.errors.NotFound:
+                logger.info("Container already absent: %s", container_id[:12])
+                return True
+            except Exception as e:
+                last_error = e
+                if self._is_transient_docker_error(e) and attempt < 2:
+                    logger.warning("Transient Docker kill failure for %s; retrying: %s", container_id[:12], e)
+                    self._reset_docker_client()
+                    self._retry_delay(attempt)
+                    continue
+                break
+        logger.error(f"Failed to kill container {container_id}: {last_error or 'Docker client not available'}")
+        return False
 
     def get_container_internal_ipv4(self, container_id: str) -> Optional[str]:
         """First non-empty IPv4 from Docker ``NetworkSettings`` (prefers ``bridge``)."""
@@ -1286,16 +1370,28 @@ class ContainerManager:
 
     def is_container_running(self, container_id: str) -> bool:
         """Check if container is running."""
-        if not self._ensure_docker_client():
-            return False
+        return self.get_container_state(container_id) == "running"
 
-        try:
-            container = self.client.containers.get(container_id)
-            return container.status == "running"
-
-        except Exception as e:
-            logger.error(f"Failed to check container status {container_id}: {e}")
-            return False
+    def get_container_state(self, container_id: str) -> str:
+        """Return running/stopped/missing/unknown for scheduler-safe liveness checks."""
+        for attempt in range(3):
+            if not self._ensure_docker_client():
+                self._retry_delay(attempt)
+                continue
+            try:
+                container = self.client.containers.get(container_id)
+                return "running" if container.status == "running" else "stopped"
+            except docker.errors.NotFound:
+                return "missing"
+            except Exception as e:  # noqa: BLE001
+                if self._is_transient_docker_error(e) and attempt < 2:
+                    logger.warning("Transient Docker state failure for %s; retrying: %s", container_id[:12], e)
+                    self._reset_docker_client()
+                    self._retry_delay(attempt)
+                    continue
+                logger.warning("Container state unknown %s: %s", container_id[:12], e)
+                return "unknown"
+        return "unknown"
 
     @staticmethod
     def _parse_cpu_limit(cpu_limit: str) -> int:
