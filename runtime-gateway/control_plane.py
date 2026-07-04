@@ -22,6 +22,9 @@ class SandboxRoute:
     allow_public_traffic: bool
     traffic_access_token: Optional[str] = None
     guest_routing: Optional[dict[str, Any]] = None
+    gateway_instance_id: Optional[str] = None
+    gateway_route_base: Optional[str] = None
+    gateway_api_base: Optional[str] = None
 
 
 @dataclass
@@ -87,6 +90,15 @@ class ControlPlaneClient:
             if data.get("traffic_access_token")
             else None,
             guest_routing=data.get("guest_routing") if isinstance(data.get("guest_routing"), dict) else None,
+            gateway_instance_id=(str(data.get("gateway_instance_id")).strip() or None)
+            if data.get("gateway_instance_id")
+            else None,
+            gateway_route_base=(str(data.get("gateway_route_base")).strip() or None)
+            if data.get("gateway_route_base")
+            else None,
+            gateway_api_base=(str(data.get("gateway_api_base")).strip() or None)
+            if data.get("gateway_api_base")
+            else None,
         )
 
 

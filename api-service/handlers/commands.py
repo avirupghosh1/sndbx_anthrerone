@@ -121,7 +121,7 @@ async def list_commands(
     _ensure_live_sandbox(sandbox_manager, sandbox_id)
 
     # Get command history
-    db = Database(get_config().DATABASE_PATH)
+    db = Database(get_config().DATABASE_URL)
     history = db.get_command_history(sandbox_id, limit=limit)
 
     return {"commands": history}

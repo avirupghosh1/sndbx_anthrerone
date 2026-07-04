@@ -31,6 +31,15 @@ def _resolve_template_id_for_principal(sandbox_manager: SandboxManager, principa
     owned = sandbox_manager.db.get_sandbox_template_by_alias(principal.client_id, requested)
     if owned:
         return str(owned["template_id"])
+    if principal.client_id == "bootstrap-local-client":
+        # Local compatibility: the static API_KEY is a bootstrap/dev key, while
+        # templates may have been built through a real portal client key.
+        materialized = sandbox_manager.db.get_best_sandbox_template_by_alias(
+            requested,
+            exclude_template_id=requested,
+        )
+        if materialized:
+            return str(materialized["template_id"])
     return requested
 
 
@@ -77,7 +86,7 @@ async def create_sandbox(
             detail = f"{detail} {hint}"
         raise HTTPException(status_code=503, detail=detail)
 
-    sandbox = sandbox_manager.get_sandbox(sandbox_id)
+    sandbox = sandbox_manager.get_sandbox_for_create_response(sandbox_id)
 
     return SandboxResponse(**enrich_sandbox_response(sandbox, sandbox_manager._config, include_secrets=True))
 

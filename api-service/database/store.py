@@ -1,10 +1,15 @@
 """Database layer for storing sandbox, template, and tenant state."""
 
 import json
-import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Dict, List, Optional
+
+try:
+    import psycopg
+except Exception:  # noqa: BLE001
+    psycopg = None
 
 
 def _utc_now_iso() -> str:
@@ -12,14 +17,55 @@ def _utc_now_iso() -> str:
 
 
 class Database:
-    """SQLite database for persistent storage."""
+    """Persistent metadata store backed by PostgreSQL."""
 
-    SQLITE_BUSY_TIMEOUT_MS = 30_000
+    class _CursorProxy:
+        def __init__(self, raw_cursor):
+            self._raw = raw_cursor
 
-    @staticmethod
-    def _migrate_add_runtime_column(cursor) -> None:
-        cursor.execute("PRAGMA table_info(sandboxes)")
-        cols = [r[1] for r in cursor.fetchall()]
+        def execute(self, sql: str, params=None):
+            rendered = self._render(sql)
+            if params is None:
+                return self._raw.execute(rendered)
+            return self._raw.execute(rendered, params)
+
+        def executemany(self, sql: str, params_seq):
+            return self._raw.executemany(self._render(sql), params_seq)
+
+        def _render(self, sql: str) -> str:
+            return sql.replace("?", "%s")
+
+        def __iter__(self):
+            return iter(self._raw)
+
+        def __getattr__(self, name: str):
+            return getattr(self._raw, name)
+
+    class _ConnectionProxy:
+        def __init__(self, raw_conn):
+            self._raw = raw_conn
+
+        def cursor(self):
+            return Database._CursorProxy(self._raw.cursor())
+
+        def __getattr__(self, name: str):
+            return getattr(self._raw, name)
+
+    def _table_columns(self, cursor, table_name: str) -> List[str]:
+        cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = ?
+            ORDER BY ordinal_position
+            """,
+            (table_name,),
+        )
+        return [str(r[0]) for r in cursor.fetchall()]
+
+    def _migrate_add_runtime_column(self, cursor) -> None:
+        cols = self._table_columns(cursor, "sandboxes")
         if "runtime" not in cols:
             cursor.execute(
                 "ALTER TABLE sandboxes ADD COLUMN runtime TEXT NOT NULL DEFAULT 'docker'"
@@ -28,14 +74,32 @@ class Database:
             cursor.execute(
                 "ALTER TABLE sandboxes ADD COLUMN lease_expires_at TEXT"
             )
+        if "gateway_instance_id" not in cols:
+            cursor.execute("ALTER TABLE sandboxes ADD COLUMN gateway_instance_id TEXT")
+        if "gateway_route_base" not in cols:
+            cursor.execute("ALTER TABLE sandboxes ADD COLUMN gateway_route_base TEXT")
+        if "gateway_api_base" not in cols:
+            cursor.execute("ALTER TABLE sandboxes ADD COLUMN gateway_api_base TEXT")
+        if "gateway_docker_host" not in cols:
+            cursor.execute("ALTER TABLE sandboxes ADD COLUMN gateway_docker_host TEXT")
+        if "is_warm_pool" not in cols:
+            cursor.execute("ALTER TABLE sandboxes ADD COLUMN is_warm_pool INTEGER NOT NULL DEFAULT 0")
+        if "warm_pool_key" not in cols:
+            cursor.execute("ALTER TABLE sandboxes ADD COLUMN warm_pool_key TEXT")
 
     @staticmethod
-    def _sandbox_dict_from_row(cursor: sqlite3.Cursor, row) -> Dict[str, Any]:
+    def _sandbox_dict_from_row(cursor, row) -> Dict[str, Any]:
         names = [d[0] for d in cursor.description]
         d = dict(zip(names, row))
         d["metadata"] = json.loads(d["metadata"]) if d.get("metadata") else {}
         d.setdefault("runtime", "docker")
         d.setdefault("disk_limit", "")
+        d.setdefault("gateway_instance_id", "")
+        d.setdefault("gateway_route_base", "")
+        d.setdefault("gateway_api_base", "")
+        d.setdefault("gateway_docker_host", "")
+        d["is_warm_pool"] = bool(d.get("is_warm_pool"))
+        d.setdefault("warm_pool_key", "")
         return d
 
     @staticmethod
@@ -64,24 +128,86 @@ class Database:
             "revoked_at": row[8],
         }
 
-    def __init__(self, db_path: str = "sandboxes.db"):
-        self.db_path = db_path
+    def __init__(self, database_url: str):
+        self.database_url = (database_url or "").strip()
+        if not self.database_url.startswith(("postgres://", "postgresql://")):
+            raise ValueError("DATABASE_URL must be a non-empty PostgreSQL DSN")
         self._lock = Lock()
+        self._advisory_lock_conns: Dict[str, Any] = {}
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=self.SQLITE_BUSY_TIMEOUT_MS / 1000.0)
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(f"PRAGMA busy_timeout = {self.SQLITE_BUSY_TIMEOUT_MS}")
-        return conn
+    def _connect(self):
+        if psycopg is None:
+            raise RuntimeError("psycopg is required for PostgreSQL DATABASE_URL")
+        return self._ConnectionProxy(self._connect_postgres())
+
+    def _connect_postgres(self, *, autocommit: bool = False):
+        attempts = 4
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                return psycopg.connect(self.database_url, autocommit=autocommit)
+            except Exception as ex:  # noqa: BLE001
+                last_error = ex
+                text = f"{type(ex).__name__}: {ex}".lower()
+                transient = any(
+                    needle in text
+                    for needle in (
+                        "failed to resolve host",
+                        "temporary failure in name resolution",
+                        "connection refused",
+                        "could not connect",
+                        "timeout expired",
+                    )
+                )
+                if not transient or attempt >= attempts - 1:
+                    raise
+                time.sleep(0.25 * (attempt + 1))
+        raise last_error  # type: ignore[misc]
+
+    def acquire_postgres_advisory_lock(self, lock_name: str) -> bool:
+        name = (lock_name or "").strip()
+        if not name:
+            return False
+        with self._lock:
+            existing = self._advisory_lock_conns.get(name)
+            if existing is not None:
+                return True
+            if psycopg is None:
+                return False
+            conn = self._connect_postgres(autocommit=True)
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                        (name,),
+                    )
+                    row = cursor.fetchone()
+                ok = bool(row and row[0])
+                if ok:
+                    self._advisory_lock_conns[name] = conn
+                    return True
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                raise
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return False
 
     def _init_db(self):
         """Initialize database schema."""
         with self._lock:
             conn = self._connect()
             cursor = conn.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                ("sndbx_schema_migration",),
+            )
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS clients (
@@ -125,8 +251,15 @@ class Database:
                     disk_limit TEXT,
                     timeout INTEGER,
                     lease_expires_at TEXT,
+                    runtime TEXT NOT NULL DEFAULT 'docker',
                     owner_client_id TEXT,
-                    owner_api_key_id TEXT
+                    owner_api_key_id TEXT,
+                    is_warm_pool INTEGER NOT NULL DEFAULT 0,
+                    warm_pool_key TEXT,
+                    gateway_instance_id TEXT,
+                    gateway_route_base TEXT,
+                    gateway_api_base TEXT,
+                    gateway_docker_host TEXT
                 )
             """)
 
@@ -157,7 +290,7 @@ class Database:
                     message_type TEXT NOT NULL,
                     content TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
-                    processed BOOLEAN DEFAULT 0,
+                    processed BOOLEAN DEFAULT FALSE,
                     FOREIGN KEY (agent_id) REFERENCES agents(agent_id),
                     FOREIGN KEY (sandbox_id) REFERENCES sandboxes(sandbox_id)
                 )
@@ -201,6 +334,8 @@ class Database:
                     start_cmd TEXT NOT NULL,
                     settle_seconds INTEGER NOT NULL DEFAULT 20,
                     warm_snapshot_image TEXT,
+                    registry_image_ref TEXT,
+                    materialized_gateway_instance_id TEXT,
                     build_error TEXT,
                     owner_client_id TEXT,
                     owner_api_key_id TEXT,
@@ -220,6 +355,8 @@ class Database:
                     effective_mode TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL,
                     image_tag TEXT,
+                    registry_image_ref TEXT,
+                    gateway_instance_id TEXT,
                     build_log TEXT,
                     error_text TEXT,
                     created_at TEXT NOT NULL,
@@ -228,9 +365,37 @@ class Database:
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS service_leases (
+                    lease_name TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS warm_pool_segments (
+                    warm_pool_key TEXT PRIMARY KEY,
+                    template_id TEXT NOT NULL,
+                    cpu_limit TEXT NOT NULL,
+                    memory_limit TEXT NOT NULL,
+                    timeout INTEGER NOT NULL,
+                    desired_size INTEGER NOT NULL DEFAULT 0,
+                    inflight_count INTEGER NOT NULL DEFAULT 0,
+                    inflight_updated_at TEXT,
+                    ready_image_ref TEXT,
+                    preferred_gateway_instance_id TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
             self._migrate_templates_ready_cmd(cursor)
             self._migrate_tenant_columns(cursor)
             self._migrate_template_source_columns(cursor)
+            self._migrate_warm_pool_segment_columns(cursor)
             cursor.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_sandbox_templates_owner_alias
@@ -255,34 +420,59 @@ class Database:
                 ON template_builds(owner_client_id, created_at DESC)
                 """
             )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_sandboxes_gateway_instance
+                ON sandboxes(gateway_instance_id, created_at)
+                """
+            )
 
             conn.commit()
             conn.close()
 
-    @staticmethod
-    def _migrate_templates_ready_cmd(cursor) -> None:
-        cursor.execute("PRAGMA table_info(sandbox_templates)")
-        cols = [r[1] for r in cursor.fetchall()]
+    def _migrate_templates_ready_cmd(self, cursor) -> None:
+        cols = self._table_columns(cursor, "sandbox_templates")
         if cols and "ready_cmd" not in cols:
             cursor.execute(
                 "ALTER TABLE sandbox_templates ADD COLUMN ready_cmd TEXT NOT NULL DEFAULT ''"
             )
+        if cols and "registry_image_ref" not in cols:
+            cursor.execute(
+                "ALTER TABLE sandbox_templates ADD COLUMN registry_image_ref TEXT"
+            )
+        if cols and "materialized_gateway_instance_id" not in cols:
+            cursor.execute(
+                "ALTER TABLE sandbox_templates ADD COLUMN materialized_gateway_instance_id TEXT"
+            )
 
-    @staticmethod
-    def _migrate_tenant_columns(cursor) -> None:
-        cursor.execute("PRAGMA table_info(sandboxes)")
-        sandbox_cols = [r[1] for r in cursor.fetchall()]
+    def _migrate_tenant_columns(self, cursor) -> None:
+        sandbox_cols = self._table_columns(cursor, "sandboxes")
         if sandbox_cols and "owner_client_id" not in sandbox_cols:
             cursor.execute("ALTER TABLE sandboxes ADD COLUMN owner_client_id TEXT")
         if sandbox_cols and "owner_api_key_id" not in sandbox_cols:
             cursor.execute("ALTER TABLE sandboxes ADD COLUMN owner_api_key_id TEXT")
         if sandbox_cols and "disk_limit" not in sandbox_cols:
             cursor.execute("ALTER TABLE sandboxes ADD COLUMN disk_limit TEXT")
+        if sandbox_cols and "gateway_instance_id" not in sandbox_cols:
+            cursor.execute("ALTER TABLE sandboxes ADD COLUMN gateway_instance_id TEXT")
+        if sandbox_cols and "gateway_route_base" not in sandbox_cols:
+            cursor.execute("ALTER TABLE sandboxes ADD COLUMN gateway_route_base TEXT")
+        if sandbox_cols and "gateway_api_base" not in sandbox_cols:
+            cursor.execute("ALTER TABLE sandboxes ADD COLUMN gateway_api_base TEXT")
+        if sandbox_cols and "gateway_docker_host" not in sandbox_cols:
+            cursor.execute("ALTER TABLE sandboxes ADD COLUMN gateway_docker_host TEXT")
+        if sandbox_cols and "is_warm_pool" not in sandbox_cols:
+            cursor.execute("ALTER TABLE sandboxes ADD COLUMN is_warm_pool INTEGER NOT NULL DEFAULT 0")
+        if sandbox_cols and "warm_pool_key" not in sandbox_cols:
+            cursor.execute("ALTER TABLE sandboxes ADD COLUMN warm_pool_key TEXT")
+        warm_cols = self._table_columns(cursor, "warm_pool_segments")
+        if warm_cols and "inflight_count" not in warm_cols:
+            cursor.execute(
+                "ALTER TABLE warm_pool_segments ADD COLUMN inflight_count INTEGER NOT NULL DEFAULT 0"
+            )
 
-    @staticmethod
-    def _migrate_template_source_columns(cursor) -> None:
-        cursor.execute("PRAGMA table_info(sandbox_templates)")
-        cols = [r[1] for r in cursor.fetchall()]
+    def _migrate_template_source_columns(self, cursor) -> None:
+        cols = self._table_columns(cursor, "sandbox_templates")
         if cols and "source_kind" not in cols:
             cursor.execute("ALTER TABLE sandbox_templates ADD COLUMN source_kind TEXT NOT NULL DEFAULT ''")
         if cols and "source_build_mode" not in cols:
@@ -294,8 +484,7 @@ class Database:
         if cols and "context_tar_gzip_base64" not in cols:
             cursor.execute("ALTER TABLE sandbox_templates ADD COLUMN context_tar_gzip_base64 TEXT")
 
-        cursor.execute("PRAGMA table_info(sandbox_templates)")
-        template_cols = [r[1] for r in cursor.fetchall()]
+        template_cols = self._table_columns(cursor, "sandbox_templates")
         if template_cols and "template_alias" not in template_cols:
             cursor.execute("ALTER TABLE sandbox_templates ADD COLUMN template_alias TEXT NOT NULL DEFAULT ''")
             cursor.execute("UPDATE sandbox_templates SET template_alias = template_id WHERE template_alias = ''")
@@ -303,11 +492,30 @@ class Database:
             cursor.execute("ALTER TABLE sandbox_templates ADD COLUMN owner_client_id TEXT")
         if template_cols and "owner_api_key_id" not in template_cols:
             cursor.execute("ALTER TABLE sandbox_templates ADD COLUMN owner_api_key_id TEXT")
+        if template_cols and "registry_image_ref" not in template_cols:
+            cursor.execute("ALTER TABLE sandbox_templates ADD COLUMN registry_image_ref TEXT")
+        if template_cols and "materialized_gateway_instance_id" not in template_cols:
+            cursor.execute("ALTER TABLE sandbox_templates ADD COLUMN materialized_gateway_instance_id TEXT")
 
-        cursor.execute("PRAGMA table_info(sandbox_snapshots)")
-        snap_cols = [r[1] for r in cursor.fetchall()]
+        snap_cols = self._table_columns(cursor, "sandbox_snapshots")
         if snap_cols and "owner_client_id" not in snap_cols:
             cursor.execute("ALTER TABLE sandbox_snapshots ADD COLUMN owner_client_id TEXT")
+        build_cols = self._table_columns(cursor, "template_builds")
+        if build_cols and "registry_image_ref" not in build_cols:
+            cursor.execute("ALTER TABLE template_builds ADD COLUMN registry_image_ref TEXT")
+        if build_cols and "gateway_instance_id" not in build_cols:
+            cursor.execute("ALTER TABLE template_builds ADD COLUMN gateway_instance_id TEXT")
+
+    def _migrate_warm_pool_segment_columns(self, cursor) -> None:
+        cols = self._table_columns(cursor, "warm_pool_segments")
+        if cols and "inflight_count" not in cols:
+            cursor.execute(
+                "ALTER TABLE warm_pool_segments ADD COLUMN inflight_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if cols and "inflight_updated_at" not in cols:
+            cursor.execute(
+                "ALTER TABLE warm_pool_segments ADD COLUMN inflight_updated_at TEXT"
+            )
 
     def create_client(
         self,
@@ -505,11 +713,19 @@ class Database:
         disk_limit: str = "",
         owner_client_id: Optional[str] = None,
         owner_api_key_id: Optional[str] = None,
+        is_warm_pool: bool = False,
+        warm_pool_key: Optional[str] = None,
+        gateway_instance_id: Optional[str] = None,
+        gateway_route_base: Optional[str] = None,
+        gateway_api_base: Optional[str] = None,
+        gateway_docker_host: Optional[str] = None,
+        state: str = "running",
     ) -> Dict[str, Any]:
         """Create sandbox record."""
         now = _utc_now_iso()
+        lease_seconds = max(3600, int(timeout)) if is_warm_pool else max(60, int(timeout))
         lease_expires_at = (
-            datetime.now(timezone.utc) + timedelta(seconds=max(60, int(timeout)))
+            datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
         ).isoformat().replace("+00:00", "Z")
         metadata_json = json.dumps(metadata or {})
 
@@ -521,12 +737,13 @@ class Database:
                 INSERT INTO sandboxes
                 (sandbox_id, container_id, state, template_id, created_at, updated_at, metadata,
                  cpu_limit, memory_limit, disk_limit, timeout, lease_expires_at, runtime,
-                 owner_client_id, owner_api_key_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 owner_client_id, owner_api_key_id, is_warm_pool, warm_pool_key, gateway_instance_id, gateway_route_base,
+                 gateway_api_base, gateway_docker_host)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 sandbox_id,
                 container_id,
-                "running",
+                (state or "running").strip() or "running",
                 template_id,
                 now,
                 now,
@@ -539,6 +756,12 @@ class Database:
                 runtime,
                 owner_client_id,
                 owner_api_key_id,
+                1 if is_warm_pool else 0,
+                (warm_pool_key or "").strip() or None,
+                gateway_instance_id,
+                gateway_route_base,
+                gateway_api_base,
+                gateway_docker_host,
             ))
 
             conn.commit()
@@ -547,7 +770,7 @@ class Database:
         return {
             "sandbox_id": sandbox_id,
             "container_id": container_id,
-            "state": "running",
+            "state": (state or "running").strip() or "running",
             "created_at": now,
             "updated_at": now,
             "metadata": metadata or {},
@@ -555,6 +778,12 @@ class Database:
             "disk_limit": disk_limit,
             "owner_client_id": owner_client_id,
             "owner_api_key_id": owner_api_key_id,
+            "is_warm_pool": bool(is_warm_pool),
+            "warm_pool_key": (warm_pool_key or "").strip(),
+            "gateway_instance_id": gateway_instance_id or "",
+            "gateway_route_base": gateway_route_base or "",
+            "gateway_api_base": gateway_api_base or "",
+            "gateway_docker_host": gateway_docker_host or "",
         }
 
     def get_sandbox(self, sandbox_id: str) -> Optional[Dict[str, Any]]:
@@ -664,7 +893,7 @@ class Database:
             cursor.execute(
                 """
                 UPDATE sandboxes
-                SET owner_client_id = ?, owner_api_key_id = ?, updated_at = ?
+                SET owner_client_id = ?, owner_api_key_id = ?, is_warm_pool = 0, warm_pool_key = NULL, updated_at = ?
                 WHERE sandbox_id = ?
                 """,
                 (owner_client_id, owner_api_key_id, now, sandbox_id),
@@ -673,6 +902,541 @@ class Database:
             conn.commit()
             conn.close()
         return n > 0
+
+    def assign_sandbox_gateway(
+        self,
+        sandbox_id: str,
+        *,
+        gateway_instance_id: Optional[str],
+        gateway_route_base: Optional[str],
+        gateway_api_base: Optional[str],
+        gateway_docker_host: Optional[str],
+    ) -> bool:
+        now = _utc_now_iso()
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE sandboxes
+                SET gateway_instance_id = ?, gateway_route_base = ?, gateway_api_base = ?,
+                    gateway_docker_host = ?, updated_at = ?
+                WHERE sandbox_id = ?
+                """,
+                (
+                    (gateway_instance_id or "").strip() or None,
+                    (gateway_route_base or "").strip() or None,
+                    (gateway_api_base or "").strip() or None,
+                    (gateway_docker_host or "").strip() or None,
+                    now,
+                    sandbox_id,
+                ),
+            )
+            n = cursor.rowcount
+            conn.commit()
+            conn.close()
+        return n > 0
+
+    def claim_warm_pool_sandbox(
+        self,
+        *,
+        warm_pool_key: str,
+        gateway_instance_id: Optional[str],
+        owner_client_id: Optional[str],
+        owner_api_key_id: Optional[str],
+        metadata_updates: Optional[Dict[str, Any]] = None,
+        timeout_seconds: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        now = _utc_now_iso()
+        key = (warm_pool_key or "").strip()
+        gateway = (gateway_instance_id or "").strip()
+        if not key:
+            return None
+        updates = dict(metadata_updates or {})
+        updates.pop("_warm_pool", None)
+        claim_started = time.monotonic()
+        conn = self._connect()
+        cursor = conn.cursor()
+        sql = """
+                SELECT *
+                FROM sandboxes
+                WHERE state = 'running'
+                  AND is_warm_pool = 1
+                  AND warm_pool_key = ?
+                  {gateway_clause}
+                ORDER BY created_at ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+        """
+        if gateway:
+            rendered = sql.format(gateway_clause="AND gateway_instance_id = ?")
+            params = (key, gateway)
+        else:
+            rendered = sql.format(gateway_clause="")
+            params = (key,)
+        cursor.execute(rendered, params)
+        row = cursor.fetchone()
+        if not row:
+            conn.commit()
+            conn.close()
+            return None
+        picked = self._sandbox_dict_from_row(cursor, row)
+        prev = dict(picked.get("metadata") or {})
+        prev.pop("_warm_pool", None)
+        merged = {**prev, **updates}
+        base_wait = float(merged.get("sandbox_allocation_acquire_wait_seconds") or 0.0)
+        merged["sandbox_allocation_acquire_wait_seconds"] = round(
+            base_wait + max(0.0, time.monotonic() - claim_started),
+            3,
+        )
+        timeout_value = int(timeout_seconds) if timeout_seconds is not None else int(picked.get("timeout") or 3600)
+        lease_expires_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=max(60, timeout_value))
+        ).isoformat().replace("+00:00", "Z")
+        cursor.execute(
+            """
+            UPDATE sandboxes
+            SET owner_client_id = ?, owner_api_key_id = ?, is_warm_pool = 0,
+                warm_pool_key = NULL, metadata = ?, timeout = ?,
+                lease_expires_at = ?, updated_at = ?
+            WHERE sandbox_id = ?
+            RETURNING *
+            """,
+            (
+                owner_client_id,
+                owner_api_key_id,
+                json.dumps(merged),
+                timeout_value,
+                lease_expires_at,
+                now,
+                picked["sandbox_id"],
+            ),
+        )
+        updated = cursor.fetchone()
+        result = self._sandbox_dict_from_row(cursor, updated) if updated else None
+        conn.commit()
+        conn.close()
+        return result
+
+    def list_warm_pool_sandboxes(self, *, warm_pool_key: Optional[str] = None) -> List[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        if (warm_pool_key or "").strip():
+            cursor.execute(
+                """
+                SELECT * FROM sandboxes
+                WHERE state = 'running'
+                  AND is_warm_pool = 1
+                  AND warm_pool_key = ?
+                ORDER BY created_at ASC
+                """,
+                ((warm_pool_key or "").strip(),),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT * FROM sandboxes
+                WHERE state = 'running'
+                  AND is_warm_pool = 1
+                ORDER BY created_at ASC
+                """
+            )
+        rows = cursor.fetchall()
+        out = [self._sandbox_dict_from_row(cursor, row) for row in rows]
+        conn.close()
+        return out
+
+    def upsert_warm_pool_segment(
+        self,
+        *,
+        warm_pool_key: str,
+        template_id: str,
+        cpu_limit: str,
+        memory_limit: str,
+        timeout: int,
+        desired_size: int,
+        ready_image_ref: Optional[str] = None,
+        preferred_gateway_instance_id: Optional[str] = None,
+        last_error: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        now = _utc_now_iso()
+        key = (warm_pool_key or "").strip()
+        if not key:
+            raise ValueError("warm_pool_key is required")
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT warm_pool_key FROM warm_pool_segments WHERE warm_pool_key = ?",
+                (key,),
+            )
+            exists = cursor.fetchone() is not None
+            if exists:
+                cursor.execute(
+                    """
+                    UPDATE warm_pool_segments
+                    SET template_id = ?, cpu_limit = ?, memory_limit = ?, timeout = ?,
+                        desired_size = ?, ready_image_ref = ?,
+                        preferred_gateway_instance_id = COALESCE(?, preferred_gateway_instance_id),
+                        last_error = ?, updated_at = ?
+                    WHERE warm_pool_key = ?
+                    """,
+                    (
+                        template_id,
+                        str(cpu_limit),
+                        str(memory_limit),
+                        int(timeout),
+                        max(0, int(desired_size)),
+                        (ready_image_ref or "").strip() or None,
+                        (preferred_gateway_instance_id or "").strip() or None,
+                        last_error,
+                        now,
+                        key,
+                    ),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO warm_pool_segments
+                    (warm_pool_key, template_id, cpu_limit, memory_limit, timeout, desired_size, inflight_count,
+                     inflight_updated_at, ready_image_ref, preferred_gateway_instance_id, last_error, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        key,
+                        template_id,
+                        str(cpu_limit),
+                        str(memory_limit),
+                        int(timeout),
+                        max(0, int(desired_size)),
+                        0,
+                        None,
+                        (ready_image_ref or "").strip() or None,
+                        (preferred_gateway_instance_id or "").strip() or None,
+                        last_error,
+                        now,
+                        now,
+                    ),
+                )
+            conn.commit()
+            conn.close()
+        return self.get_warm_pool_segment(key) or {}
+
+    def get_warm_pool_segment(self, warm_pool_key: str) -> Optional[Dict[str, Any]]:
+        key = (warm_pool_key or "").strip()
+        if not key:
+            return None
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM warm_pool_segments WHERE warm_pool_key = ?", (key,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return None
+            names = [d[0] for d in cursor.description]
+            src = dict(zip(names, row))
+            conn.close()
+        return {
+            "warm_pool_key": src.get("warm_pool_key"),
+            "template_id": src.get("template_id"),
+            "cpu_limit": src.get("cpu_limit"),
+            "memory_limit": src.get("memory_limit"),
+            "timeout": int(src.get("timeout") or 0),
+            "desired_size": int(src.get("desired_size") or 0),
+            "inflight_count": int(src.get("inflight_count") or 0),
+            "inflight_updated_at": src.get("inflight_updated_at"),
+            "ready_image_ref": src.get("ready_image_ref"),
+            "preferred_gateway_instance_id": src.get("preferred_gateway_instance_id"),
+            "last_error": src.get("last_error"),
+            "created_at": src.get("created_at"),
+            "updated_at": src.get("updated_at"),
+        }
+
+    def list_warm_pool_segments(self) -> List[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT *
+            FROM warm_pool_segments
+            WHERE desired_size > 0
+            ORDER BY updated_at DESC
+            """
+        )
+        rows = cursor.fetchall()
+        names = [d[0] for d in cursor.description]
+        conn.close()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            src = dict(zip(names, row))
+            out.append(
+                {
+                    "warm_pool_key": src.get("warm_pool_key"),
+                    "template_id": src.get("template_id"),
+                    "cpu_limit": src.get("cpu_limit"),
+                    "memory_limit": src.get("memory_limit"),
+                    "timeout": int(src.get("timeout") or 0),
+                    "desired_size": int(src.get("desired_size") or 0),
+                    "inflight_count": int(src.get("inflight_count") or 0),
+                    "inflight_updated_at": src.get("inflight_updated_at"),
+                    "ready_image_ref": src.get("ready_image_ref"),
+                    "preferred_gateway_instance_id": src.get("preferred_gateway_instance_id"),
+                    "last_error": src.get("last_error"),
+                    "created_at": src.get("created_at"),
+                    "updated_at": src.get("updated_at"),
+                }
+            )
+        return out
+
+    def reserve_warm_pool_slots(
+        self,
+        *,
+        warm_pool_key: str,
+        ready_count: int,
+        batch_max: int,
+    ) -> int:
+        now = _utc_now_iso()
+        key = (warm_pool_key or "").strip()
+        if not key:
+            return 0
+        want = max(0, int(batch_max))
+        if want <= 0:
+            return 0
+        ready = max(0, int(ready_count))
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT desired_size, inflight_count
+            FROM warm_pool_segments
+            WHERE warm_pool_key = ?
+            FOR UPDATE
+            """,
+            (key,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.commit()
+            conn.close()
+            return 0
+        desired = max(0, int(row[0] or 0))
+        inflight = max(0, int(row[1] or 0))
+        max_useful_inflight = max(0, desired - ready)
+        if inflight > max_useful_inflight:
+            inflight = max_useful_inflight
+            cursor.execute(
+                """
+                UPDATE warm_pool_segments
+                SET inflight_count = ?, inflight_updated_at = ?, updated_at = ?
+                WHERE warm_pool_key = ?
+                """,
+                (inflight, now, now, key),
+            )
+        reserve = max(0, min(want, desired - ready - inflight))
+        if reserve > 0:
+            cursor.execute(
+                """
+                UPDATE warm_pool_segments
+                SET inflight_count = ?, inflight_updated_at = ?, updated_at = ?
+                WHERE warm_pool_key = ?
+                """,
+                (inflight + reserve, now, now, key),
+            )
+        conn.commit()
+        conn.close()
+        return reserve
+
+    def reset_warm_pool_inflight(self, *, warm_pool_key: str, stale_after_seconds: float) -> bool:
+        """Clear stale warm-pool reservations for a segment.
+
+        ``inflight_count`` represents create work owned by a live API process. If
+        that process restarts after reserving slots, no worker remains that can
+        release them. The warm-pool leader only clears reservations that have
+        aged beyond ``stale_after_seconds`` so live long-running pulls do not
+        get double-counted.
+        """
+        now = _utc_now_iso()
+        key = (warm_pool_key or "").strip()
+        stale_after = max(0.0, float(stale_after_seconds))
+        if not key:
+            return False
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=stale_after)
+        ).isoformat().replace("+00:00", "Z")
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE warm_pool_segments
+            SET inflight_count = 0, inflight_updated_at = NULL, updated_at = ?
+            WHERE warm_pool_key = ?
+              AND inflight_count <> 0
+              AND COALESCE(inflight_updated_at, created_at) <= ?
+            """,
+            (now, key, cutoff),
+        )
+        n = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return n > 0
+
+    def release_warm_pool_slots(self, *, warm_pool_key: str, count: int) -> bool:
+        now = _utc_now_iso()
+        key = (warm_pool_key or "").strip()
+        release = max(0, int(count))
+        if not key or release <= 0:
+            return False
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT inflight_count
+            FROM warm_pool_segments
+            WHERE warm_pool_key = ?
+            FOR UPDATE
+            """,
+            (key,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.commit()
+            conn.close()
+            return False
+        inflight = max(0, int(row[0] or 0))
+        cursor.execute(
+            """
+            UPDATE warm_pool_segments
+            SET inflight_count = ?,
+                inflight_updated_at = CASE WHEN ? > 0 THEN ? ELSE NULL END,
+                updated_at = ?
+            WHERE warm_pool_key = ?
+            """,
+            (max(0, inflight - release), max(0, inflight - release), now, now, key),
+        )
+        n = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return n > 0
+
+    def count_running_sandboxes(
+        self,
+        *,
+        gateway_instance_id: Optional[str] = None,
+        template_id: Optional[str] = None,
+    ) -> int:
+        gateway = (gateway_instance_id or "").strip()
+        template = (template_id or "").strip()
+        where = ["state = 'running'"]
+        params: list[Any] = []
+        if gateway:
+            where.append("gateway_instance_id = ?")
+            params.append(gateway)
+        if template:
+            where.append("template_id = ?")
+            params.append(template)
+        sql = f"SELECT COUNT(*) FROM sandboxes WHERE {' AND '.join(where)}"
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(sql, tuple(params))
+            row = cursor.fetchone()
+            conn.close()
+        return int((row or [0])[0] or 0)
+
+    def set_warm_pool_segment_preferred_gateway(
+        self,
+        warm_pool_key: str,
+        preferred_gateway_instance_id: Optional[str],
+        *,
+        clear_error: bool = False,
+    ) -> bool:
+        now = _utc_now_iso()
+        key = (warm_pool_key or "").strip()
+        if not key:
+            return False
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            if clear_error:
+                cursor.execute(
+                    """
+                    UPDATE warm_pool_segments
+                    SET preferred_gateway_instance_id = ?, last_error = NULL, updated_at = ?
+                    WHERE warm_pool_key = ?
+                    """,
+                    (((preferred_gateway_instance_id or "").strip() or None), now, key),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE warm_pool_segments
+                    SET preferred_gateway_instance_id = ?, updated_at = ?
+                    WHERE warm_pool_key = ?
+                    """,
+                    (((preferred_gateway_instance_id or "").strip() or None), now, key),
+                )
+            n = cursor.rowcount
+            conn.commit()
+            conn.close()
+        return n > 0
+
+    def set_warm_pool_segment_error(self, warm_pool_key: str, message: Optional[str]) -> bool:
+        now = _utc_now_iso()
+        key = (warm_pool_key or "").strip()
+        if not key:
+            return False
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE warm_pool_segments
+                SET last_error = ?, updated_at = ?
+                WHERE warm_pool_key = ?
+                """,
+                (message, now, key),
+            )
+            n = cursor.rowcount
+            conn.commit()
+            conn.close()
+        return n > 0
+
+    def acquire_service_lease(
+        self,
+        *,
+        lease_name: str,
+        owner_id: str,
+        ttl_seconds: int,
+    ) -> bool:
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat().replace("+00:00", "Z")
+        expires = (now_dt + timedelta(seconds=max(5, int(ttl_seconds)))).isoformat().replace("+00:00", "Z")
+        name = (lease_name or "").strip()
+        owner = (owner_id or "").strip()
+        if not name or not owner:
+            return False
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO service_leases (lease_name, owner_id, expires_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (lease_name) DO UPDATE
+                SET owner_id = EXCLUDED.owner_id,
+                    expires_at = EXCLUDED.expires_at,
+                    updated_at = EXCLUDED.updated_at
+                WHERE service_leases.owner_id = EXCLUDED.owner_id
+                   OR service_leases.expires_at <= ?
+                RETURNING owner_id
+                """,
+                (name, owner, expires, now, now),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+            conn.close()
+            return bool(row and str(row[0] or "").strip() == owner)
 
     def list_expired_sandboxes(self, now_iso: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         """Return running sandboxes whose lease has elapsed."""
@@ -861,55 +1625,54 @@ class Database:
         ]
 
     @staticmethod
-    def _template_dict_from_row(row: tuple) -> Dict[str, Any]:
-        n = len(row)
-        ready_cmd = (row[9] if n > 9 else "") or ""
-        owner_client_id = row[10] if n > 10 else None
-        owner_api_key_id = row[11] if n > 11 else None
-        template_alias = row[12] if n > 12 else row[0]
-        source_kind = (row[13] if n > 13 else "") or ""
-        source_build_mode = (row[14] if n > 14 else "") or ""
-        dockerfile_text = row[15] if n > 15 else None
-        build_args_json = row[16] if n > 16 else None
-        context_tar_gzip_base64 = row[17] if n > 17 else None
+    def _template_dict_from_row(cursor, row: tuple) -> Dict[str, Any]:
+        names = [d[0] for d in cursor.description]
+        src = dict(zip(names, row))
+        build_args_json = src.get("build_args_json")
         return {
-            "template_id": row[0],
-            "base_image": row[1],
-            "env": json.loads(row[2] or "{}"),
-            "start_cmd": row[3] or "",
-            "settle_seconds": int(row[4] or 20),
-            "warm_snapshot_image": row[5],
-            "build_error": row[6],
-            "created_at": row[7],
-            "updated_at": row[8],
-            "ready_cmd": ready_cmd,
-            "owner_client_id": owner_client_id,
-            "owner_api_key_id": owner_api_key_id,
-            "template_alias": template_alias or row[0],
-            "source_kind": source_kind,
-            "source_build_mode": source_build_mode,
-            "dockerfile_text": dockerfile_text,
+            "template_id": src.get("template_id"),
+            "base_image": src.get("base_image"),
+            "env": json.loads(src.get("env_json") or "{}"),
+            "start_cmd": src.get("start_cmd") or "",
+            "settle_seconds": int(src.get("settle_seconds") or 20),
+            "warm_snapshot_image": src.get("warm_snapshot_image"),
+            "registry_image_ref": src.get("registry_image_ref"),
+            "materialized_gateway_instance_id": src.get("materialized_gateway_instance_id"),
+            "build_error": src.get("build_error"),
+            "created_at": src.get("created_at"),
+            "updated_at": src.get("updated_at"),
+            "ready_cmd": src.get("ready_cmd") or "",
+            "owner_client_id": src.get("owner_client_id"),
+            "owner_api_key_id": src.get("owner_api_key_id"),
+            "template_alias": (src.get("template_alias") or src.get("template_id") or ""),
+            "source_kind": src.get("source_kind") or "",
+            "source_build_mode": src.get("source_build_mode") or "",
+            "dockerfile_text": src.get("dockerfile_text"),
             "build_args": json.loads(build_args_json) if build_args_json else {},
-            "context_tar_gzip_base64": context_tar_gzip_base64,
+            "context_tar_gzip_base64": src.get("context_tar_gzip_base64"),
         }
 
     @staticmethod
-    def _template_build_dict_from_row(row: tuple) -> Dict[str, Any]:
+    def _template_build_dict_from_row(cursor, row: tuple) -> Dict[str, Any]:
+        names = [d[0] for d in cursor.description]
+        src = dict(zip(names, row))
         return {
-            "build_id": row[0],
-            "template_id": row[1],
-            "template_alias": row[2] or row[1],
-            "owner_client_id": row[3],
-            "owner_api_key_id": row[4],
-            "requested_mode": row[5] or "",
-            "effective_mode": row[6] or "",
-            "status": row[7] or "",
-            "image_tag": row[8],
-            "build_log": row[9] or "",
-            "error_text": row[10],
-            "created_at": row[11],
-            "updated_at": row[12],
-            "completed_at": row[13],
+            "build_id": src.get("build_id"),
+            "template_id": src.get("template_id"),
+            "template_alias": src.get("template_alias") or src.get("template_id"),
+            "owner_client_id": src.get("owner_client_id"),
+            "owner_api_key_id": src.get("owner_api_key_id"),
+            "requested_mode": src.get("requested_mode") or "",
+            "effective_mode": src.get("effective_mode") or "",
+            "status": src.get("status") or "",
+            "image_tag": src.get("image_tag"),
+            "registry_image_ref": src.get("registry_image_ref"),
+            "gateway_instance_id": src.get("gateway_instance_id"),
+            "build_log": src.get("build_log") or "",
+            "error_text": src.get("error_text"),
+            "created_at": src.get("created_at"),
+            "updated_at": src.get("updated_at"),
+            "completed_at": src.get("completed_at"),
         }
 
     def upsert_sandbox_template(
@@ -941,7 +1704,8 @@ class Database:
                     """
                     UPDATE sandbox_templates
                     SET base_image = ?, env_json = ?, start_cmd = ?, settle_seconds = ?, ready_cmd = ?,
-                        warm_snapshot_image = NULL, build_error = NULL, updated_at = ?,
+                        warm_snapshot_image = NULL, registry_image_ref = NULL,
+                        materialized_gateway_instance_id = NULL, build_error = NULL, updated_at = ?,
                         owner_client_id = ?, owner_api_key_id = ?, template_alias = ?
                     WHERE template_id = ?
                     """,
@@ -963,9 +1727,9 @@ class Database:
                     """
                     INSERT INTO sandbox_templates
                     (template_id, base_image, env_json, start_cmd, settle_seconds, ready_cmd,
-                     warm_snapshot_image, build_error, created_at, updated_at, owner_client_id,
-                     owner_api_key_id, template_alias)
-                    VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
+                     warm_snapshot_image, registry_image_ref, materialized_gateway_instance_id,
+                     build_error, created_at, updated_at, owner_client_id, owner_api_key_id, template_alias)
+                    VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?)
                     """,
                     (
                         template_id,
@@ -992,10 +1756,9 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM sandbox_templates WHERE template_id = ?", (template_id,))
             row = cursor.fetchone()
+            result = self._template_dict_from_row(cursor, row) if row else None
             conn.close()
-        if not row:
-            return None
-        return self._template_dict_from_row(row)
+        return result
 
     def get_sandbox_template_by_alias(
         self,
@@ -1014,16 +1777,70 @@ class Database:
                 (client_id, alias),
             )
             row = cursor.fetchone()
+            result = self._template_dict_from_row(cursor, row) if row else None
             conn.close()
-        if row:
-            return self._template_dict_from_row(row)
-        return None
+        return result
+
+    def get_best_sandbox_template_by_alias(
+        self,
+        template_alias: str,
+        *,
+        owner_client_id: Optional[str] = None,
+        exclude_template_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve a client-facing alias to the most usable template row.
+
+        Template creates are tenant-owned, but sandbox creates may arrive with the
+        friendly alias. Prefer the caller's materialized row over global
+        auto-registration stubs so aliases never get treated as raw Docker image names.
+        """
+        alias = (template_alias or "").strip()
+        if not alias:
+            return None
+
+        where = ["template_alias = ?"]
+        params: List[Any] = [alias]
+        if exclude_template_id:
+            where.append("template_id <> ?")
+            params.append(exclude_template_id)
+        if owner_client_id:
+            where.append("(owner_client_id = ? OR owner_client_id IS NULL OR owner_client_id = '')")
+            params.append(owner_client_id)
+
+        owner_rank = "CASE WHEN 1 = 1 THEN 0 ELSE 1 END"
+        if owner_client_id:
+            owner_rank = "CASE WHEN owner_client_id = ? THEN 0 ELSE 1 END"
+            params.append(owner_client_id)
+
+        sql = f"""
+            SELECT * FROM sandbox_templates
+            WHERE {' AND '.join(where)}
+            ORDER BY
+                CASE
+                    WHEN COALESCE(NULLIF(warm_snapshot_image, ''), NULLIF(registry_image_ref, '')) IS NOT NULL
+                    THEN 0 ELSE 1
+                END,
+                {owner_rank},
+                updated_at DESC
+            LIMIT 1
+        """
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(sql, tuple(params))
+            row = cursor.fetchone()
+            result = self._template_dict_from_row(cursor, row) if row else None
+            conn.close()
+        return result
 
     def set_template_warm_snapshot(
         self,
         template_id: str,
         image_ref: str,
         build_error: Optional[str] = None,
+        *,
+        registry_image_ref: Optional[str] = None,
+        materialized_gateway_instance_id: Optional[str] = None,
     ) -> bool:
         now = _utc_now_iso()
         with self._lock:
@@ -1032,10 +1849,18 @@ class Database:
             cursor.execute(
                 """
                 UPDATE sandbox_templates
-                SET warm_snapshot_image = ?, build_error = ?, updated_at = ?
+                SET warm_snapshot_image = ?, registry_image_ref = ?, materialized_gateway_instance_id = ?,
+                    build_error = ?, updated_at = ?
                 WHERE template_id = ?
                 """,
-                (image_ref, build_error, now, template_id),
+                (
+                    image_ref,
+                    registry_image_ref,
+                    materialized_gateway_instance_id,
+                    build_error,
+                    now,
+                    template_id,
+                ),
             )
             n = cursor.rowcount
             conn.commit()
@@ -1127,8 +1952,9 @@ class Database:
                     """
                 )
             rows = cursor.fetchall()
+            out = [self._template_dict_from_row(cursor, r) for r in rows]
             conn.close()
-        return [self._template_dict_from_row(r) for r in rows]
+        return out
 
     def create_template_build(
         self,
@@ -1142,6 +1968,8 @@ class Database:
         effective_mode: str,
         status: str,
         image_tag: Optional[str] = None,
+        registry_image_ref: Optional[str] = None,
+        gateway_instance_id: Optional[str] = None,
         build_log: str = "",
         error_text: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -1154,9 +1982,9 @@ class Database:
                 """
                 INSERT INTO template_builds
                 (build_id, template_id, template_alias, owner_client_id, owner_api_key_id,
-                 requested_mode, effective_mode, status, image_tag, build_log, error_text,
-                 created_at, updated_at, completed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 requested_mode, effective_mode, status, image_tag, registry_image_ref,
+                 gateway_instance_id, build_log, error_text, created_at, updated_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     build_id,
@@ -1168,6 +1996,8 @@ class Database:
                     effective_mode,
                     status,
                     image_tag,
+                    registry_image_ref,
+                    gateway_instance_id,
                     build_log,
                     error_text,
                     now,
@@ -1186,6 +2016,8 @@ class Database:
         status: Optional[str] = None,
         effective_mode: Optional[str] = None,
         image_tag: Optional[str] = None,
+        registry_image_ref: Optional[str] = None,
+        gateway_instance_id: Optional[str] = None,
         build_log: Optional[str] = None,
         error_text: Optional[str] = None,
     ) -> bool:
@@ -1196,6 +2028,12 @@ class Database:
         next_status = status or current["status"]
         next_mode = effective_mode if effective_mode is not None else current["effective_mode"]
         next_image = image_tag if image_tag is not None else current["image_tag"]
+        next_registry = registry_image_ref if registry_image_ref is not None else current.get("registry_image_ref")
+        next_gateway_instance = (
+            gateway_instance_id
+            if gateway_instance_id is not None
+            else current.get("gateway_instance_id")
+        )
         next_log = build_log if build_log is not None else current["build_log"]
         next_error = error_text if error_text is not None else current["error_text"]
         completed_at = now if next_status in ("success", "failed") else current["completed_at"]
@@ -1205,14 +2043,16 @@ class Database:
             cursor.execute(
                 """
                 UPDATE template_builds
-                SET status = ?, effective_mode = ?, image_tag = ?, build_log = ?,
-                    error_text = ?, updated_at = ?, completed_at = ?
+                SET status = ?, effective_mode = ?, image_tag = ?, registry_image_ref = ?,
+                    gateway_instance_id = ?, build_log = ?, error_text = ?, updated_at = ?, completed_at = ?
                 WHERE build_id = ?
                 """,
                 (
                     next_status,
                     next_mode,
                     next_image,
+                    next_registry,
+                    next_gateway_instance,
                     next_log,
                     next_error,
                     now,
@@ -1231,8 +2071,9 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM template_builds WHERE build_id = ?", (build_id,))
             row = cursor.fetchone()
+            result = self._template_build_dict_from_row(cursor, row) if row else None
             conn.close()
-        return self._template_build_dict_from_row(row) if row else None
+        return result
 
     def list_template_builds_for_client(
         self,
@@ -1253,8 +2094,9 @@ class Database:
                 (client_id, int(limit)),
             )
             rows = cursor.fetchall()
+            out = [self._template_build_dict_from_row(cursor, row) for row in rows]
             conn.close()
-        return [self._template_build_dict_from_row(row) for row in rows]
+        return out
 
     def create_agent(
         self,
@@ -1268,7 +2110,7 @@ class Database:
         config_json = json.dumps(config or {})
 
         with self._lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             cursor.execute("""
@@ -1294,7 +2136,7 @@ class Database:
     def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """Get agent by ID."""
         with self._lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             cursor.execute("SELECT * FROM agents WHERE agent_id = ?", (agent_id,))
@@ -1319,7 +2161,7 @@ class Database:
     def list_sandbox_agents(self, sandbox_id: str) -> List[Dict[str, Any]]:
         """List agents in sandbox."""
         with self._lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             cursor.execute("SELECT * FROM agents WHERE sandbox_id = ? ORDER BY created_at DESC", (sandbox_id,))
@@ -1346,7 +2188,7 @@ class Database:
         now = _utc_now_iso()
 
         with self._lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             cursor.execute(
@@ -1364,7 +2206,7 @@ class Database:
         now = _utc_now_iso()
 
         with self._lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             cursor.execute(
@@ -1380,7 +2222,7 @@ class Database:
     def delete_agent(self, agent_id: str) -> bool:
         """Delete agent."""
         with self._lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             cursor.execute("DELETE FROM agents WHERE agent_id = ?", (agent_id,))
@@ -1403,14 +2245,14 @@ class Database:
         content_json = json.dumps(content)
 
         with self._lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             cursor.execute("""
                 INSERT INTO agent_messages
                 (message_id, agent_id, sandbox_id, message_type, content, timestamp, processed)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (message_id, agent_id, sandbox_id, message_type, content_json, now, 0))
+            """, (message_id, agent_id, sandbox_id, message_type, content_json, now, False))
 
             conn.commit()
             conn.close()
@@ -1427,7 +2269,7 @@ class Database:
     def get_agent_messages(self, agent_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         """Get agent messages."""
         with self._lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             cursor.execute(
@@ -1453,11 +2295,11 @@ class Database:
     def mark_message_processed(self, message_id: str) -> bool:
         """Mark message as processed."""
         with self._lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             cursor.execute(
-                "UPDATE agent_messages SET processed = 1 WHERE message_id = ?",
+                "UPDATE agent_messages SET processed = TRUE WHERE message_id = ?",
                 (message_id,),
             )
 
@@ -1481,7 +2323,7 @@ class Database:
         now = _utc_now_iso()
 
         with self._lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             cursor.execute("""
@@ -1498,7 +2340,7 @@ class Database:
     def get_command_history(self, sandbox_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         """Get command history for sandbox."""
         with self._lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             cursor.execute(

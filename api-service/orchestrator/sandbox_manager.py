@@ -12,9 +12,11 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
+import httpx
 
 from .container_manager import ContainerManager, ContainerConfig
 from orchestrator.runtime_utils import is_container_like_execution, is_k8s_execution
@@ -52,6 +54,8 @@ from .runtime_gateway_templates import (
     build_template_snapshot_via_gateway,
     gateway_template_build_enabled,
 )
+from .gateway_targets import GatewayTarget, GatewayTargetSelector, build_gateway_targets, target_for_instance
+from .warm_sandbox_pool import warm_pool_key_string
 from database import Database
 
 if TYPE_CHECKING:
@@ -101,6 +105,17 @@ class SandboxManager:
         self._sandbox_io_locks: Dict[str, threading.Lock] = {}
         self._template_build_guard = threading.Lock()
         self._template_build_locks: Dict[str, threading.Lock] = {}
+        self._gateway_execution_guard = threading.Lock()
+        self._gateway_execution_cache: Dict[str, ContainerManager] = {}
+        self._gateway_selector = GatewayTargetSelector()
+        self._gateway_status_cache: Dict[str, Dict[str, Any]] = {}
+        self._gateway_status_lock = threading.Lock()
+        self._gateway_image_cache: Dict[tuple[str, str], tuple[float, bool]] = {}
+        self._gateway_image_cache_lock = threading.Lock()
+        self._image_prefetch_inflight: set[tuple[str, str]] = set()
+        self._image_prefetch_lock = threading.Lock()
+        self._recent_created_rows: Dict[str, Dict[str, Any]] = {}
+        self._recent_created_rows_lock = threading.Lock()
         self._lease_reaper_stop = threading.Event()
         self._lease_reaper_thread: Optional[threading.Thread] = None
         self._last_create_error: str = ""
@@ -124,6 +139,619 @@ class SandboxManager:
             self._start_lease_reaper()
         except Exception as ex:  # noqa: BLE001
             logger.warning("Sandbox lease reaper not started: %s", ex)
+
+    def _gateway_targets(self) -> List[GatewayTarget]:
+        try:
+            return build_gateway_targets(self._config)
+        except Exception as ex:  # noqa: BLE001
+            logger.warning("Runtime gateway target build failed: %s", ex)
+            return []
+
+    def _current_gateway_instance_ids(self) -> set[str]:
+        return {str(t.instance_id or "").strip() for t in self._gateway_targets() if str(t.instance_id or "").strip()}
+
+    def _choose_gateway_target(self) -> Optional[GatewayTarget]:
+        targets = self._gateway_targets()
+        if not targets:
+            return None
+        try:
+            return self._gateway_selector.choose(
+                targets,
+                scheduler=str(getattr(self._config, "RUNTIME_GATEWAY_SCHEDULER", "round_robin") or "round_robin"),
+            )
+        except Exception:
+            return targets[0]
+
+    def warm_pool_key(self, template_id: str, cpu_limit: str, memory_limit: str, timeout: int) -> str:
+        return warm_pool_key_string(template_id, cpu_limit, memory_limit, int(timeout))
+
+    def is_warm_pool_leader(self) -> bool:
+        cfg = self._config
+        lease_name = str(getattr(cfg, "WARM_POOL_COORDINATOR_LEASE_NAME", "warm-pool-coordinator"))
+        return self.db.acquire_postgres_advisory_lock(lease_name)
+
+    def _gateway_headers(self) -> Dict[str, str]:
+        key = (getattr(self._config, "RUNTIME_GATEWAY_API_KEY", None) or "").strip()
+        if not key:
+            return {}
+        return {"X-API-Key": key}
+
+    def _gateway_runtime_status(self, target: GatewayTarget, *, force_refresh: bool = False) -> Dict[str, Any]:
+        ttl = float(getattr(self._config, "RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC", 2.0) or 2.0)
+        now = time.time()
+        if not force_refresh:
+            with self._gateway_status_lock:
+                cached = self._gateway_status_cache.get(target.instance_id)
+                if cached and (now - float(cached.get("_ts") or 0.0)) <= ttl:
+                    return dict(cached)
+        data: Dict[str, Any] = {
+            "gateway_instance_id": target.instance_id,
+            "disk_total_bytes": 0,
+            "disk_used_bytes": 0,
+            "disk_free_bytes": 0,
+            "disk_used_ratio": 0.0,
+            "reachable": False,
+        }
+        try:
+            with httpx.Client(timeout=httpx.Timeout(5.0)) as client:
+                resp = client.get(
+                    f"{target.api_base}/internal/runtime/status",
+                    headers=self._gateway_headers(),
+                )
+            if resp.status_code < 400:
+                payload = resp.json()
+                data.update(payload if isinstance(payload, dict) else {})
+                data["reachable"] = True
+        except Exception as ex:  # noqa: BLE001
+            data["error"] = str(ex)
+        data["_ts"] = now
+        with self._gateway_status_lock:
+            self._gateway_status_cache[target.instance_id] = dict(data)
+        return data
+
+    def _estimated_sandbox_reservation_bytes(
+        self,
+        target: GatewayTarget,
+        *,
+        template_id: str,
+        image_ref: str,
+        force_refresh: bool = False,
+    ) -> int:
+        status = self._gateway_runtime_status(target, force_refresh=force_refresh)
+        total = int(status.get("disk_total_bytes") or 0)
+        used = int(status.get("disk_used_bytes") or 0)
+        running = self.db.count_running_sandboxes(gateway_instance_id=target.instance_id)
+        if running > 0 and used > 0:
+            return max(512 * 1024 * 1024, used // running)
+        if image_ref and self._gateway_has_image(target, image_ref):
+            return 1024 * 1024 * 1024
+        if total > 0:
+            return max(1024 * 1024 * 1024, int(total * 0.08))
+        return 2 * 1024 * 1024 * 1024
+
+    def _gateway_can_accept_new_usage(
+        self,
+        target: GatewayTarget,
+        *,
+        force_refresh: bool = False,
+        extra_used_bytes: int = 0,
+    ) -> bool:
+        status = self._gateway_runtime_status(target, force_refresh=force_refresh)
+        if not status.get("reachable"):
+            return False
+        used = int(status.get("disk_used_bytes") or 0) + max(0, int(extra_used_bytes))
+        total = int(status.get("disk_total_bytes") or 0)
+        ratio = (float(used) / float(total)) if total > 0 else float(status.get("disk_used_ratio") or 0.0)
+        limit_ratio = float(getattr(self._config, "RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO", 0.80) or 0.80)
+        ok = ratio < limit_ratio
+        if not ok:
+            logger.info(
+                "Runtime-gateway shard full: gateway=%s used=%.1f%% limit=%.1f%% used_bytes=%s total_bytes=%s source=%s",
+                target.instance_id,
+                ratio * 100.0,
+                limit_ratio * 100.0,
+                used,
+                total,
+                str(status.get("disk_metric_source") or ""),
+            )
+        return ok
+
+    def _warm_pool_rows_by_gateway(self, warm_pool_key: str) -> Dict[str, List[Dict[str, Any]]]:
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for row in self.db.list_warm_pool_sandboxes(warm_pool_key=warm_pool_key):
+            gid = str(row.get("gateway_instance_id") or "").strip()
+            out.setdefault(gid, []).append(row)
+        return out
+
+    def _live_warm_pool_rows(self, warm_pool_key: str) -> List[Dict[str, Any]]:
+        rows = self.db.list_warm_pool_sandboxes(warm_pool_key=warm_pool_key)
+        kind = self.execution.get_backend_kind()
+        if kind not in ("docker", "gvisor"):
+            return rows
+
+        targets_by_instance = {target.instance_id: target for target in self._gateway_targets()}
+        live: List[Dict[str, Any]] = []
+        for row in rows:
+            sid = str(row.get("sandbox_id") or "").strip()
+            cid = str(row.get("container_id") or "").strip()
+            gid = str(row.get("gateway_instance_id") or "").strip()
+            if not sid or not cid:
+                if sid:
+                    self._mark_sandbox_lost(
+                        sid,
+                        detail="Warm-pool sandbox has no runtime container; recreate the sandbox.",
+                    )
+                continue
+
+            target = targets_by_instance.get(gid) if gid else None
+            if gid and target is None:
+                logger.warning(
+                    "Warm pool inventory: sandbox=%s references unknown runtime-gateway shard %r",
+                    sid,
+                    gid,
+                )
+                continue
+            if target is not None:
+                status = self._gateway_runtime_status(target)
+                if not status.get("reachable"):
+                    logger.debug(
+                        "Warm pool inventory: shard %s unreachable while checking sandbox=%s",
+                        gid,
+                        sid,
+                    )
+                    continue
+
+            try:
+                execution = self._execution_for_row(row)
+                state_fn = getattr(execution, "get_container_state", None)
+                if callable(state_fn):
+                    state = str(state_fn(cid) or "unknown").strip().lower()
+                    if state == "running":
+                        live.append(row)
+                        continue
+                    if state == "unknown":
+                        logger.debug(
+                            "Warm pool inventory: container state unknown sandbox=%s gateway=%s container=%s",
+                            sid,
+                            gid or "-",
+                            cid[:12],
+                        )
+                        continue
+                elif execution.is_container_running(cid):
+                    live.append(row)
+                    continue
+                else:
+                    state = "stopped"
+            except Exception as ex:  # noqa: BLE001
+                logger.debug(
+                    "Warm pool inventory: liveness check failed sandbox=%s container=%s: %s",
+                    sid,
+                    cid[:12],
+                    ex,
+                )
+                continue
+
+            if self._mark_sandbox_lost(
+                sid,
+                detail="Previous warm-pool container died after runtime-gateway restart; recreate the sandbox.",
+            ):
+                logger.warning(
+                    "Warm pool inventory: marked stale warm sandbox lost sandbox=%s gateway=%s container=%s",
+                    sid,
+                    gid or "-",
+                    cid[:12],
+                )
+        return live
+
+    def warm_pool_ready_count(self, warm_pool_key: str) -> int:
+        return len(self.db.list_warm_pool_sandboxes(warm_pool_key=warm_pool_key))
+
+    def trim_warm_pool_to_size(self, warm_pool_key: str, desired_size: int) -> int:
+        desired = max(0, int(desired_size))
+        rows = self.db.list_warm_pool_sandboxes(warm_pool_key=warm_pool_key)
+        extra = len(rows) - desired
+        if extra <= 0:
+            return 0
+        rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        removed = 0
+        for row in rows[:extra]:
+            sid = str(row.get("sandbox_id") or "").strip()
+            if not sid:
+                continue
+            try:
+                if self.kill_sandbox(sid, force=True):
+                    removed += 1
+            except Exception as ex:  # noqa: BLE001
+                logger.warning("Warm pool trim failed sandbox=%s: %s", sid, ex)
+        if removed:
+            logger.info(
+                "Warm pool trim: removed %s excess sandbox(es) key=%s desired=%s",
+                removed,
+                warm_pool_key,
+                desired,
+            )
+        return removed
+
+    def note_warm_pool_segment(
+        self,
+        *,
+        template_id: str,
+        cpu_limit: str,
+        memory_limit: str,
+        timeout: int,
+        desired_size: int,
+        ready_image_ref: Optional[str],
+        preferred_gateway_instance_id: Optional[str] = None,
+        last_error: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        key = self.warm_pool_key(template_id, cpu_limit, memory_limit, int(timeout))
+        row = self.db.upsert_warm_pool_segment(
+            warm_pool_key=key,
+            template_id=template_id,
+            cpu_limit=cpu_limit,
+            memory_limit=memory_limit,
+            timeout=int(timeout),
+            desired_size=int(desired_size),
+            ready_image_ref=ready_image_ref,
+            preferred_gateway_instance_id=preferred_gateway_instance_id,
+            last_error=last_error,
+        )
+        ref = (ready_image_ref or "").strip()
+        if ref:
+            self._schedule_gateway_image_prefetch(ref)
+        return row
+
+    def get_last_create_error(self) -> str:
+        return str(self._last_create_error or "")
+
+    def _gateway_has_image(
+        self,
+        target: GatewayTarget,
+        image_ref: str,
+        *,
+        force_refresh: bool = False,
+    ) -> bool:
+        ref = (image_ref or "").strip()
+        if not ref:
+            return False
+        ttl = 10.0
+        cache_key = (target.instance_id, ref)
+        now = time.time()
+        if not force_refresh:
+            with self._gateway_image_cache_lock:
+                cached = self._gateway_image_cache.get(cache_key)
+                if cached and (now - float(cached[0])) <= ttl:
+                    return bool(cached[1])
+        exists = False
+        try:
+            execution = self._execution_for_gateway_target(target)
+            exists = bool(getattr(execution, "image_exists", lambda _ref: False)(ref))
+        except Exception:
+            exists = False
+        with self._gateway_image_cache_lock:
+            self._gateway_image_cache[cache_key] = (now, exists)
+        return exists
+
+    def _schedule_gateway_image_prefetch(self, image_ref: str) -> None:
+        ref = (image_ref or "").strip()
+        if not ref or not bool(getattr(self._config, "WARM_POOL_IMAGE_PREFETCH_ENABLED", True)):
+            return
+        if self.execution.get_backend_kind() not in ("docker", "gvisor"):
+            return
+        for target in self._gateway_targets():
+            key = (target.instance_id, ref)
+            with self._image_prefetch_lock:
+                if key in self._image_prefetch_inflight:
+                    continue
+                self._image_prefetch_inflight.add(key)
+            thread = threading.Thread(
+                target=self._prefetch_image_to_gateway,
+                args=(target, ref),
+                name=f"prefetch-{target.instance_id}",
+                daemon=True,
+            )
+            thread.start()
+
+    def _prefetch_image_to_gateway(self, target: GatewayTarget, image_ref: str) -> None:
+        key = (target.instance_id, image_ref)
+        started = time.time()
+        try:
+            execution = self._execution_for_gateway_target(target)
+            image_exists = getattr(execution, "image_exists", None)
+            if callable(image_exists) and image_exists(image_ref):
+                with self._gateway_image_cache_lock:
+                    self._gateway_image_cache[key] = (time.time(), True)
+                return
+            pull_image = getattr(execution, "pull_image", None)
+            if callable(pull_image) and pull_image(image_ref):
+                with self._gateway_image_cache_lock:
+                    self._gateway_image_cache[key] = (time.time(), True)
+                logger.info(
+                    "Warm pool image prefetched gateway=%s image=%s elapsed_ms=%s",
+                    target.instance_id,
+                    image_ref,
+                    int((time.time() - started) * 1000),
+                )
+                return
+            logger.warning(
+                "Warm pool image prefetch failed gateway=%s image=%s",
+                target.instance_id,
+                image_ref,
+            )
+        except Exception as ex:  # noqa: BLE001
+            logger.warning(
+                "Warm pool image prefetch error gateway=%s image=%s: %s",
+                target.instance_id,
+                image_ref,
+                ex,
+            )
+        finally:
+            with self._image_prefetch_lock:
+                self._image_prefetch_inflight.discard(key)
+
+    def _best_gateway_by_free_disk(
+        self,
+        candidates: List[GatewayTarget],
+        *,
+        force_refresh: bool = False,
+        preferred_image_ref: Optional[str] = None,
+        extra_used_bytes_by_gateway: Optional[Dict[str, int]] = None,
+    ) -> Optional[GatewayTarget]:
+        best: Optional[GatewayTarget] = None
+        best_score: tuple[float, int, int, str] | None = None
+        image_ref = (preferred_image_ref or "").strip()
+        statuses: Dict[str, Dict[str, Any]] = {}
+        if len(candidates) > 1:
+            with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as pool:
+                future_by_instance = {
+                    pool.submit(self._gateway_runtime_status, target, force_refresh=force_refresh): target
+                    for target in candidates
+                }
+                for future in as_completed(future_by_instance):
+                    target = future_by_instance[future]
+                    try:
+                        statuses[target.instance_id] = future.result()
+                    except Exception as ex:  # noqa: BLE001
+                        statuses[target.instance_id] = {
+                            "gateway_instance_id": target.instance_id,
+                            "reachable": False,
+                            "error": str(ex),
+                        }
+        for target in candidates:
+            status = statuses.get(target.instance_id) or self._gateway_runtime_status(
+                target,
+                force_refresh=force_refresh,
+            )
+            if not status.get("reachable"):
+                continue
+            extra_used = int((extra_used_bytes_by_gateway or {}).get(target.instance_id) or 0)
+            used = int(status.get("disk_used_bytes") or 0) + max(0, extra_used)
+            total = int(status.get("disk_total_bytes") or 0)
+            ratio = (float(used) / float(total)) if total > 0 else float(status.get("disk_used_ratio") or 0.0)
+            limit_ratio = float(getattr(self._config, "RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO", 0.80) or 0.80)
+            if ratio >= limit_ratio:
+                logger.info(
+                    "Runtime-gateway shard full: gateway=%s used=%.1f%% limit=%.1f%% used_bytes=%s total_bytes=%s source=%s",
+                    target.instance_id,
+                    ratio * 100.0,
+                    limit_ratio * 100.0,
+                    used,
+                    total,
+                    str(status.get("disk_metric_source") or ""),
+                )
+                continue
+            has_image_rank = 1
+            if image_ref:
+                with self._gateway_image_cache_lock:
+                    cached = self._gateway_image_cache.get((target.instance_id, image_ref))
+                if cached and (time.time() - float(cached[0])) <= 10.0 and bool(cached[1]):
+                    has_image_rank = 0
+            score = (ratio, used, has_image_rank, target.instance_id)
+            if best_score is None or score < best_score:
+                best = target
+                best_score = score
+        return best
+
+    def _select_gateway_target_for_pool(
+        self,
+        *,
+        template_id: str,
+        cpu_limit: str,
+        memory_limit: str,
+        timeout: int,
+        template_row: Optional[Dict[str, Any]],
+        extra_used_bytes_by_gateway: Optional[Dict[str, int]] = None,
+        extra_warm_counts_by_gateway: Optional[Dict[str, int]] = None,
+    ) -> Optional[GatewayTarget]:
+        targets = self._gateway_targets()
+        if not targets:
+            return None
+        row = template_row or {}
+        registry_ref = str(row.get("registry_image_ref") or "").strip()
+        owner_instance = str(row.get("materialized_gateway_instance_id") or "").strip()
+        if owner_instance and not registry_ref:
+            pinned = target_for_instance(targets, owner_instance)
+            if pinned is not None and self._gateway_can_accept_new_usage(pinned, force_refresh=True):
+                return pinned
+            logger.warning(
+                "Template %r is local-only on %s, but that runtime-gateway shard has no disk headroom",
+                template_id,
+                owner_instance,
+            )
+            return None
+        warm_key = self.warm_pool_key(template_id, cpu_limit, memory_limit, int(timeout))
+        segment = self.db.get_warm_pool_segment(warm_key)
+        preferred_instance = str((segment or {}).get("preferred_gateway_instance_id") or "").strip()
+        inventory = self._warm_pool_rows_by_gateway(warm_key)
+        inventory_targets: list[tuple[float, int, int, str, GatewayTarget]] = []
+        for instance_id, rows in inventory.items():
+            target = target_for_instance(targets, instance_id)
+            if target is not None:
+                status = self._gateway_runtime_status(target, force_refresh=True)
+                extra_used = int((extra_used_bytes_by_gateway or {}).get(target.instance_id) or 0)
+                used = int(status.get("disk_used_bytes") or 0) + max(0, extra_used)
+                total = int(status.get("disk_total_bytes") or 0)
+                ratio = (float(used) / float(total)) if total > 0 else float(status.get("disk_used_ratio") or 0.0)
+                warm_count = len(rows) + int((extra_warm_counts_by_gateway or {}).get(instance_id) or 0)
+                inventory_targets.append((-float(warm_count), ratio, used, target.instance_id, target))
+        inventory_targets.sort(key=lambda item: item[:4])
+        for _count_score, _ratio, _used, _instance_id, target in inventory_targets:
+            if self._gateway_can_accept_new_usage(
+                target,
+                force_refresh=True,
+                extra_used_bytes=int((extra_used_bytes_by_gateway or {}).get(target.instance_id) or 0),
+            ):
+                return target
+        if preferred_instance:
+            preferred = target_for_instance(targets, preferred_instance)
+            if preferred is not None and self._gateway_can_accept_new_usage(
+                preferred,
+                force_refresh=True,
+                extra_used_bytes=int((extra_used_bytes_by_gateway or {}).get(preferred.instance_id) or 0),
+            ):
+                return preferred
+        candidate_targets = targets if registry_ref or not owner_instance else []
+        preferred_image_ref = (
+            str((segment or {}).get("ready_image_ref") or "").strip()
+            or registry_ref
+        )
+        return self._best_gateway_by_free_disk(
+            candidate_targets,
+            force_refresh=True,
+            preferred_image_ref=preferred_image_ref or None,
+            extra_used_bytes_by_gateway=extra_used_bytes_by_gateway,
+        )
+
+    def acquire_warm_pool_sandbox(
+        self,
+        *,
+        template_id: str,
+        cpu_limit: str,
+        memory_limit: str,
+        timeout: int,
+        owner_client_id: Optional[str],
+        owner_api_key_id: Optional[str],
+        handoff_metadata: Optional[Dict[str, Any]] = None,
+        handoff_timeout: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        key = self.warm_pool_key(template_id, cpu_limit, memory_limit, int(timeout))
+        inventory: Dict[str, List[Dict[str, Any]]] = {}
+        for row in self.db.list_warm_pool_sandboxes(warm_pool_key=key):
+            instance_id = str(row.get("gateway_instance_id") or "").strip()
+            if not instance_id:
+                continue
+            inventory.setdefault(instance_id, []).append(row)
+
+        # Hot acquisition must stay DB-only. These rows are inserted after successful
+        # bootstrap, so runtime/container probing here only adds seconds to an
+        # otherwise atomic warm handoff.
+        preferred_instances = [
+            instance_id
+            for instance_id, rows in sorted(
+                inventory.items(),
+                key=lambda item: (-len(item[1]), item[0]),
+            )
+        ]
+        for instance_id in preferred_instances:
+            claimed = self.db.claim_warm_pool_sandbox(
+                warm_pool_key=key,
+                gateway_instance_id=instance_id,
+                owner_client_id=owner_client_id,
+                owner_api_key_id=owner_api_key_id,
+                metadata_updates=handoff_metadata,
+                timeout_seconds=handoff_timeout,
+            )
+            if claimed:
+                self._remember_recent_created_row(claimed)
+                return claimed
+        claimed = self.db.claim_warm_pool_sandbox(
+            warm_pool_key=key,
+            gateway_instance_id=None,
+            owner_client_id=owner_client_id,
+            owner_api_key_id=owner_api_key_id,
+            metadata_updates=handoff_metadata,
+            timeout_seconds=handoff_timeout,
+        )
+        if claimed:
+            self._remember_recent_created_row(claimed)
+            return claimed
+        return None
+
+    def select_gateway_target_for_pool_create(
+        self,
+        *,
+        template_id: str,
+        cpu_limit: str,
+        memory_limit: str,
+        timeout: int,
+        extra_used_bytes_by_gateway: Optional[Dict[str, int]] = None,
+        extra_warm_counts_by_gateway: Optional[Dict[str, int]] = None,
+    ) -> Optional[GatewayTarget]:
+        tpl = self.db.get_sandbox_template((template_id or "").strip()) if template_id else None
+        return self._select_gateway_target_for_pool(
+            template_id=(template_id or "").strip(),
+            cpu_limit=cpu_limit,
+            memory_limit=memory_limit,
+            timeout=int(timeout),
+            template_row=tpl,
+            extra_used_bytes_by_gateway=extra_used_bytes_by_gateway,
+            extra_warm_counts_by_gateway=extra_warm_counts_by_gateway,
+        )
+
+    def _gateway_target_for_template_row(self, row: Optional[Dict[str, Any]]) -> Optional[GatewayTarget]:
+        targets = self._gateway_targets()
+        if not targets:
+            return None
+        registry_ref = str((row or {}).get("registry_image_ref") or "").strip()
+        owner_instance = str((row or {}).get("materialized_gateway_instance_id") or "").strip()
+        if not registry_ref and owner_instance:
+            pinned = target_for_instance(targets, owner_instance)
+            if pinned is not None and self._gateway_can_accept_new_usage(pinned, force_refresh=True):
+                return pinned
+            return None
+        return self._best_gateway_by_free_disk(
+            targets,
+            force_refresh=True,
+            preferred_image_ref=registry_ref or None,
+        )
+
+    def _execution_for_gateway_target(self, target: GatewayTarget):
+        kind = self.execution.get_backend_kind()
+        if kind not in ("docker", "gvisor"):
+            return self.execution
+        key = (target.docker_host or "").strip()
+        if not key:
+            return self.execution
+        with self._gateway_execution_guard:
+            cached = self._gateway_execution_cache.get(key)
+            if cached is not None:
+                return cached
+            cm = ContainerManager(
+                oci_runtime=self._config.docker_oci_runtime(),
+                base_url=key,
+            )
+            self._gateway_execution_cache[key] = cm
+            return cm
+
+    def _execution_for_row(self, row: Optional[Dict[str, Any]]):
+        if not row:
+            return self.execution
+        kind = self.execution.get_backend_kind()
+        if kind not in ("docker", "gvisor"):
+            return self.execution
+        host = str(row.get("gateway_docker_host") or "").strip()
+        if not host:
+            return self.execution
+        with self._gateway_execution_guard:
+            cached = self._gateway_execution_cache.get(host)
+            if cached is not None:
+                return cached
+            cm = ContainerManager(
+                oci_runtime=self._config.docker_oci_runtime(),
+                base_url=host,
+            )
+            self._gateway_execution_cache[host] = cm
+            return cm
 
     def _template_lock(self, template_id: str) -> threading.Lock:
         with self._template_build_guard:
@@ -194,38 +822,60 @@ class SandboxManager:
         return purged
 
     def prune_runtime_artifacts(self) -> Dict[str, int]:
-        execution = self.execution
-        prune_exited = getattr(execution, "prune_exited_containers", None)
-        prune_images = getattr(execution, "prune_generated_images", None)
         results = {"containers": 0, "images": 0}
-        if callable(prune_exited):
-            results["containers"] = int(
-                prune_exited(int(getattr(self._config, "RUNTIME_EXITED_CONTAINER_RETENTION_SEC", 1800) or 1800))
-            )
-        if callable(prune_images):
-            keep_refs: set[str] = set()
-            for row in self.db.list_sandbox_templates():
-                for key in ("warm_snapshot_image", "base_image"):
-                    ref = str(row.get(key) or "").strip()
-                    if ref:
-                        keep_refs.add(ref)
-            for ref in self.db.list_all_snapshot_image_refs():
+        keep_refs: set[str] = set()
+        for row in self.db.list_sandbox_templates():
+            for key in ("warm_snapshot_image", "base_image"):
+                ref = str(row.get(key) or "").strip()
                 if ref:
                     keep_refs.add(ref)
-            repo_default = (
-                str(getattr(self._config, "SANDBOX_SNAPSHOT_REPO", "mysandbox-snap") or "mysandbox-snap")
-                .strip()
-                .lower()
-                .replace("/", "-")
-            ) or "mysandbox-snap"
-            prefixes = [repo_default, "mysandbox-df-"]
-            results["images"] = int(
-                prune_images(
-                    keep_refs=keep_refs,
-                    older_than_seconds=int(getattr(self._config, "TEMPLATE_IMAGE_RETENTION_SEC", 172800) or 172800),
-                    repo_prefixes=prefixes,
+        for ref in self.db.list_all_snapshot_image_refs():
+            if ref:
+                keep_refs.add(ref)
+        repo_default = (
+            str(getattr(self._config, "SANDBOX_SNAPSHOT_REPO", "mysandbox-snap") or "mysandbox-snap")
+            .strip()
+            .lower()
+            .replace("/", "-")
+        ) or "mysandbox-snap"
+        prefixes = [repo_default, "mysandbox-df-"]
+
+        seen: set[int] = set()
+        executions: List[Any] = []
+        base_execution = self.execution
+        executions.append(base_execution)
+        kind = base_execution.get_backend_kind()
+        if kind in ("docker", "gvisor"):
+            executions = []
+            for target in self._gateway_targets():
+                try:
+                    status = self._gateway_runtime_status(target)
+                    if not status.get("reachable"):
+                        continue
+                    executions.append(self._execution_for_gateway_target(target))
+                except Exception:
+                    continue
+            if not executions:
+                executions.append(base_execution)
+
+        for execution in executions:
+            if id(execution) in seen:
+                continue
+            seen.add(id(execution))
+            prune_exited = getattr(execution, "prune_exited_containers", None)
+            prune_images = getattr(execution, "prune_generated_images", None)
+            if callable(prune_exited):
+                results["containers"] += int(
+                    prune_exited(int(getattr(self._config, "RUNTIME_EXITED_CONTAINER_RETENTION_SEC", 1800) or 1800))
                 )
-            )
+            if callable(prune_images):
+                results["images"] += int(
+                    prune_images(
+                        keep_refs=keep_refs,
+                        older_than_seconds=int(getattr(self._config, "TEMPLATE_IMAGE_RETENTION_SEC", 172800) or 172800),
+                        repo_prefixes=prefixes,
+                    )
+                )
         if results["containers"] or results["images"]:
             logger.info(
                 "Runtime artifact prune: removed exited_containers=%s images=%s",
@@ -239,6 +889,25 @@ class SandboxManager:
         if not ref:
             return False
         fn = getattr(self.execution, "image_exists", None)
+        if callable(fn):
+            try:
+                return bool(fn(ref))
+            except Exception:
+                return False
+        return True
+
+    def _image_exists_for_row(self, row: Optional[Dict[str, Any]], image_ref: str) -> bool:
+        ref = (image_ref or "").strip()
+        if not ref:
+            return False
+        registry_ref = str((row or {}).get("registry_image_ref") or "").strip()
+        if registry_ref and ref == registry_ref:
+            return True
+        execution = self.execution
+        owner_target = self._gateway_target_for_template_row(row)
+        if owner_target is not None:
+            execution = self._execution_for_gateway_target(owner_target)
+        fn = getattr(execution, "image_exists", None)
         if callable(fn):
             try:
                 return bool(fn(ref))
@@ -261,6 +930,7 @@ class SandboxManager:
             return None
         build_mode = (row.get("source_build_mode") or "docker_cli").strip() or "docker_cli"
         image_tag = warm_ref or base_image or None
+        target = self._gateway_target_for_template_row(row)
         try:
             result = build_dockerfile_template_via_gateway(
                 self._config,
@@ -271,22 +941,32 @@ class SandboxManager:
                 context_tar_gzip_base64=(row.get("context_tar_gzip_base64") or None),
                 build_mode=build_mode,
                 embed_envd=bool(getattr(self._config, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)),
+                gateway_api_base=(target.api_base if target else None),
             )
         except RuntimeError as ex:
             self.db.set_template_build_error(template_id, str(ex))
             return None
         rebuilt = str(result.get("image_tag") or image_tag or "").strip()
-        if not rebuilt:
+        registry_ref = str(result.get("registry_image_ref") or "").strip()
+        gateway_instance_id = str(result.get("gateway_instance_id") or "").strip()
+        effective_ref = registry_ref or rebuilt
+        if not effective_ref:
             self.db.set_template_build_error(template_id, "runtime-gateway rebuild produced no image tag")
             return None
-        self.db.set_template_warm_snapshot(template_id, rebuilt, None)
-        logger.info("Template %s rebuilt missing runtime image: %s", template_id, rebuilt)
-        self.sync_warm_pool_default_segment(template_id, rebuilt)
-        return rebuilt
+        self.db.set_template_warm_snapshot(
+            template_id,
+            effective_ref,
+            None,
+            registry_image_ref=registry_ref or None,
+            materialized_gateway_instance_id=gateway_instance_id or None,
+        )
+        logger.info("Template %s rebuilt missing runtime image: %s", template_id, effective_ref)
+        self.sync_warm_pool_default_segment(template_id, effective_ref)
+        return effective_ref
 
     def _ensure_template_runtime_image(self, template_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
         warm_ref = (row.get("warm_snapshot_image") or "").strip()
-        if warm_ref and self._image_exists(warm_ref):
+        if warm_ref and self._image_exists_for_row(row, warm_ref):
             return row
         base_image = (row.get("base_image") or "").strip()
         if warm_ref:
@@ -294,8 +974,16 @@ class SandboxManager:
         rebuilt = self._repair_missing_template_image(template_id, row)
         if rebuilt:
             return self.db.get_sandbox_template(template_id) or row
-        if base_image and base_image != warm_ref and self._image_exists(base_image):
-            self.db.set_template_warm_snapshot(template_id, base_image, None)
+        if base_image and base_image != warm_ref and self._image_exists_for_row(row, base_image):
+            self.db.set_template_warm_snapshot(
+                template_id,
+                base_image,
+                None,
+                registry_image_ref=(str(row.get("registry_image_ref") or "").strip() or None),
+                materialized_gateway_instance_id=(
+                    str(row.get("materialized_gateway_instance_id") or "").strip() or None
+                ),
+            )
             logger.warning(
                 "Template %s missing warm image %s; falling back to existing base_image %s",
                 template_id,
@@ -303,9 +991,9 @@ class SandboxManager:
                 base_image,
             )
             return self.db.get_sandbox_template(template_id) or row
-        if not warm_ref and base_image and self._image_exists(base_image):
+        if not warm_ref and base_image and self._image_exists_for_row(row, base_image):
             return row
-        if not warm_ref and not self._image_exists(base_image):
+        if not warm_ref and not self._image_exists_for_row(row, base_image):
             rebuilt = self._repair_missing_template_image(template_id, row)
             if rebuilt:
                 return self.db.get_sandbox_template(template_id) or row
@@ -320,6 +1008,42 @@ class SandboxManager:
                 f"Template base image missing from runtime: {base_image}. Rebuild the template.",
             )
         return self.db.get_sandbox_template(template_id) or row
+
+    def _resolve_template_alias_for_create(
+        self,
+        requested_template_id: str,
+        row: Optional[Dict[str, Any]],
+        owner_client_id: Optional[str],
+    ) -> tuple[str, Optional[Dict[str, Any]]]:
+        """Resolve friendly template aliases to the tenant-scoped materialized row."""
+        requested = (requested_template_id or "").strip()
+        if not requested:
+            return requested, row
+
+        def usable(src: Optional[Dict[str, Any]]) -> bool:
+            if not src:
+                return False
+            return bool((src.get("warm_snapshot_image") or src.get("registry_image_ref") or "").strip())
+
+        candidate = self.db.get_best_sandbox_template_by_alias(
+            requested,
+            owner_client_id=owner_client_id,
+            exclude_template_id=requested,
+        )
+        if not candidate or usable(row):
+            return requested, row
+
+        resolved = (candidate.get("template_id") or "").strip()
+        if not resolved or resolved == requested:
+            return requested, row
+
+        logger.info(
+            "Resolved sandbox template alias requested=%r resolved_template_id=%r owner_client_id=%r",
+            requested,
+            resolved,
+            owner_client_id,
+        )
+        return resolved, candidate
 
     def reconcile_persisted_state(self, limit: int = 5000) -> Dict[str, int]:
         """Reconcile DB sandbox rows against the live execution plane after a restart."""
@@ -336,6 +1060,8 @@ class SandboxManager:
         stats = {
             "checked": 0,
             "stale_marked_lost": 0,
+            "liveness_unknown": 0,
+            "warm_pool_revived": 0,
             "expired_reaped": 0,
             "routing_refreshed": 0,
         }
@@ -344,11 +1070,67 @@ class SandboxManager:
             cid = str(row.get("container_id") or "").strip()
             if not sid:
                 continue
+            row_state = str(row.get("state") or "").strip().lower()
+            if row_state != "running":
+                if row_state == "starting" and cid:
+                    try:
+                        execution = self._execution_for_row(row)
+                        state_fn = getattr(execution, "get_container_state", None)
+                        state = (
+                            str(state_fn(cid) or "unknown").strip().lower()
+                            if callable(state_fn)
+                            else ("running" if execution.is_container_running(cid) else "stopped")
+                        )
+                        if state == "running":
+                            self.refresh_guest_routing_metadata(sid)
+                            if self.db.update_sandbox_state(sid, "running"):
+                                stats["routing_refreshed"] += 1
+                            continue
+                        if state != "unknown" and self._mark_sandbox_lost(
+                            sid,
+                            detail="Sandbox was still starting when the control plane restarted and the workload no longer exists.",
+                        ):
+                            stats["stale_marked_lost"] += 1
+                            continue
+                    except Exception as ex:  # noqa: BLE001
+                        logger.debug("Sandbox reconcile: starting-state probe failed sandbox=%s: %s", sid, ex)
+                if row_state == "lost" and bool(row.get("is_warm_pool")) and cid:
+                    gateway_id = str(row.get("gateway_instance_id") or "").strip()
+                    current_gateways = self._current_gateway_instance_ids()
+                    if gateway_id and current_gateways and gateway_id not in current_gateways:
+                        continue
+                    try:
+                        execution = self._execution_for_row(row)
+                        state_fn = getattr(execution, "get_container_state", None)
+                        state = (
+                            str(state_fn(cid) or "unknown").strip().lower()
+                            if callable(state_fn)
+                            else ("running" if execution.is_container_running(cid) else "stopped")
+                        )
+                        if state == "running" and self.db.update_sandbox_state(sid, "running"):
+                            stats["warm_pool_revived"] += 1
+                            logger.warning(
+                                "Sandbox reconcile: revived live warm-pool sandbox previously marked lost sandbox=%s gateway=%s container=%s",
+                                sid,
+                                str(row.get("gateway_instance_id") or "").strip() or "-",
+                                cid[:12],
+                            )
+                    except Exception as ex:  # noqa: BLE001
+                        logger.debug("Sandbox reconcile: lost warm-pool revive check failed sandbox=%s: %s", sid, ex)
+                continue
             stats["checked"] += 1
             alive = False
+            state = "missing" if cid else "missing"
             if cid:
                 try:
-                    alive = bool(self.execution.is_container_running(cid))
+                    execution = self._execution_for_row(row)
+                    state_fn = getattr(execution, "get_container_state", None)
+                    if callable(state_fn):
+                        state = str(state_fn(cid) or "unknown").strip().lower()
+                        alive = state == "running"
+                    else:
+                        alive = bool(execution.is_container_running(cid))
+                        state = "running" if alive else "stopped"
                 except Exception as ex:  # noqa: BLE001
                     logger.warning(
                         "Sandbox reconcile: liveness check failed sandbox=%s container=%s detail=%s",
@@ -356,6 +1138,15 @@ class SandboxManager:
                         cid[:12],
                         ex,
                     )
+                    state = "unknown"
+            if state == "unknown":
+                stats["liveness_unknown"] += 1
+                logger.warning(
+                    "Sandbox reconcile: skipped sandbox=%s container=%s because runtime liveness is unknown",
+                    sid,
+                    cid[:12] if cid else "",
+                )
+                continue
             if not alive:
                 if self._mark_sandbox_lost(
                     sid,
@@ -445,11 +1236,12 @@ class SandboxManager:
         row = self.db.get_sandbox(sid)
         if not row:
             return None, "sandbox not found"
+        execution = self._execution_for_row(row)
         runtime_failure = self.get_sandbox_runtime_failure(sid)
         if runtime_failure:
             return None, runtime_failure
         cid = (row.get("container_id") or "").strip()
-        if not cid or not self.execution.is_container_running(cid):
+        if not cid or not execution.is_container_running(cid):
             return None, "container missing or not running"
         meta = row.get("metadata") or {}
         tok = (meta.get("envd_access_token") or "").strip()
@@ -533,10 +1325,11 @@ class SandboxManager:
         img_ref = ""
         if row:
             img_ref = (row.get("warm_snapshot_image") or row.get("base_image") or "").strip()
+        execution = self.execution
         if not sc and img_ref:
-            sc = self.execution.image_start_cmd_shell(img_ref) or ""
+            sc = execution.image_start_cmd_shell(img_ref) or ""
         if not tpl_env and img_ref:
-            tpl_env = self.execution.image_env_dict(img_ref)
+            tpl_env = execution.image_env_dict(img_ref)
         try:
             guest_port = int(str(tpl_env.get("PORT") or "0").strip() or "0")
         except ValueError:
@@ -545,12 +1338,13 @@ class SandboxManager:
 
     def _ensure_envd_baked(self, sandbox_id: str, container_id: str, *, pip_timeout: float) -> bool:
         """Ensure ``/opt/envd_guest`` and deps exist in the guest before startup."""
+        execution = self._execution_for_row(self.get_sandbox(sandbox_id) or {})
         with self._sandbox_io_lock(sandbox_id):
-            if container_has_baked_envd(self.execution.run_command, container_id):
+            if container_has_baked_envd(execution.run_command, container_id):
                 return True
             return bake_envd_guest_into_container(
-                put_archive_to_container=self.execution.put_archive_to_container,
-                run_command=self.execution.run_command,
+                put_archive_to_container=execution.put_archive_to_container,
+                run_command=execution.run_command,
                 container_id=container_id,
                 pip_timeout_sec=pip_timeout,
             )
@@ -565,16 +1359,18 @@ class SandboxManager:
         raw = str((row.get("env") or {}).get(ENVD_TEMPLATE_BAKED_ENV) or "").strip().lower()
         return raw in ("1", "true", "yes", "on")
 
-    def _k8s_in_pod_bootstrap_spec(
+    def _startup_managed_bootstrap_spec(
         self,
         template_id: str,
         *,
         start_envd: bool,
         envd_port: int,
     ) -> Optional[Dict[str, Any]]:
-        if not is_k8s_execution(self.execution):
+        if not is_container_like_execution(self.execution):
             return None
-        if not bool(getattr(self._config, "K8S_TEMPLATE_BOOTSTRAP_IN_POD", True)):
+        if is_k8s_execution(self.execution) and not bool(
+            getattr(self._config, "K8S_TEMPLATE_BOOTSTRAP_IN_POD", True)
+        ):
             return None
 
         sc, _img_ref, tpl_env, guest_port = self._resolve_template_start_spec(template_id)
@@ -608,10 +1404,208 @@ class SandboxManager:
             gp = guest_port
         return {
             "startup_command": ["/bin/sh", "-lc", "\n".join(parts)],
-            "readiness_tcp_port": gp if 1 <= gp <= 65535 else None,
+            "readiness_tcp_port": (gp if 1 <= gp <= 65535 and is_k8s_execution(self.execution) else None),
             "start_cmd": sc,
             "guest_port": gp if 1 <= gp <= 65535 else guest_port,
+            "envd_port": p if start_envd else 0,
         }
+
+    def _wait_for_startup_managed_service(
+        self,
+        sandbox_id: str,
+        container_id: str,
+        port: int,
+        *,
+        template_id: str,
+        label: str,
+        log_path: str,
+        timeout_seconds: float,
+    ) -> bool:
+        p = int(port or 0)
+        if not (1 <= p <= 65535):
+            return True
+        execution = self._execution_for_row(self.get_sandbox(sandbox_id) or {})
+        wt = execution.run_command(
+            container_id,
+            guest_tcp_wait_loop_script(
+                p,
+                max_seconds=timeout_seconds,
+                poll_seconds=self._guest_bootstrap_poll_seconds(),
+                log_path=log_path,
+            ),
+            timeout=timeout_seconds + 10.0,
+        )
+        if int(wt.get("exit_code") or 0) == 0:
+            return True
+        logger.warning(
+            "startup-managed bootstrap: %s :%s not ready sandbox=%s template=%s log=%s",
+            label,
+            p,
+            sandbox_id,
+            template_id,
+            (wt.get("stderr") or wt.get("stdout") or "")[:2500],
+        )
+        return False
+
+    def _wait_for_gateway_guest_readiness(
+        self,
+        sandbox_id: str,
+        container_id: str,
+        probes: List[Dict[str, Any]],
+        *,
+        timeout_seconds: float,
+        warn_on_failure: bool = True,
+    ) -> Optional[bool]:
+        """Validate guest listeners from the owning runtime-gateway shard.
+
+        Docker/gVisor sandboxes run behind a per-shard Docker bridge. The API pod cannot
+        reliably dial that bridge directly, and Docker exec-based polling is slow. The
+        owning runtime-gateway can dial the bridge immediately, so use it as the readiness
+        vantage point before returning a ready-to-use sandbox.
+        """
+        if not probes:
+            return True
+        row = self.get_sandbox(sandbox_id) or {}
+        api_base = str(row.get("gateway_api_base") or row.get("gateway_route_base") or "").strip().rstrip("/")
+        if not api_base:
+            return None
+        execution = self._execution_for_row(row)
+        host = ""
+        try:
+            host = (execution.get_container_internal_ipv4(container_id) or "").strip()
+        except Exception as ex:  # noqa: BLE001
+            logger.debug("gateway readiness: could not inspect container ip sandbox=%s: %s", sandbox_id, ex)
+        if not host:
+            return None
+
+        targets: List[Dict[str, Any]] = []
+        for probe in probes:
+            try:
+                port = max(1, min(65535, int(probe.get("port") or 0)))
+            except (TypeError, ValueError):
+                continue
+            if not (1 <= port <= 65535):
+                continue
+            targets.append(
+                {
+                    "label": str(probe.get("label") or port),
+                    "host": host,
+                    "port": port,
+                    "mode": str(probe.get("mode") or "tcp"),
+                    "path": str(probe.get("path") or "/"),
+                }
+            )
+        if not targets:
+            return True
+
+        timeout = max(0.5, float(timeout_seconds or 0.0))
+        payload = {
+            "targets": targets,
+            "timeout_seconds": timeout,
+            "poll_seconds": self._guest_bootstrap_poll_seconds(),
+        }
+        started = time.monotonic()
+        try:
+            with httpx.Client(timeout=httpx.Timeout(timeout + 5.0, connect=2.0)) as client:
+                resp = client.post(
+                    f"{api_base}/internal/runtime/probe",
+                    headers=self._gateway_headers(),
+                    json=payload,
+                )
+            if resp.status_code == 404:
+                return None
+            elapsed = max(0.0, time.monotonic() - started)
+            data = resp.json() if resp.content else {}
+            results = data.get("results") if isinstance(data, dict) else None
+            if resp.status_code < 400 and bool(data.get("ok")):
+                logger.info(
+                    "gateway readiness probe complete sandbox=%s gateway=%s seconds=%.3f results=%s",
+                    sandbox_id,
+                    row.get("gateway_instance_id") or "-",
+                    elapsed,
+                    results or [],
+                )
+                return True
+            log = logger.warning if warn_on_failure else logger.info
+            log(
+                "gateway readiness probe not ready sandbox=%s gateway=%s status=%s seconds=%.3f results=%s body=%s",
+                sandbox_id,
+                row.get("gateway_instance_id") or "-",
+                resp.status_code,
+                elapsed,
+                results or [],
+                resp.text[:1000],
+            )
+            return False
+        except Exception as ex:  # noqa: BLE001
+            log = logger.warning if warn_on_failure else logger.info
+            log("gateway readiness probe error sandbox=%s: %s", sandbox_id, ex)
+            return None
+
+    def _startup_managed_readiness_probes(
+        self,
+        startup_boot: Optional[Dict[str, Any]],
+        *,
+        auto_start_envd: bool,
+        envd_port_cfg: int,
+    ) -> List[Dict[str, Any]]:
+        if startup_boot is None:
+            return []
+        probes: List[Dict[str, Any]] = []
+        if auto_start_envd:
+            probes.append(
+                {
+                    "label": "envd",
+                    "port": int(startup_boot.get("envd_port") or envd_port_cfg),
+                    "mode": "http",
+                    "path": "/health",
+                }
+            )
+        guest_port = int(startup_boot.get("guest_port") or 0)
+        if guest_port > 0:
+            probes.append(
+                {
+                    "label": "agent",
+                    "port": guest_port,
+                    "mode": "tcp",
+                }
+            )
+        return probes
+
+    def ensure_guest_port_ready(self, sandbox_id: str, guest_port: int, *, timeout_seconds: Optional[float] = None) -> bool:
+        """Wait until a requested guest port is reachable from its owning gateway shard."""
+        sid = (sandbox_id or "").strip()
+        row = self.get_sandbox(sid)
+        if not row:
+            return False
+        cid = (row.get("container_id") or "").strip()
+        if not cid:
+            return False
+        try:
+            port = max(1, min(65535, int(guest_port)))
+        except (TypeError, ValueError):
+            return False
+        envd_port = max(1, min(65535, int(getattr(self._config, "ENVD_PORT", 49983))))
+        probe = {
+            "label": "envd" if port == envd_port else "guest",
+            "port": port,
+            "mode": "http" if port == envd_port else "tcp",
+            "path": "/health" if port == envd_port else "/",
+        }
+        wait = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else float(getattr(self._config, "SANDBOX_ROUTE_READY_WAIT_SEC", 12.0) or 12.0)
+        )
+        ready = self._wait_for_gateway_guest_readiness(
+            sid,
+            cid,
+            [probe],
+            timeout_seconds=wait,
+            warn_on_failure=True,
+        )
+        # If no gateway probe is available for this runtime, preserve the existing route behavior.
+        return True if ready is None else bool(ready)
 
     def _bootstrap_envd_daemon(
         self, sandbox_id: str, container_id: str, port: int, *, template_id: str = "", wait_for_listen: bool | None = None
@@ -625,12 +1619,14 @@ class SandboxManager:
         pip_to = float(getattr(self._config, "ENVD_BOOTSTRAP_PIP_TIMEOUT_SEC", 300.0) or 300.0)
         declared_baked = self._template_declares_envd_baked(template_id)
 
+        execution = self._execution_for_row(self.get_sandbox(sandbox_id) or {})
+
         def _start_once() -> Dict[str, Any]:
             with self._sandbox_io_lock(sandbox_id):
                 start = uvicorn_envd_start_script(p)
                 if not wait_for_listen:
                     start = f"set -eu\n{uvicorn_envd_start_background_script(p)}"
-                return self.execution.run_command(
+                return execution.run_command(
                     container_id,
                     start,
                     timeout=120.0 if wait_for_listen else 30.0,
@@ -683,11 +1679,13 @@ class SandboxManager:
         row = self.db.get_sandbox_template(tid)
         if not row:
             return
+        sandbox_row = self.get_sandbox(sandbox_id) or {}
+        execution = self._execution_for_row(sandbox_row)
         sc = (row.get("start_cmd") or "").strip()
         tpl_env = dict(row.get("env") or {})
         img_ref = (row.get("warm_snapshot_image") or row.get("base_image") or "").strip()
         if not sc and img_ref:
-            sc = self.execution.image_start_cmd_shell(img_ref)
+            sc = execution.image_start_cmd_shell(img_ref)
             if sc:
                 logger.info(
                     "template start_cmd from image %r for %r: %s",
@@ -696,7 +1694,7 @@ class SandboxManager:
                     sc[:200],
                 )
         if not tpl_env and img_ref:
-            tpl_env = self.execution.image_env_dict(img_ref)
+            tpl_env = execution.image_env_dict(img_ref)
         try:
             guest_port = int(str(tpl_env.get("PORT") or "0").strip() or "0")
         except ValueError:
@@ -706,7 +1704,7 @@ class SandboxManager:
             return
         exec_user = None if is_k8s_execution(self.execution) else "root"
         if img_ref and is_container_like_execution(self.execution) and not is_k8s_execution(self.execution):
-            exec_user = self.execution.image_default_user(img_ref)
+            exec_user = execution.image_default_user(img_ref)
         script = (
             "set -eu\n"
             ": > /tmp/template-start.log\n"
@@ -720,7 +1718,7 @@ class SandboxManager:
         with self._sandbox_io_lock(sandbox_id):
             # Inherit the container env (``ENV`` from image + create); do not pass a partial env dict
             # or ``PATH`` is lost and ``node``/``nodejs`` will not spawn.
-            st = self.execution.run_command(container_id, script, timeout=60.0, user=exec_user)
+            st = execution.run_command(container_id, script, timeout=60.0, user=exec_user)
             if int(st.get("exit_code") or 0) != 0:
                 logger.warning(
                     "template start_cmd launcher failed sandbox=%s template=%s output=%s",
@@ -736,7 +1734,7 @@ class SandboxManager:
                     poll_seconds=self._guest_bootstrap_poll_seconds(),
                     log_path="/tmp/template-start.log",
                 )
-                wt = self.execution.run_command(
+                wt = execution.run_command(
                     container_id,
                     wait,
                     timeout=self._guest_bootstrap_agent_wait_seconds() + 10.0,
@@ -771,7 +1769,7 @@ class SandboxManager:
                 cid = (row.get("container_id") or "").strip()
                 if cid:
                     try:
-                        pod_ip = (self.execution.get_container_internal_ipv4(cid) or "").strip()
+                        pod_ip = (self._execution_for_row(row).get_container_internal_ipv4(cid) or "").strip()
                     except Exception:
                         pod_ip = ""
             md["k8s"] = {
@@ -796,9 +1794,11 @@ class SandboxManager:
     ) -> bool:
         """Single kubectl exec fast path; if envd is missing from the image, bake it first."""
         sc, img_ref, _tpl_env, guest_port = self._resolve_template_start_spec(template_id)
+        row = self.get_sandbox(sandbox_id) or {}
+        execution = self._execution_for_row(row)
         exec_user = None if is_k8s_execution(self.execution) else "root"
         if img_ref and is_container_like_execution(self.execution) and not is_k8s_execution(self.execution):
-            exec_user = self.execution.image_default_user(img_ref)
+            exec_user = execution.image_default_user(img_ref)
 
         wait_sec = self._guest_bootstrap_agent_wait_seconds()
         poll_sec = self._guest_bootstrap_poll_seconds()
@@ -851,7 +1851,7 @@ class SandboxManager:
         script = "\n".join(parts)
         def _run_script() -> Dict[str, Any]:
             with self._sandbox_io_lock(sandbox_id):
-                return self.execution.run_command(
+                return execution.run_command(
                     container_id,
                     script,
                     timeout=wait_sec + 30.0,
@@ -910,51 +1910,78 @@ class SandboxManager:
         """Idempotent guest daemons after the workload is running (control-plane responsibility)."""
         if not is_container_like_execution(self.execution):
             return True
-
         envd_port_cfg = max(1, min(65535, int(getattr(self._config, "ENVD_PORT", 49983))))
         envd_always = bool(getattr(self._config, "ENVD_ALWAYS_ON", True))
         publish_envd_legacy = bool(getattr(self._config, "ENVD_PUBLISH_PORT", False))
         start_envd = envd_always or publish_envd_legacy
         auto_start_envd = start_envd and getattr(self._config, "ENVD_AUTO_START", True)
-        in_pod_boot = None
+        startup_boot = None
         if auto_start_envd or template_id:
-            in_pod_boot = self._k8s_in_pod_bootstrap_spec(
+            startup_boot = self._startup_managed_bootstrap_spec(
                 template_id,
                 start_envd=auto_start_envd,
                 envd_port=envd_port_cfg,
             )
-        if in_pod_boot is not None:
-            guest_port = int(in_pod_boot.get("guest_port") or 0)
-            if 1 <= guest_port <= 65535:
-                wt = self.execution.run_command(
-                    container_id,
-                    guest_tcp_wait_loop_script(
-                        guest_port,
-                        max_seconds=self._guest_bootstrap_agent_wait_seconds(),
-                        poll_seconds=self._guest_bootstrap_poll_seconds(),
-                        log_path="/tmp/template-start.log",
-                    ),
-                    timeout=self._guest_bootstrap_agent_wait_seconds() + 10.0,
-                )
-                if int(wt.get("exit_code") or 0) != 0:
-                    logger.warning(
-                        "k8s in-pod bootstrap: agent :%s not ready sandbox=%s template=%s log=%s",
-                        guest_port,
+        if startup_boot is not None:
+            probes = self._startup_managed_readiness_probes(
+                startup_boot,
+                auto_start_envd=auto_start_envd,
+                envd_port_cfg=envd_port_cfg,
+            )
+            guest_port = int(startup_boot.get("guest_port") or 0)
+            gateway_ready = self._wait_for_gateway_guest_readiness(
+                sandbox_id,
+                container_id,
+                probes,
+                timeout_seconds=max(self._guest_bootstrap_agent_wait_seconds(), 15.0 if auto_start_envd else 0.0),
+            )
+            if gateway_ready is not None:
+                if not gateway_ready:
+                    return False
+                if startup_boot.get("start_cmd"):
+                    logger.info(
+                        "template start_cmd bootstrapped at startup sandbox=%s template=%r cmd=%r port=%s",
                         sandbox_id,
                         template_id,
-                        (wt.get("stderr") or wt.get("stdout") or "")[:2500],
+                        str(startup_boot.get("start_cmd"))[:120],
+                        startup_boot.get("guest_port") or "?",
                     )
+                if auto_start_envd:
+                    logger.info("envd auto-start: sandbox %s guest tcp/%s ready (gateway)", sandbox_id, envd_port_cfg)
+                self.refresh_guest_routing_metadata(sandbox_id)
+                return True
+            if auto_start_envd:
+                envd_wait = min(self._guest_bootstrap_agent_wait_seconds(), 15.0)
+                if not self._wait_for_startup_managed_service(
+                    sandbox_id,
+                    container_id,
+                    int(startup_boot.get("envd_port") or 0),
+                    template_id=template_id,
+                    label="envd",
+                    log_path="/tmp/envd.log",
+                    timeout_seconds=envd_wait,
+                ):
                     return False
-            if in_pod_boot.get("start_cmd"):
+            if guest_port > 0 and not self._wait_for_startup_managed_service(
+                sandbox_id,
+                container_id,
+                guest_port,
+                template_id=template_id,
+                label="agent",
+                log_path="/tmp/template-start.log",
+                timeout_seconds=self._guest_bootstrap_agent_wait_seconds(),
+            ):
+                return False
+            if startup_boot.get("start_cmd"):
                 logger.info(
-                    "template start_cmd bootstrapped in-pod sandbox=%s template=%r cmd=%r port=%s",
+                    "template start_cmd bootstrapped at startup sandbox=%s template=%r cmd=%r port=%s",
                     sandbox_id,
                     template_id,
-                    str(in_pod_boot.get("start_cmd"))[:120],
-                    in_pod_boot.get("guest_port") or "?",
+                    str(startup_boot.get("start_cmd"))[:120],
+                    startup_boot.get("guest_port") or "?",
                 )
             if auto_start_envd:
-                logger.info("envd auto-start: sandbox %s guest tcp/%s ready (in-pod)", sandbox_id, envd_port_cfg)
+                logger.info("envd auto-start: sandbox %s guest tcp/%s ready (startup)", sandbox_id, envd_port_cfg)
             self.refresh_guest_routing_metadata(sandbox_id)
             return True
 
@@ -989,6 +2016,50 @@ class SandboxManager:
         self.refresh_guest_routing_metadata(sandbox_id)
         return True
 
+    def _start_guest_bootstrap_background(self, sandbox_id: str, container_id: str, template_id: str) -> None:
+        """Finish guest envd/template startup after a bounded cold-create response."""
+        sid = (sandbox_id or "").strip()
+        cid = (container_id or "").strip()
+        if not sid or not cid:
+            return
+
+        def _run() -> None:
+            started = time.monotonic()
+            try:
+                ok = self._bootstrap_guest_services(sid, cid, template_id)
+                elapsed = round(max(0.0, time.monotonic() - started), 3)
+                updates: Dict[str, Any] = {
+                    "sandbox_bootstrap_pending": False,
+                    "sandbox_bootstrap_seconds": elapsed,
+                }
+                if ok:
+                    updates["sandbox_bootstrap_error"] = ""
+                    logger.info("async guest bootstrap complete sandbox=%s seconds=%s", sid, elapsed)
+                else:
+                    updates["sandbox_bootstrap_error"] = "guest bootstrap failed"
+                    logger.warning("async guest bootstrap failed sandbox=%s seconds=%s", sid, elapsed)
+                self.db.merge_sandbox_metadata(sid, updates)
+            except Exception as ex:  # noqa: BLE001
+                elapsed = round(max(0.0, time.monotonic() - started), 3)
+                logger.warning("async guest bootstrap error sandbox=%s seconds=%s: %s", sid, elapsed, ex)
+                try:
+                    self.db.merge_sandbox_metadata(
+                        sid,
+                        {
+                            "sandbox_bootstrap_pending": False,
+                            "sandbox_bootstrap_seconds": elapsed,
+                            "sandbox_bootstrap_error": f"{type(ex).__name__}: {ex}",
+                        },
+                    )
+                except Exception:
+                    logger.debug("async guest bootstrap: metadata update failed sandbox=%s", sid, exc_info=True)
+
+        threading.Thread(
+            target=_run,
+            name=f"guest-bootstrap-{sid[:16]}",
+            daemon=True,
+        ).start()
+
     def create_sandbox(
         self,
         template_id: str = "python:3.11",
@@ -1017,6 +2088,7 @@ class SandboxManager:
 
         tid = (template_id or "").strip()
         tpl = self.db.get_sandbox_template(tid) if tid else None
+        tid, tpl = self._resolve_template_alias_for_create(tid, tpl, owner_client_id)
 
         pool = getattr(self, "warm_pool", None)
 
@@ -1100,23 +2172,60 @@ class SandboxManager:
                         bi,
                     )
             cfg = self._config
-            if pool is not None and cfg.SANDBOX_WARM_POOL_SIZE > 0 and warm_img:
-                pool.ensure_pool_for(tid, cpu_limit, memory_limit, int(timeout), warm_img)
-            if pool is not None:
-                sid = pool.try_acquire(tid, metadata, cpu_limit, memory_limit, int(timeout))
-                if sid:
-                    self.db.assign_sandbox_owner(
-                        sid,
-                        owner_client_id=owner_client_id,
-                        owner_api_key_id=owner_api_key_id,
+            first_pool_request = False
+            seed_target: Optional[GatewayTarget] = None
+            pool_managed_template = bool(pool is not None and cfg.SANDBOX_WARM_POOL_SIZE > 0 and warm_img)
+            warm_key = ""
+            if pool_managed_template:
+                warm_key = self.warm_pool_key(tid, cpu_limit, memory_limit, int(timeout))
+                segment_before = self.db.get_warm_pool_segment(warm_key)
+                segment_desired = int((segment_before or {}).get("desired_size") or 0)
+                first_pool_request = (
+                    (segment_before is None or segment_desired <= 0)
+                    and self.warm_pool_ready_count(warm_key) <= 0
+                )
+                if first_pool_request and self.execution.get_backend_kind() in ("docker", "gvisor"):
+                    seed_target = self._select_gateway_target_for_pool(
+                        template_id=tid,
+                        cpu_limit=cpu_limit,
+                        memory_limit=memory_limit,
+                        timeout=int(timeout),
+                        template_row=tpl,
                     )
-                    row = self.get_sandbox(sid)
-                    if row:
-                        if not self._bootstrap_guest_services(sid, row["container_id"], tid):
-                            self.kill_sandbox(sid, force=True)
-                            return None
+                    if seed_target is not None:
+                        self.note_warm_pool_segment(
+                            template_id=tid,
+                            cpu_limit=cpu_limit,
+                            memory_limit=memory_limit,
+                            timeout=int(timeout),
+                            desired_size=int(cfg.SANDBOX_WARM_POOL_SIZE),
+                            ready_image_ref=warm_img,
+                            preferred_gateway_instance_id=seed_target.instance_id,
+                        )
+                if not first_pool_request:
+                    pool.ensure_pool_for(tid, cpu_limit, memory_limit, int(timeout), warm_img)
+            if pool_managed_template and not first_pool_request:
+                sid = pool.try_acquire(
+                    tid,
+                    metadata,
+                    cpu_limit,
+                    memory_limit,
+                    int(timeout),
+                    owner_client_id=owner_client_id,
+                    owner_api_key_id=owner_api_key_id,
+                )
+                if sid:
                     return sid
-            return self._create_sandbox_fresh(
+                wait_sec = float(getattr(cfg, "SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC", 0.0) or 0.0)
+                segment_after = self.db.get_warm_pool_segment(warm_key) if warm_key else None
+                err = str((segment_after or {}).get("last_error") or "").strip()
+                self._last_create_error = (
+                    f"Timed out after {wait_sec:.1f}s waiting for a warm sandbox for template {tid!r}"
+                    + (f": {err}" if err else "")
+                )
+                logger.warning(self._last_create_error)
+                return None
+            sid = self._create_sandbox_fresh(
                 template_id=tid,
                 metadata=metadata,
                 cpu_limit=cpu_limit,
@@ -1125,24 +2234,26 @@ class SandboxManager:
                 from_snapshot_image=warm_img or None,
                 owner_client_id=owner_client_id,
                 owner_api_key_id=owner_api_key_id,
+                forced_gateway_instance_id=seed_target.instance_id if seed_target is not None else None,
             )
+            if sid and pool_managed_template and first_pool_request:
+                pool.ensure_pool_for(tid, cpu_limit, memory_limit, int(timeout), warm_img)
+            return sid
 
         if pool is not None:
-            sid = pool.try_acquire(tid, metadata, cpu_limit, memory_limit, int(timeout))
+            sid = pool.try_acquire(
+                tid,
+                metadata,
+                cpu_limit,
+                memory_limit,
+                int(timeout),
+                owner_client_id=owner_client_id,
+                owner_api_key_id=owner_api_key_id,
+            )
             if sid:
-                self.db.assign_sandbox_owner(
-                    sid,
-                    owner_client_id=owner_client_id,
-                    owner_api_key_id=owner_api_key_id,
-                )
-                row = self.get_sandbox(sid)
-                if row:
-                    if not self._bootstrap_guest_services(sid, row["container_id"], tid or template_id):
-                        self.kill_sandbox(sid, force=True)
-                        return None
                 return sid
         return self._create_sandbox_fresh(
-            template_id=template_id,
+            template_id=tid,
             metadata=metadata,
             cpu_limit=cpu_limit,
             memory_limit=memory_limit,
@@ -1220,6 +2331,7 @@ class SandboxManager:
 
             cfg = self._config
             if gateway_template_build_enabled(cfg):
+                target = self._gateway_target_for_template_row(row)
                 try:
                     result = build_template_snapshot_via_gateway(
                         cfg,
@@ -1236,19 +2348,29 @@ class SandboxManager:
                         snapshot_repo=str(
                             getattr(cfg, "SANDBOX_SNAPSHOT_REPO", "mysandbox-snap") or "mysandbox-snap"
                         ),
+                        gateway_api_base=(target.api_base if target else None),
                     )
                 except RuntimeError as ex:
                     self.db.set_template_build_error(template_id, str(ex))
                     return False
                 image_ref = str(result.get("image_ref") or "").strip()
-                if not image_ref:
+                registry_ref = str(result.get("registry_image_ref") or "").strip()
+                gateway_instance_id = str(result.get("gateway_instance_id") or "").strip()
+                effective_ref = registry_ref or image_ref
+                if not effective_ref:
                     self.db.set_template_build_error(
                         template_id, "runtime-gateway template snapshot produced no image"
                     )
                     return False
-                self.db.set_template_warm_snapshot(template_id, image_ref, None)
-                logger.info("Template %s warm snapshot (runtime-gateway): %s", template_id, image_ref)
-                self.sync_warm_pool_default_segment(template_id, image_ref)
+                self.db.set_template_warm_snapshot(
+                    template_id,
+                    effective_ref,
+                    None,
+                    registry_image_ref=registry_ref or None,
+                    materialized_gateway_instance_id=gateway_instance_id or None,
+                )
+                logger.info("Template %s warm snapshot (runtime-gateway): %s", template_id, effective_ref)
+                self.sync_warm_pool_default_segment(template_id, effective_ref)
                 return True
 
             name = f"tpl-build-{uuid.uuid4().hex[:10]}"
@@ -1529,7 +2651,7 @@ class SandboxManager:
         if not self.db.set_template_warm_snapshot(template_id, warm_ref, None):
             raise RuntimeError(
                 f"set_template_warm_snapshot failed for template_id={template_id!r} "
-                f"(warm_ref={warm_ref!r}); SQLite row missing after upsert — check DATABASE_PATH / DB."
+                f"(warm_ref={warm_ref!r}); template row missing after upsert — check DATABASE_URL / DB."
             )
         logger.info("Template %s (parsed Dockerfile) warm snapshot: %s", template_id, warm_ref)
         self.sync_warm_pool_default_segment(template_id, warm_ref)
@@ -1553,6 +2675,9 @@ class SandboxManager:
         from_snapshot_image: Optional[str] = None,
         owner_client_id: Optional[str] = None,
         owner_api_key_id: Optional[str] = None,
+        is_warm_pool: bool = False,
+        warm_pool_key: Optional[str] = None,
+        forced_gateway_instance_id: Optional[str] = None,
     ) -> Optional[str]:
         """Create a brand-new sandbox (never taken from the warm pool)."""
         sandbox_id = f"sb-{uuid.uuid4().hex[:16]}"
@@ -1566,6 +2691,7 @@ class SandboxManager:
         if allow_pt is None:
             allow_pt = getattr(self._config, "SANDBOX_DEFAULT_ALLOW_PUBLIC_TRAFFIC", False)
         meta["allow_public_traffic"] = bool(allow_pt)
+        meta["sandbox_allocation_source"] = "warm_pool_provision" if is_warm_pool else "cold_create"
         metadata = meta
 
         snap = (from_snapshot_image or "").strip()
@@ -1598,17 +2724,57 @@ class SandboxManager:
             image = snap
         else:
             image = _resolve_sandbox_image(template_id)
+        tpl = self.db.get_sandbox_template((template_id or "").strip()) if template_id else None
         runtime = self.execution.get_backend_kind()
+        forced_target = None
+        if runtime in ("docker", "gvisor") and forced_gateway_instance_id:
+            forced_target = target_for_instance(self._gateway_targets(), forced_gateway_instance_id)
+        if runtime in ("docker", "gvisor") and forced_target is not None:
+            chosen_target = forced_target
+        elif runtime in ("docker", "gvisor") and is_warm_pool:
+            chosen_target = self._select_gateway_target_for_pool(
+                template_id=(template_id or "").strip(),
+                cpu_limit=cpu_limit,
+                memory_limit=memory_limit,
+                timeout=int(timeout),
+                template_row=tpl,
+            )
+        elif runtime in ("docker", "gvisor") and int(getattr(self._config, "SANDBOX_WARM_POOL_SIZE", 0) or 0) > 0:
+            chosen_target = self._select_gateway_target_for_pool(
+                template_id=(template_id or "").strip(),
+                cpu_limit=cpu_limit,
+                memory_limit=memory_limit,
+                timeout=int(timeout),
+                template_row=tpl,
+            )
+        elif runtime in ("docker", "gvisor") and tpl:
+            chosen_target = self._gateway_target_for_template_row(tpl)
+        elif runtime in ("docker", "gvisor"):
+            chosen_target = self._best_gateway_by_free_disk(
+                self._gateway_targets(),
+                force_refresh=True,
+                preferred_image_ref=image,
+            )
+        else:
+            chosen_target = None
+        if runtime in ("docker", "gvisor") and chosen_target is None:
+            self._last_create_error = (
+                "No runtime-gateway shard has enough disk headroom under "
+                f"RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO={getattr(self._config, 'RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO', 0.80)}"
+            )
+            logger.error(self._last_create_error)
+            return None
+        execution = self._execution_for_gateway_target(chosen_target) if chosen_target else self.execution
         logger.info(
-            "Creating sandbox %s runtime=%s template_id=%r image=%r (from_snapshot=%s)",
+            "Creating sandbox %s runtime=%s template_id=%r image=%r (from_snapshot=%s gateway=%s)",
             sandbox_id,
             runtime,
             template_id,
             image,
             bool(snap),
+            chosen_target.instance_id if chosen_target else "-",
         )
 
-        tpl = self.db.get_sandbox_template((template_id or "").strip()) if template_id else None
         env_for_create: Optional[Dict[str, str]] = None
         if tpl:
             ev = dict(tpl.get("env") or {})
@@ -1635,6 +2801,7 @@ class SandboxManager:
         )
         publish_envd = publish_envd_legacy
         start_envd = envd_always or publish_envd_legacy
+        auto_start_envd = start_envd and bool(getattr(self._config, "ENVD_AUTO_START", True))
 
         guest_ports = resolve_guest_ports(
             metadata=metadata,
@@ -1656,11 +2823,11 @@ class SandboxManager:
         if is_container_backend and data_plane_enabled_for_config(self._config):
             traffic_token = secrets.token_urlsafe(32)
 
-        k8s_boot = None
-        if is_k8s_execution(self.execution):
-            k8s_boot = self._k8s_in_pod_bootstrap_spec(
+        startup_boot = None
+        if is_container_like_execution(self.execution):
+            startup_boot = self._startup_managed_bootstrap_spec(
                 template_id,
-                start_envd=start_envd,
+                start_envd=auto_start_envd,
                 envd_port=envd_port_cfg,
             )
 
@@ -1675,11 +2842,11 @@ class SandboxManager:
             guest_ports=guest_ports,
             publish_envd_port=publish_envd,
             envd_port=envd_port_cfg,
-            startup_command=list(k8s_boot.get("startup_command") or []) if k8s_boot else None,
-            readiness_tcp_port=(k8s_boot.get("readiness_tcp_port") if k8s_boot else None),
+            startup_command=list(startup_boot.get("startup_command") or []) if startup_boot else None,
+            readiness_tcp_port=(startup_boot.get("readiness_tcp_port") if startup_boot else None),
         )
 
-        container_id = self.execution.create_container(container_name, config)
+        container_id = execution.create_container(container_name, config)
         if not container_id:
             logger.error("Failed to create workload for sandbox %s", sandbox_id)
             return None
@@ -1695,6 +2862,13 @@ class SandboxManager:
             runtime=runtime,
             owner_client_id=owner_client_id,
             owner_api_key_id=owner_api_key_id,
+            is_warm_pool=bool(is_warm_pool),
+            warm_pool_key=warm_pool_key,
+            gateway_instance_id=chosen_target.instance_id if chosen_target else None,
+            gateway_route_base=chosen_target.route_base if chosen_target else None,
+            gateway_api_base=chosen_target.api_base if chosen_target else None,
+            gateway_docker_host=chosen_target.docker_host if chosen_target else None,
+            state="starting",
         )
 
         if start_envd and is_container_backend and envd_token:
@@ -1702,7 +2876,7 @@ class SandboxManager:
             if traffic_token:
                 md_envd["traffic_access_token"] = traffic_token
             if publish_envd:
-                ehp = self.execution.get_container_tcp_host_port(container_id, envd_port_cfg)
+                ehp = execution.get_container_tcp_host_port(container_id, envd_port_cfg)
                 if ehp:
                     md_envd["envd_host_tcp_port"] = int(ehp)
                     hhost = (getattr(self._config, "ENVD_UPSTREAM_HTTP_HOST", None) or "127.0.0.1").strip()
@@ -1723,20 +2897,88 @@ class SandboxManager:
         elif traffic_token:
             self.db.merge_sandbox_metadata(sandbox_id, {"traffic_access_token": traffic_token})
 
+        bounded_client_bootstrap = (
+            is_container_backend
+            and not bool(is_warm_pool)
+            and runtime in ("docker", "gvisor")
+            and startup_boot is not None
+        )
+        if bounded_client_bootstrap:
+            probes = self._startup_managed_readiness_probes(
+                startup_boot,
+                auto_start_envd=bool(auto_start_envd),
+                envd_port_cfg=envd_port_cfg,
+            )
+            self.refresh_guest_routing_metadata(sandbox_id)
+            wait_budget = float(getattr(self._config, "SANDBOX_COLD_CREATE_READY_WAIT_SEC", 1.0) or 0.0)
+            ready = False
+            started = time.monotonic()
+            if probes and wait_budget > 0.0:
+                ready = bool(
+                    self._wait_for_gateway_guest_readiness(
+                        sandbox_id,
+                        container_id,
+                        probes,
+                        timeout_seconds=wait_budget,
+                        warn_on_failure=False,
+                    )
+                )
+            elapsed = round(max(0.0, time.monotonic() - started), 3)
+            self.db.merge_sandbox_metadata(
+                sandbox_id,
+                {
+                    "sandbox_bootstrap_pending": not ready,
+                    "sandbox_bootstrap_error": "" if ready else "guest bootstrap still starting",
+                    "sandbox_bootstrap_seconds": elapsed if ready else None,
+                },
+            )
+            self.db.update_sandbox_state(sandbox_id, "running")
+            if not ready:
+                self._start_guest_bootstrap_background(sandbox_id, container_id, template_id)
+                logger.info(
+                    "Sandbox created: %s (guest bootstrap continuing, readiness_budget_seconds=%.3f)",
+                    sandbox_id,
+                    wait_budget,
+                )
+            else:
+                logger.info("Sandbox created: %s (guest ready within cold-create budget)", sandbox_id)
+            return sandbox_id
+
         if is_container_backend:
             if not self._bootstrap_guest_services(sandbox_id, container_id, template_id):
                 logger.error("Sandbox %s bootstrap failed; tearing down workload", sandbox_id)
                 self.kill_sandbox(sandbox_id, force=True)
                 return None
+            self.refresh_guest_routing_metadata(sandbox_id)
         else:
             self.refresh_guest_routing_metadata(sandbox_id)
 
+        self.db.update_sandbox_state(sandbox_id, "running")
         logger.info("Sandbox created: %s", sandbox_id)
         return sandbox_id
 
     def get_sandbox(self, sandbox_id: str) -> Optional[Dict[str, Any]]:
         """Get sandbox info."""
         return self.db.get_sandbox(sandbox_id)
+
+    def _remember_recent_created_row(self, row: Optional[Dict[str, Any]]) -> None:
+        sid = str((row or {}).get("sandbox_id") or "").strip()
+        if not sid:
+            return
+        with self._recent_created_rows_lock:
+            self._recent_created_rows[sid] = dict(row or {})
+            while len(self._recent_created_rows) > 128:
+                self._recent_created_rows.pop(next(iter(self._recent_created_rows)), None)
+
+    def get_sandbox_for_create_response(self, sandbox_id: str) -> Optional[Dict[str, Any]]:
+        sid = (sandbox_id or "").strip()
+        if not sid:
+            return None
+        with self._recent_created_rows_lock:
+            row = self._recent_created_rows.pop(sid, None)
+        if row:
+            return row
+        return self.get_sandbox(sid)
 
     def get_sandbox_by_container(self, container_id: str) -> Optional[Dict[str, Any]]:
         """Get sandbox by container / instance ID."""
@@ -1759,12 +3001,12 @@ class SandboxManager:
         label: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Docker: ``docker commit`` into a new image, or Firecracker: full VM snapshot (``fc-bundle:`` ref)."""
-        commit_fn = getattr(self.execution, "commit_filesystem_snapshot", None)
-        if not callable(commit_fn):
-            return None
         sandbox = self.get_sandbox(sandbox_id)
         if not sandbox:
             logger.error("create_filesystem_snapshot: unknown sandbox %s", sandbox_id)
+            return None
+        commit_fn = getattr(self._execution_for_row(sandbox), "commit_filesystem_snapshot", None)
+        if not callable(commit_fn):
             return None
         cfg = self._config
         repo = (cfg.SANDBOX_SNAPSHOT_REPO or "mysandbox-snap").strip().lower().replace("/", "-")
@@ -1813,7 +3055,7 @@ class SandboxManager:
         container_id = sandbox["container_id"]
 
         with self._sandbox_io_lock(sandbox_id):
-            result = self.execution.run_command(
+            result = self._execution_for_row(sandbox).run_command(
                 container_id=container_id,
                 command=command,
                 cwd=cwd,
@@ -1863,7 +3105,7 @@ class SandboxManager:
 
         try:
             with self._sandbox_io_lock(sandbox_id):
-                stream_fn = getattr(self.execution, "run_command_stream", None)
+                stream_fn = getattr(self._execution_for_row(sandbox), "run_command_stream", None)
                 if callable(stream_fn):
                     for ev in stream_fn(
                         sandbox["container_id"],
@@ -1886,7 +3128,7 @@ class SandboxManager:
                             exit_code = int(ev.get("exit_code", -1))
                             yield jline({"type": "exit", "exit_code": exit_code})
                 else:
-                    r = self.execution.run_command(
+                    r = self._execution_for_row(sandbox).run_command(
                         sandbox["container_id"],
                         command,
                         cwd=cwd,
@@ -1930,7 +3172,7 @@ class SandboxManager:
             return None
 
         with self._sandbox_io_lock(sandbox_id):
-            return self.execution.read_file(sandbox["container_id"], path)
+            return self._execution_for_row(sandbox).read_file(sandbox["container_id"], path)
 
     def write_file(self, sandbox_id: str, path: str, content: str) -> bool:
         """Write file to sandbox."""
@@ -1939,7 +3181,7 @@ class SandboxManager:
             return False
 
         with self._sandbox_io_lock(sandbox_id):
-            return self.execution.write_file(sandbox["container_id"], path, content)
+            return self._execution_for_row(sandbox).write_file(sandbox["container_id"], path, content)
 
     def list_files(self, sandbox_id: str, path: str = "/") -> Optional[list]:
         """List files in sandbox."""
@@ -1948,7 +3190,7 @@ class SandboxManager:
             return None
 
         with self._sandbox_io_lock(sandbox_id):
-            return self.execution.list_files(sandbox["container_id"], path)
+            return self._execution_for_row(sandbox).list_files(sandbox["container_id"], path)
 
     def delete_file(self, sandbox_id: str, path: str, recursive: bool = False) -> bool:
         """Delete file from sandbox."""
@@ -1957,7 +3199,7 @@ class SandboxManager:
             return False
 
         with self._sandbox_io_lock(sandbox_id):
-            return self.execution.delete_file(
+            return self._execution_for_row(sandbox).delete_file(
                 sandbox["container_id"], path, recursive=recursive
             )
 
@@ -1968,7 +3210,7 @@ class SandboxManager:
             return False
 
         with self._sandbox_io_lock(sandbox_id):
-            return self.execution.create_directory(sandbox["container_id"], path, mode)
+            return self._execution_for_row(sandbox).create_directory(sandbox["container_id"], path, mode)
 
     def get_metrics(self, sandbox_id: str) -> Optional[Dict[str, Any]]:
         """Get sandbox metrics."""
@@ -1976,7 +3218,7 @@ class SandboxManager:
         if not sandbox:
             return None
 
-        stats = self.execution.get_container_stats(sandbox["container_id"])
+        stats = self._execution_for_row(sandbox).get_container_stats(sandbox["container_id"])
         if not stats:
             return None
 
@@ -2054,7 +3296,7 @@ class SandboxManager:
             self._mark_sandbox_lost(sid, detail=msg)
             return msg
         try:
-            if self.execution.is_container_running(cid):
+            if self._execution_for_row(row).is_container_running(cid):
                 return None
         except Exception:
             return None
@@ -2090,13 +3332,13 @@ class SandboxManager:
 
         killed = False
         try:
-            killed = bool(self.execution.kill_container(container_id, force=force))
+            killed = bool(self._execution_for_row(sandbox).kill_container(container_id, force=force))
         except Exception as ex:  # noqa: BLE001
             logger.warning("Kill workload raised for sandbox %s: %s", sandbox_id, ex)
             killed = False
         if not killed:
             try:
-                if not self.execution.is_container_running(container_id):
+                if not self._execution_for_row(sandbox).is_container_running(container_id):
                     logger.warning(
                         "Sandbox %s workload already absent; deleting stale DB row",
                         sandbox_id,
@@ -2122,7 +3364,7 @@ class SandboxManager:
         if not sandbox:
             return False
 
-        if self.execution.pause_instance(sandbox["container_id"]):
+        if self._execution_for_row(sandbox).pause_instance(sandbox["container_id"]):
             self.db.update_sandbox_state(sandbox_id, "paused")
             logger.info("Sandbox paused: %s", sandbox_id)
             return True
@@ -2135,7 +3377,7 @@ class SandboxManager:
         if not sandbox:
             return False
 
-        if self.execution.resume_instance(sandbox["container_id"]):
+        if self._execution_for_row(sandbox).resume_instance(sandbox["container_id"]):
             self.db.update_sandbox_state(sandbox_id, "running")
             self.refresh_guest_routing_metadata(sandbox_id)
             logger.info("Sandbox resumed: %s", sandbox_id)

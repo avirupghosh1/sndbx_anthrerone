@@ -12,6 +12,7 @@ from internal_auth import internal_api_key_valid, unauthorized_response
 from template_builder import (
     build_image_from_dockerfile,
     build_registered_template_snapshot,
+    push_image_to_registry,
     stream_build_image_from_dockerfile,
 )
 
@@ -46,11 +47,21 @@ async def build_dockerfile(request: Request) -> Response:
             embed_envd=bool(payload.get("embed_envd", True)),
             restore_user_mode=str(getattr(cfg, "ENVD_DOCKERFILE_RESTORE_USER", "auto") or "auto"),
         )
+        registry_image_ref = None
+        if bool(getattr(cfg, "TEMPLATE_REGISTRY_PUSH_ENABLED", False)):
+            registry_image_ref = push_image_to_registry(
+                local_ref=image_tag,
+                template_id=str(payload.get("template_id") or ""),
+                repo_prefix=str(getattr(cfg, "TEMPLATE_REGISTRY_REPO_PREFIX", "") or ""),
+                timeout=max(600, int(payload.get("build_timeout_sec") or 3600)),
+            )
     except RuntimeError as ex:
         return _json_error(str(ex))
     return JSONResponse(
         {
             "image_tag": image_tag,
+            "registry_image_ref": registry_image_ref,
+            "gateway_instance_id": str(getattr(cfg, "GATEWAY_INSTANCE_ID", "") or ""),
             "build_log": build_log,
             "requested_mode": str(payload.get("build_mode") or "docker_cli"),
             "effective_mode": "docker_cli",
@@ -87,8 +98,18 @@ async def build_dockerfile_stream(request: Request) -> Response:
                 restore_user_mode=str(getattr(cfg, "ENVD_DOCKERFILE_RESTORE_USER", "auto") or "auto"),
             ):
                 if event.get("type") == "result":
+                    registry_image_ref = None
+                    if bool(getattr(cfg, "TEMPLATE_REGISTRY_PUSH_ENABLED", False)):
+                        registry_image_ref = push_image_to_registry(
+                            local_ref=str(event.get("image_tag") or ""),
+                            template_id=str(payload.get("template_id") or ""),
+                            repo_prefix=str(getattr(cfg, "TEMPLATE_REGISTRY_REPO_PREFIX", "") or ""),
+                            timeout=max(600, int(payload.get("build_timeout_sec") or 3600)),
+                        )
                     event = {
                         **event,
+                        "registry_image_ref": registry_image_ref,
+                        "gateway_instance_id": str(getattr(cfg, "GATEWAY_INSTANCE_ID", "") or ""),
                         "requested_mode": str(payload.get("build_mode") or "docker_cli"),
                         "effective_mode": "docker_cli",
                     }
@@ -119,6 +140,14 @@ async def build_template_snapshot(request: Request) -> Response:
             envd_pip_timeout_sec=float(payload.get("envd_pip_timeout_sec") or 300.0),
             snapshot_repo=str(payload.get("snapshot_repo") or "mysandbox-snap"),
         )
+        if bool(getattr(cfg, "TEMPLATE_REGISTRY_PUSH_ENABLED", False)):
+            result["registry_image_ref"] = push_image_to_registry(
+                local_ref=str(result.get("image_ref") or ""),
+                template_id=str(payload.get("template_id") or ""),
+                repo_prefix=str(getattr(cfg, "TEMPLATE_REGISTRY_REPO_PREFIX", "") or ""),
+                timeout=max(600, int(payload.get("settle_seconds") or 20) + 900),
+            )
+        result["gateway_instance_id"] = str(getattr(cfg, "GATEWAY_INSTANCE_ID", "") or "")
     except RuntimeError as ex:
         return _json_error(str(ex))
     return JSONResponse(result)

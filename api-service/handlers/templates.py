@@ -113,6 +113,8 @@ async def _finish_build_record(
     status: str,
     effective_mode: str,
     image_tag: str | None = None,
+    registry_image_ref: str | None = None,
+    gateway_instance_id: str | None = None,
     build_log: str = "",
     error_text: str | None = None,
 ) -> None:
@@ -122,6 +124,8 @@ async def _finish_build_record(
         status=status,
         effective_mode=effective_mode,
         image_tag=image_tag,
+        registry_image_ref=registry_image_ref,
+        gateway_instance_id=gateway_instance_id,
         build_log=build_log,
         error_text=error_text,
     )
@@ -202,6 +206,8 @@ async def register_template_from_dockerfile(
         requested_mode=mode,
     )
     if gateway_template_build_enabled(cfg):
+        existing_template = await run_io(sandbox_manager.db.get_sandbox_template, tid)
+        gateway_target = sandbox_manager._gateway_target_for_template_row(existing_template)
         try:
             build_res = await run_io(
                 build_dockerfile_template_via_gateway,
@@ -213,6 +219,7 @@ async def register_template_from_dockerfile(
                 context_tar_gzip_base64=request.context_tar_gzip_base64,
                 build_mode=mode,
                 embed_envd=bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)),
+                gateway_api_base=(gateway_target.api_base if gateway_target else None),
             )
         except RuntimeError as ex:
             await _finish_build_record(
@@ -226,6 +233,8 @@ async def register_template_from_dockerfile(
             raise HTTPException(status_code=400, detail=str(ex)) from ex
 
         tag = str(build_res.get("image_tag") or "").strip()
+        registry_ref = str(build_res.get("registry_image_ref") or "").strip()
+        gateway_instance_id = str(build_res.get("gateway_instance_id") or "").strip()
         if not tag:
             await _finish_build_record(
                 sandbox_manager,
@@ -264,14 +273,24 @@ async def register_template_from_dockerfile(
             build_args=request.build_args or {},
             context_tar_gzip_base64=request.context_tar_gzip_base64,
         )
-        await run_io(sandbox_manager.db.set_template_warm_snapshot, tid, tag, None)
-        await run_io(sandbox_manager.sync_warm_pool_default_segment, tid, tag)
+        effective_ref = registry_ref or tag
+        await run_io(
+            sandbox_manager.db.set_template_warm_snapshot,
+            tid,
+            effective_ref,
+            None,
+            registry_image_ref=registry_ref or None,
+            materialized_gateway_instance_id=gateway_instance_id or None,
+        )
+        await run_io(sandbox_manager.sync_warm_pool_default_segment, tid, effective_ref)
         await _finish_build_record(
             sandbox_manager,
             build_id,
             status="success",
             effective_mode=str(build_res.get("effective_mode") or "runtime_gateway"),
             image_tag=tag,
+            registry_image_ref=registry_ref or None,
+            gateway_instance_id=gateway_instance_id or None,
             build_log=str(build_res.get("build_log") or ""),
         )
         return TemplateDefinitionResponse(**_row_to_response(row))
@@ -497,6 +516,8 @@ async def register_template_from_dockerfile_stream(
 
     async def _events():
         log_parts: list[str] = []
+        existing_template = await run_io(sandbox_manager.db.get_sandbox_template, tid)
+        gateway_target = sandbox_manager._gateway_target_for_template_row(existing_template)
         try:
             async for event in stream_dockerfile_template_via_gateway(
                 cfg,
@@ -507,6 +528,7 @@ async def register_template_from_dockerfile_stream(
                 context_tar_gzip_base64=request.context_tar_gzip_base64,
                 build_mode=mode,
                 embed_envd=bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)),
+                gateway_api_base=(gateway_target.api_base if gateway_target else None),
             ):
                 if event.get("type") == "error":
                     detail = str(event.get("detail") or "build failed")
@@ -521,6 +543,8 @@ async def register_template_from_dockerfile_stream(
                     )
                 if event.get("type") == "result":
                     tag = str(event.get("image_tag") or "").strip()
+                    registry_ref = str(event.get("registry_image_ref") or "").strip()
+                    gateway_instance_id = str(event.get("gateway_instance_id") or "").strip()
                     build_log = str(event.get("build_log") or "")
                     if build_log:
                         log_parts.append(build_log)
@@ -552,14 +576,24 @@ async def register_template_from_dockerfile_stream(
                         build_args=request.build_args or {},
                         context_tar_gzip_base64=request.context_tar_gzip_base64,
                     )
-                    await run_io(sandbox_manager.db.set_template_warm_snapshot, tid, tag, None)
-                    await run_io(sandbox_manager.sync_warm_pool_default_segment, tid, tag)
+                    effective_ref = registry_ref or tag
+                    await run_io(
+                        sandbox_manager.db.set_template_warm_snapshot,
+                        tid,
+                        effective_ref,
+                        None,
+                        registry_image_ref=registry_ref or None,
+                        materialized_gateway_instance_id=gateway_instance_id or None,
+                    )
+                    await run_io(sandbox_manager.sync_warm_pool_default_segment, tid, effective_ref)
                     await _finish_build_record(
                         sandbox_manager,
                         build_id,
                         status="success",
                         effective_mode=str(event.get("effective_mode") or "runtime_gateway"),
                         image_tag=tag,
+                        registry_image_ref=registry_ref or None,
+                        gateway_instance_id=gateway_instance_id or None,
                         build_log="\n".join(part for part in log_parts if part),
                     )
                     event = {

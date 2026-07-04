@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import re
+import threading
 import shutil
 import tarfile
 import tempfile
@@ -58,6 +59,11 @@ def _docker_host() -> str:
 def _sanitize_for_tag(template_id: str) -> str:
     s = re.sub(r"[^a-z0-9._-]+", "-", template_id.strip().lower()).strip("-") or "tpl"
     return s[:48]
+
+
+def _sanitize_registry_tag_component(value: str, *, max_len: int = 64) -> str:
+    s = re.sub(r"[^A-Za-z0-9_.-]+", "-", (value or "").strip()).strip(".-")
+    return (s or "latest")[:max_len]
 
 
 def _entry_to_text(entry: object) -> str:
@@ -209,6 +215,161 @@ def _docker_client(timeout: int):
     return docker.DockerClient(base_url=_docker_host(), timeout=timeout)
 
 
+_registry_login_lock = threading.Lock()
+_registry_login_cache: set[str] = set()
+
+
+def _registry_auth_config() -> Optional[dict]:
+    from config import get_config
+
+    cfg = get_config()
+    server = (getattr(cfg, "TEMPLATE_REGISTRY_SERVER", "") or "").strip().rstrip("/")
+    if not server:
+        server = _registry_server_from_repo_prefix(
+            str(getattr(cfg, "TEMPLATE_REGISTRY_REPO_PREFIX", "") or "")
+        )
+    username = (getattr(cfg, "TEMPLATE_REGISTRY_USERNAME", "") or "").strip()
+    password = getattr(cfg, "TEMPLATE_REGISTRY_PASSWORD", "") or ""
+    if not (server and username and password):
+        return None
+    return {
+        "username": username,
+        "password": password,
+        "serveraddress": server,
+    }
+
+
+def _registry_server_from_repo_prefix(repo_prefix: str) -> str:
+    first = (repo_prefix or "").strip().split("/", 1)[0].strip()
+    if "." in first or ":" in first or first == "localhost":
+        return first.rstrip("/")
+    return ""
+
+
+def _is_ecr_repo_prefix(repo_prefix: str) -> bool:
+    server = _registry_server_from_repo_prefix(repo_prefix).lower()
+    return (
+        server == "public.ecr.aws"
+        or ".dkr.ecr." in server
+        or server.endswith(".amazonaws.com")
+    )
+
+
+def _resolve_registry_layout(*, repo_prefix: str, requested_layout: str) -> str:
+    layout = (requested_layout or "auto").strip().lower().replace("-", "_")
+    if layout in ("single", "single_repo", "single_repository"):
+        return "single_repository"
+    if layout in ("per_template", "repository_per_template", "subrepository"):
+        return "repository_per_template"
+    if layout != "auto":
+        raise ValueError(
+            "TEMPLATE_REGISTRY_LAYOUT must be auto, repository_per_template, or single_repository"
+        )
+    if _is_ecr_repo_prefix(repo_prefix):
+        return "single_repository"
+    return "repository_per_template"
+
+
+def ensure_registry_login(*, timeout: int) -> None:
+    auth_config = _registry_auth_config()
+    server = str((auth_config or {}).get("serveraddress") or "")
+    username = str((auth_config or {}).get("username") or "")
+    password = str((auth_config or {}).get("password") or "")
+    from config import get_config
+
+    cfg = get_config()
+    auth_required = bool(getattr(cfg, "TEMPLATE_REGISTRY_AUTH_REQUIRED", False))
+    if auth_required and not (server and username and password):
+        raise RuntimeError(
+            "template registry auth is required but TEMPLATE_REGISTRY_SERVER/USERNAME/PASSWORD are incomplete"
+        )
+    if not (server and username and password):
+        return
+    cache_key = f"{server}|{username}"
+    with _registry_login_lock:
+        if cache_key in _registry_login_cache:
+            return
+        client = _docker_client(timeout)
+        try:
+            client.login(
+                username=username,
+                password=password,
+                registry=server,
+                reauth=True,
+            )
+            _registry_login_cache.add(cache_key)
+        finally:
+            client.close()
+
+
+def _published_template_ref(
+    *,
+    local_ref: str,
+    template_id: str,
+    repo_prefix: str,
+    layout: str = "auto",
+) -> str:
+    base = (repo_prefix or "").strip().rstrip("/")
+    if not base:
+        return local_ref
+    tag = "latest"
+    if ":" in local_ref.rsplit("/", 1)[-1]:
+        _name, tag = local_ref.rsplit(":", 1)
+    resolved_layout = _resolve_registry_layout(
+        repo_prefix=base,
+        requested_layout=layout,
+    )
+    if resolved_layout == "single_repository":
+        template_part = _sanitize_for_tag(template_id)
+        tag_part = _sanitize_registry_tag_component(tag)
+        published_tag = _sanitize_registry_tag_component(
+            f"{template_part}-{tag_part}",
+            max_len=128,
+        )
+        return f"{base}:{published_tag}"
+    repo = f"{base}/{_sanitize_for_tag(template_id)}"
+    return f"{repo}:{tag}"
+
+
+def push_image_to_registry(
+    *,
+    local_ref: str,
+    template_id: str,
+    repo_prefix: str,
+    timeout: int,
+) -> str:
+    from config import get_config
+
+    cfg = get_config()
+    target_ref = _published_template_ref(
+        local_ref=local_ref,
+        template_id=template_id,
+        repo_prefix=repo_prefix,
+        layout=str(getattr(cfg, "TEMPLATE_REGISTRY_LAYOUT", "auto") or "auto"),
+    )
+    if target_ref == local_ref:
+        return local_ref
+    ensure_registry_login(timeout=timeout)
+    client = _docker_client(timeout)
+    try:
+        image = client.images.get(local_ref)
+        image.tag(target_ref)
+        repo, tag = target_ref.rsplit(":", 1)
+        auth_config = _registry_auth_config()
+        for entry in client.api.push(
+            repo,
+            tag=tag,
+            stream=True,
+            decode=True,
+            auth_config=auth_config,
+        ):
+            if isinstance(entry, dict) and entry.get("error"):
+                raise RuntimeError(str(entry.get("error")))
+        return target_ref
+    finally:
+        client.close()
+
+
 def stream_build_image_from_dockerfile(
     *,
     dockerfile: str,
@@ -287,7 +448,7 @@ class LocalDockerExecution:
         try:
             self._client.images.get(ref)
         except docker.errors.ImageNotFound:
-            self._client.images.pull(ref)
+            self._client.images.pull(ref, auth_config=_registry_auth_config())
 
     def create_container(
         self,

@@ -32,6 +32,15 @@ async def get_sandbox_route(
     if reason:
         raise SandboxRuntimeLostException(sid, reason)
 
+    ready = await run_io(
+        sandbox_manager.ensure_guest_port_ready,
+        sid,
+        port,
+        timeout_seconds=float(getattr(sandbox_manager._config, "SANDBOX_ROUTE_READY_WAIT_SEC", 12.0) or 0.0),
+    )
+    if not ready:
+        raise HTTPException(status_code=502, detail="guest upstream not ready")
+
     upstream = await run_io(resolve_guest_upstream_http, sandbox_manager, sid, port)
     if not upstream:
         raise HTTPException(status_code=502, detail="guest upstream unavailable")
@@ -44,6 +53,9 @@ async def get_sandbox_route(
         "upstream_http": upstream,
         "upstream_ws": upstream_ws,
         "allow_public_traffic": allow_public_traffic_for_row(row, cfg),
+        "gateway_instance_id": str(row.get("gateway_instance_id") or ""),
+        "gateway_route_base": str(row.get("gateway_route_base") or ""),
+        "gateway_api_base": str(row.get("gateway_api_base") or ""),
     }
     guest_routing = (row.get("metadata") or {}).get("guest_routing")
     if isinstance(guest_routing, dict):

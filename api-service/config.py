@@ -1,8 +1,9 @@
 """Configuration."""
 
+import json
 import os
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -31,6 +32,15 @@ def _resolve_ingress_auto_publish_upstream() -> bool:
     return _default_ingress_auto_publish_upstream()
 
 
+def _require_database_url() -> str:
+    value = (os.getenv("DATABASE_URL") or "").strip()
+    if not value:
+        raise RuntimeError("DATABASE_URL is required and must point to PostgreSQL")
+    if not value.startswith(("postgres://", "postgresql://")):
+        raise RuntimeError("DATABASE_URL must use postgres:// or postgresql://")
+    return value
+
+
 class Config:
     """Application configuration."""
 
@@ -46,7 +56,7 @@ class Config:
     API_DESCRIPTION: str = "REST API server for managing sandboxes and agents"
     
     # Database
-    DATABASE_PATH: str = os.getenv("DATABASE_PATH", "sandboxes.db")
+    DATABASE_URL: str = _require_database_url()
 
     # Sandbox VM engine: ``docker`` (local dev), ``k8s`` (cluster pods), or ``firecracker``.
     SANDBOX_ENGINE: str = os.getenv("SANDBOX_ENGINE", "k8s").strip().lower()
@@ -96,6 +106,14 @@ class Config:
         1,
         int(os.getenv("SANDBOX_WARM_POOL_PROVISION_CONCURRENCY", "1")),
     )
+    SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC: float = max(
+        0.0,
+        float(os.getenv("SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC", "12.0")),
+    )
+    SANDBOX_WARM_POOL_INFLIGHT_STALE_SEC: float = max(
+        30.0,
+        float(os.getenv("SANDBOX_WARM_POOL_INFLIGHT_STALE_SEC", "300.0")),
+    )
 
     # Docker ``docker commit`` repository prefix for POST /sandboxes/{id}/snapshot (local image names)
     SANDBOX_SNAPSHOT_REPO: str = os.getenv("SANDBOX_SNAPSHOT_REPO", "mysandbox-snap")
@@ -122,6 +140,40 @@ class Config:
         or os.getenv("API_KEY")
         or ""
     ).strip()
+    RUNTIME_GATEWAY_SHARD_COUNT: int = max(1, int(os.getenv("RUNTIME_GATEWAY_SHARD_COUNT", "1")))
+    RUNTIME_GATEWAY_SCHEDULER: str = (os.getenv("RUNTIME_GATEWAY_SCHEDULER") or "round_robin").strip().lower()
+    RUNTIME_GATEWAY_HEADLESS_SERVICE: str = (
+        os.getenv("RUNTIME_GATEWAY_HEADLESS_SERVICE") or "runtime-gateway-headless"
+    ).strip()
+    RUNTIME_GATEWAY_STATEFULSET_NAME: str = (
+        os.getenv("RUNTIME_GATEWAY_STATEFULSET_NAME") or "runtime-gateway"
+    ).strip()
+    RUNTIME_GATEWAY_SERVICE_PORT: int = int(os.getenv("RUNTIME_GATEWAY_SERVICE_PORT", "8080"))
+    RUNTIME_GATEWAY_DOCKER_PORT: int = int(os.getenv("RUNTIME_GATEWAY_DOCKER_PORT", "2375"))
+    RUNTIME_GATEWAY_TARGETS_JSON: str = (os.getenv("RUNTIME_GATEWAY_TARGETS_JSON") or "").strip()
+    API_SERVICE_INSTANCE_ID: str = (os.getenv("API_SERVICE_INSTANCE_ID") or os.getenv("HOSTNAME") or "api-service").strip()
+    WARM_POOL_COORDINATOR_LEASE_NAME: str = (
+        os.getenv("WARM_POOL_COORDINATOR_LEASE_NAME") or "warm-pool-coordinator"
+    ).strip()
+    WARM_POOL_COORDINATOR_LEASE_TTL_SEC: int = max(
+        5, int(os.getenv("WARM_POOL_COORDINATOR_LEASE_TTL_SEC", "15"))
+    )
+    RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO: float = min(
+        0.99,
+        max(0.10, float(os.getenv("RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO", "0.80"))),
+    )
+    RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC: float = max(
+        0.2,
+        float(os.getenv("RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC", "2.0")),
+    )
+    WARM_POOL_IMAGE_PREFETCH_ENABLED: bool = _env_bool("WARM_POOL_IMAGE_PREFETCH_ENABLED", True)
+    TEMPLATE_REGISTRY_PUSH_ENABLED: bool = _env_bool("TEMPLATE_REGISTRY_PUSH_ENABLED", False)
+    TEMPLATE_REGISTRY_REPO_PREFIX: str = (
+        os.getenv("TEMPLATE_REGISTRY_REPO_PREFIX") or ""
+    ).strip().rstrip("/")
+    TEMPLATE_REGISTRY_INSECURE_SKIP_TLS_VERIFY: bool = _env_bool(
+        "TEMPLATE_REGISTRY_INSECURE_SKIP_TLS_VERIFY", False
+    )
     # Per-``RUN`` exec timeout during parsed Dockerfile builds.
     TEMPLATE_DOCKERFILE_RUN_TIMEOUT_SEC: float = float(os.getenv("TEMPLATE_DOCKERFILE_RUN_TIMEOUT_SEC", "7200"))
     # Docker SDK HTTP timeout (``docker commit`` on large images can exceed 60s default).
@@ -320,6 +372,14 @@ class Config:
         0.05, min(1.0, float(os.getenv("GUEST_BOOTSTRAP_POLL_SEC", "0.1")))
     )
     ENVD_BOOTSTRAP_WAIT_ON_CREATE: bool = _env_bool("ENVD_BOOTSTRAP_WAIT_ON_CREATE", False)
+    # Docker/gVisor cold creates get a short create-time readiness budget; if the guest is still
+    # booting, data-plane route lookup continues waiting so the first client request does not fail.
+    SANDBOX_COLD_CREATE_READY_WAIT_SEC: float = max(
+        0.0, float(os.getenv("SANDBOX_COLD_CREATE_READY_WAIT_SEC", "0.5") or "0.5")
+    )
+    SANDBOX_ROUTE_READY_WAIT_SEC: float = max(
+        0.0, float(os.getenv("SANDBOX_ROUTE_READY_WAIT_SEC", "12.0") or "12.0")
+    )
 
     # Kaniko template builds (requires ``minikube addons enable registry`` on Mac dev).
     KANIKO_REGISTRY_HOST: str = (
@@ -351,6 +411,16 @@ class Config:
 
     def is_control_plane(self) -> bool:
         return (self.API_SERVICE_ROLE or "control").strip().lower() != "combined"
+
+    def runtime_gateway_targets_json(self) -> list[dict[str, Any]]:
+        raw = (self.RUNTIME_GATEWAY_TARGETS_JSON or "").strip()
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        return data if isinstance(data, list) else []
 
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

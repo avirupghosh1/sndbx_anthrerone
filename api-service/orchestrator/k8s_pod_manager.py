@@ -655,12 +655,18 @@ class K8sPodManager:
         removed = 0
         try:
             for container in dc.containers.list(all=True, filters={"status": "exited"}):
+                name = ""
+                try:
+                    name = str(getattr(container, "name", "") or "").strip()
+                except Exception:
+                    name = ""
+                sandbox_container = name.startswith("sandbox-")
                 finished = None
                 try:
                     finished = (container.attrs.get("State") or {}).get("FinishedAt")
                 except Exception:
                     finished = None
-                if finished:
+                if finished and not sandbox_container:
                     try:
                         ts = datetime.fromisoformat(str(finished).replace("Z", "+00:00")).timestamp()
                     except ValueError:

@@ -58,7 +58,7 @@ if portal_static_dir.exists():
     app.mount("/portal/static", StaticFiles(directory=str(portal_static_dir)), name="portal-static")
 
 # Initialize database
-db = Database(config.DATABASE_PATH)
+db = Database(config.DATABASE_URL)
 
 from orchestrator.execution_backend import build_execution_backend
 
@@ -90,7 +90,32 @@ app.include_router(portal.router)
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Cheap health endpoint for Kubernetes probes.
+
+    Keep this independent of Docker/runtime-gateway/Postgres-heavy diagnostics. If
+    probes block behind runtime checks, Kubernetes can kill the control plane in
+    the middle of sandbox creation and break runtime-gateway route lookups.
+    """
+    return {
+        "status": "ok",
+        "version": config.API_VERSION,
+        "api_service_role": getattr(config, "API_SERVICE_ROLE", "control"),
+    }
+
+
+@app.get("/ready")
+async def readiness_check():
+    """Cheap readiness endpoint for service endpoints."""
+    return {
+        "status": "ready",
+        "version": config.API_VERSION,
+        "api_service_role": getattr(config, "API_SERVICE_ROLE", "control"),
+    }
+
+
+@app.get("/diagnostics/health")
+async def diagnostic_health_check():
+    """Detailed diagnostic health endpoint for humans/debug scripts."""
     sm = SandboxManager.__dict__.get("instance")
     warm = getattr(sm, "warm_pool", None) if sm else None
     out: dict = {
@@ -133,7 +158,7 @@ async def startup_event():
     ensure_bootstrap_client_and_key()
     logger.info("Starting Sandbox API Server (role=%s)", getattr(config, "API_SERVICE_ROLE", "control"))
     logger.info(f"API Key: {config.API_KEY}")
-    logger.info(f"Database: {config.DATABASE_PATH}")
+    logger.info("Database: PostgreSQL")
     logger.info(f"Execution plane: {sandbox_manager.get_execution_kind()}")
     logger.info("Docker host: %s", getattr(config, "DOCKER_HOST", "") or "<default local engine>")
     wp = getattr(sandbox_manager, "warm_pool", None)

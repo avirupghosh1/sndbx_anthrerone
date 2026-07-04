@@ -40,6 +40,14 @@ variables:
   DEPLOY_ITOPS_REPO_BRANCH: "origin/custom-helm-deploy"
   ITOPS_REPO_BRANCH: "master"
   DOCKER_REPO: "asia-south1-docker.pkg.dev/gc-qa6/gc-qa6"
+  TEMPLATE_REGISTRY_REPO_PREFIX: ""
+  TEMPLATE_REGISTRY_SERVER: ""
+  TEMPLATE_REGISTRY_SECRET_NAME: "sndbx-qa6-tier1-secret"
+  TEMPLATE_REGISTRY_AUTH_REQUIRED: "true"
+  TEMPLATE_REGISTRY_LAYOUT: "auto"
+  TEMPLATE_REGISTRY_INTERNAL_ENABLED: "auto"
+  DATABASE_SECRET_NAME: "sndbx-qa6-tier1-secret"
+  DATABASE_SECRET_KEY: "DATABASE_URL"
   API_SERVICE_IMAGE_NAME: "api-service"
   RUNTIME_GATEWAY_IMAGE_NAME: "runtime-gateway"
   GVISOR_IMAGE_NAME: "dockerd-gvisor"
@@ -198,7 +206,16 @@ deploy-qa6:
   script:
     - set -euo pipefail
     - |
+      if [ "${TEMPLATE_REGISTRY_INTERNAL_ENABLED}" = "true" ] || { [ "${TEMPLATE_REGISTRY_INTERNAL_ENABLED}" = "auto" ] && [ -z "${TEMPLATE_REGISTRY_REPO_PREFIX}" ]; }; then
+        TEMPLATE_REGISTRY_REPO_PREFIX=""
+        TEMPLATE_REGISTRY_SERVER=""
+        TEMPLATE_REGISTRY_AUTH_REQUIRED="false"
+      else
+        TEMPLATE_REGISTRY_SERVER="${TEMPLATE_REGISTRY_SERVER:-${TEMPLATE_REGISTRY_REPO_PREFIX%%/*}}"
+      fi
       EXTRA_VALUES="--set images.apiService.repo=${DOCKER_REPO},images.apiService.name=${API_SERVICE_BUILT_IMAGE_NAME},images.apiService.tag=${API_SERVICE_BUILT_IMAGE_TAG},images.runtimeGateway.repo=${DOCKER_REPO},images.runtimeGateway.name=${RUNTIME_GATEWAY_BUILT_IMAGE_NAME},images.runtimeGateway.tag=${RUNTIME_GATEWAY_BUILT_IMAGE_TAG},images.dockerDind.repo=${DOCKER_REPO},images.dockerDind.name=${GVISOR_BUILT_IMAGE_NAME},images.dockerDind.tag=${GVISOR_BUILT_IMAGE_TAG}"
+      EXTRA_VALUES="${EXTRA_VALUES},database.existingSecretName=${DATABASE_SECRET_NAME},database.existingSecretKey=${DATABASE_SECRET_KEY}"
+      EXTRA_VALUES="${EXTRA_VALUES},templateRegistry.pushEnabled=true,templateRegistry.authRequired=${TEMPLATE_REGISTRY_AUTH_REQUIRED},templateRegistry.repoPrefix=${TEMPLATE_REGISTRY_REPO_PREFIX},templateRegistry.server=${TEMPLATE_REGISTRY_SERVER},templateRegistry.existingSecretName=${TEMPLATE_REGISTRY_SECRET_NAME},templateRegistry.layout=${TEMPLATE_REGISTRY_LAYOUT},templateRegistry.internal.enabled=${TEMPLATE_REGISTRY_INTERNAL_ENABLED}"
 
       RESPONSE=$(curl -X POST "$JENKINS_URL/$JENKINS_DEPLOY_JOB_PATH/buildWithParameters" \
         --user "$QA6_JENKINS_USER:$QA6_JENKINS_TOKEN" \

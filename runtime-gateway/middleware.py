@@ -46,6 +46,8 @@ class SandboxDataPlaneMiddleware:
             guest_port_header=guest_port_hdr,
         )
         if not parsed:
+            parsed = _parse_forwarded_route(headers)
+        if not parsed:
             parsed = _parse_local_query_route(scope, host)
         if not parsed:
             await self.app(scope, receive, send)
@@ -64,6 +66,22 @@ class SandboxDataPlaneMiddleware:
             return
         if isinstance(route, SandboxRouteFailure):
             await _send_error(scope, receive, send, route.status_code, route.detail)
+            return
+
+        owner_gateway = (route.gateway_instance_id or "").strip()
+        self_gateway = (getattr(cfg, "GATEWAY_INSTANCE_ID", None) or "").strip()
+        if owner_gateway and self_gateway and owner_gateway != self_gateway and route.gateway_route_base:
+            forwarded_base = str(route.gateway_route_base).rstrip("/")
+            forwarded_headers = dict(headers)
+            forwarded_headers["x-runtime-gateway-forwarded"] = "1"
+            forwarded_headers["x-sandbox-id"] = sandbox_id
+            forwarded_headers["x-guest-port"] = str(guest_port)
+            if scope["type"] == "websocket":
+                await self._proxy_websocket(scope, receive, send, forwarded_base, forwarded_headers)
+                return
+            request = Request(scope, receive)
+            response = await self._proxy_http(request, forwarded_base, forwarded_headers)
+            await response(scope, receive, send)
             return
 
         deny = _layer3_deny(route, headers)
@@ -172,6 +190,10 @@ class SandboxDataPlaneMiddleware:
             value = (inbound_headers.get(key) or "").strip()
             if value:
                 upstream_headers[key.title() if key == "authorization" else key] = value
+        for key in ("x-runtime-gateway-forwarded", "x-sandbox-id", "x-guest-port", "e2b-traffic-access-token"):
+            value = (inbound_headers.get(key) or "").strip()
+            if value:
+                upstream_headers[key] = value
 
         cfg = get_config()
         accepted = False
@@ -215,6 +237,8 @@ def _layer2_deny(
     """Optional ingress-only shared secret, separate from the guest ``X-Access-Token``."""
     if parsed_from_local:
         return None
+    if (headers.get("x-runtime-gateway-forwarded") or "").strip() == "1":
+        return None
     expected = (getattr(cfg, "INGRESS_SHARED_TOKEN", None) or "").strip()
     if not expected:
         return None
@@ -248,6 +272,19 @@ def _parse_local_query_route(scope: Scope, host_header: str) -> Optional[Tuple[i
     params = parse_qs(raw_qs, keep_blank_values=False)
     sid = ((params.get("sandbox_id") or [""])[0]).strip()
     port_s = ((params.get("guest_port") or params.get("port") or [""])[0]).strip()
+    if not sid or not port_s.isdigit():
+        return None
+    guest_port = int(port_s)
+    if not (1 <= guest_port <= 65535):
+        return None
+    return guest_port, sid
+
+
+def _parse_forwarded_route(headers: Dict[str, str]) -> Optional[Tuple[int, str]]:
+    if (headers.get("x-runtime-gateway-forwarded") or "").strip() != "1":
+        return None
+    sid = (headers.get("x-sandbox-id") or "").strip()
+    port_s = (headers.get("x-guest-port") or "").strip()
     if not sid or not port_s.isdigit():
         return None
     guest_port = int(port_s)
