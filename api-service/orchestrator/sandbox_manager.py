@@ -729,6 +729,8 @@ class SandboxManager:
             cm = ContainerManager(
                 oci_runtime=self._config.docker_oci_runtime(),
                 base_url=key,
+                image_pull_api_base=target.api_base,
+                image_pull_api_key=getattr(self._config, "RUNTIME_GATEWAY_API_KEY", ""),
             )
             self._gateway_execution_cache[key] = cm
             return cm
@@ -749,6 +751,8 @@ class SandboxManager:
             cm = ContainerManager(
                 oci_runtime=self._config.docker_oci_runtime(),
                 base_url=host,
+                image_pull_api_base=str(row.get("gateway_api_base") or "").strip(),
+                image_pull_api_key=getattr(self._config, "RUNTIME_GATEWAY_API_KEY", ""),
             )
             self._gateway_execution_cache[host] = cm
             return cm

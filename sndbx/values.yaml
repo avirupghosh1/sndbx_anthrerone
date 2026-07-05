@@ -171,8 +171,6 @@ config:
     RUNTIME_GATEWAY_HEADLESS_SERVICE: "{{ include \"sndbx.runtimeGatewayHeadlessName\" . }}"
     RUNTIME_GATEWAY_SERVICE_PORT: "{{ .Values.service.runtimeGateway.httpPort }}"
     RUNTIME_GATEWAY_DOCKER_PORT: "{{ .Values.service.runtimeGateway.dockerPort }}"
-    TEMPLATE_REGISTRY_PUSH_ENABLED: "{{ .Values.templateRegistry.pushEnabled }}"
-    TEMPLATE_REGISTRY_REPO_PREFIX: "{{ include \"sndbx.templateRegistryRepoPrefix\" . }}"
     API_SERVICE_INSTANCE_ID: ""
     WARM_POOL_COORDINATOR_LEASE_NAME: "warm-pool-coordinator"
     WARM_POOL_COORDINATOR_LEASE_TTL_SEC: "15"
