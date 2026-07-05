@@ -49,6 +49,11 @@ kubectl -n spr-apps create secret generic sndbx-qa6-tier1-secret \
 `DATABASE_URL` must use `postgres://` or `postgresql://`. SQLite is intentionally
 not supported.
 
+Template registry credentials are consumed by `runtime-gateway`, not
+`api-service`. The API chooses the shard and asks that shard over the internal
+runtime-gateway API to pull a missing template image; the runtime-gateway pod
+performs the authenticated registry pull against its own Docker daemon.
+
 ## AWS Aurora Postgres
 
 AWS Aurora PostgreSQL works with the current app path. Use standard Postgres

@@ -13,6 +13,7 @@ import threading
 import time
 from datetime import datetime, timezone
 import docker
+import httpx
 import subprocess
 import logging
 from pathlib import PurePosixPath
@@ -66,9 +67,17 @@ class ContainerConfig:
 class ContainerManager:
     """Manages container lifecycle (Docker Engine; optional ``runsc`` / gVisor OCI runtime)."""
 
-    def __init__(self, oci_runtime: Optional[str] = None, base_url: Optional[str] = None):
+    def __init__(
+        self,
+        oci_runtime: Optional[str] = None,
+        base_url: Optional[str] = None,
+        image_pull_api_base: Optional[str] = None,
+        image_pull_api_key: Optional[str] = None,
+    ):
         self._oci_runtime: Optional[str] = "runsc" if (oci_runtime or "").strip().lower() == "runsc" else None
         self._base_url = (base_url or "").strip() or None
+        self._image_pull_api_base = (image_pull_api_base or "").strip().rstrip("/")
+        self._image_pull_api_key = (image_pull_api_key or "").strip()
         self._docker_connect_error: Optional[str] = None
         self.client = None
         # Lazy connect: daemon may start after the API (Colima/Docker); retry on each operation if needed.
@@ -164,18 +173,95 @@ class ContainerManager:
         except Exception:
             return False
 
+    def _pull_image_via_gateway(self, image: str) -> bool:
+        if not (self._image_pull_api_base and self._image_pull_api_key):
+            return False
+        last_error: Optional[Exception] = None
+        for attempt in range(4):
+            try:
+                with httpx.Client(timeout=httpx.Timeout(600.0)) as client:
+                    resp = client.post(
+                        f"{self._image_pull_api_base}/internal/runtime/images/pull",
+                        json={"image": image},
+                        headers={"X-API-Key": self._image_pull_api_key},
+                    )
+                if resp.status_code < 400:
+                    return True
+                detail = resp.text[:1000]
+                try:
+                    detail = str(resp.json().get("detail") or detail)
+                except Exception:
+                    pass
+                raise RuntimeError(f"runtime-gateway image pull failed HTTP {resp.status_code}: {detail}")
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                text = f"{type(e).__name__}: {e}".lower()
+                transient = any(
+                    needle in text
+                    for needle in (
+                        "toomanyrequests",
+                        "rate exceeded",
+                        "locked for",
+                        "unavailable",
+                        "connection reset",
+                        "read timed out",
+                        "timed out",
+                    )
+                )
+                if transient and attempt < 3:
+                    delay = min(8.0, 1.0 * (2 ** attempt))
+                    logger.warning(
+                        "Transient gateway image pull failure for %s; retrying in %.1fs: %s",
+                        image,
+                        delay,
+                        e,
+                    )
+                    time.sleep(delay)
+                    continue
+                break
+        logger.error("Runtime-gateway failed to pull image %s: %s", image, last_error)
+        return False
+
     def pull_image(self, image: str) -> bool:
         """Pull Docker image."""
+        if self._pull_image_via_gateway(image):
+            return True
         if not self._ensure_docker_client():
             return False
 
-        try:
-            logger.info(f"Pulling image: {image}")
-            self.client.images.pull(image)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to pull image {image}: {e}")
-            return False
+        last_error: Optional[Exception] = None
+        for attempt in range(4):
+            try:
+                logger.info("Pulling image: %s", image)
+                self.client.images.pull(image)
+                return True
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                text = f"{type(e).__name__}: {e}".lower()
+                transient = any(
+                    needle in text
+                    for needle in (
+                        "toomanyrequests",
+                        "rate exceeded",
+                        "locked for",
+                        "unavailable",
+                        "connection reset",
+                        "read timed out",
+                    )
+                )
+                if transient and attempt < 3:
+                    delay = min(8.0, 1.0 * (2 ** attempt))
+                    logger.warning(
+                        "Transient image pull failure for %s; retrying in %.1fs: %s",
+                        image,
+                        delay,
+                        e,
+                    )
+                    time.sleep(delay)
+                    continue
+                break
+        logger.error("Failed to pull image %s: %s", image, last_error)
+        return False
 
     def create_container(
         self,
@@ -215,7 +301,8 @@ class ContainerManager:
                 self.client.images.get(config.image)
             except docker.errors.ImageNotFound:
                 logger.info(f"Image not found locally, pulling {config.image}")
-                self.pull_image(config.image)
+                if not self.pull_image(config.image):
+                    return None
 
             # Parse resource limits
             mem_limit = config.memory_limit  # e.g., "512m"

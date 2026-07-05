@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -249,6 +250,49 @@ async def runtime_probe(request: Request) -> JSONResponse:
     )
 
 
+async def runtime_image_pull(request: Request) -> JSONResponse:
+    from internal_auth import internal_api_key_valid, unauthorized_response
+    from template_builder import LocalDockerExecution
+
+    if not internal_api_key_valid(request):
+        return unauthorized_response()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    image = str((payload or {}).get("image") or "").strip()
+    if not image:
+        return JSONResponse({"ok": False, "detail": "image is required"}, status_code=400)
+    started = time.monotonic()
+
+    def _pull() -> None:
+        plane = LocalDockerExecution(timeout=600)
+        try:
+            plane.ensure_image(image)
+        finally:
+            plane.close()
+
+    try:
+        await run_in_threadpool(_pull)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            {
+                "ok": False,
+                "image": image,
+                "detail": f"{type(exc).__name__}: {exc}",
+                "elapsed_seconds": round(max(0.0, time.monotonic() - started), 3),
+            },
+            status_code=502,
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "image": image,
+            "elapsed_seconds": round(max(0.0, time.monotonic() - started), 3),
+        }
+    )
+
+
 def _docker_graph_used_bytes(graph: str) -> int:
     """Return bytes consumed by this shard's Docker graph directory."""
     try:
@@ -270,6 +314,7 @@ routes = [
     Route("/", root),
     Route("/internal/runtime/status", runtime_status),
     Route("/internal/runtime/probe", runtime_probe, methods=["POST"]),
+    Route("/internal/runtime/images/pull", runtime_image_pull, methods=["POST"]),
     Route("/internal/templates/build/dockerfile", build_dockerfile, methods=["POST"]),
     Route("/internal/templates/build/dockerfile/stream", build_dockerfile_stream, methods=["POST"]),
     Route("/internal/templates/build/snapshot", build_template_snapshot, methods=["POST"]),

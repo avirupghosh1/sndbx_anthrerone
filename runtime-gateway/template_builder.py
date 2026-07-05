@@ -239,6 +239,26 @@ def _registry_auth_config() -> Optional[dict]:
     }
 
 
+def _registry_auth_config_for_ref(image_ref: str) -> Optional[dict]:
+    auth = _registry_auth_config()
+    if not auth:
+        return None
+    configured_server = str(auth.get("serveraddress") or "").strip().rstrip("/")
+    image_server = _registry_server_from_image_ref(image_ref)
+    if configured_server and image_server and configured_server == image_server:
+        return auth
+    return None
+
+
+def _registry_server_from_image_ref(image_ref: str) -> str:
+    first, sep, _rest = (image_ref or "").strip().partition("/")
+    if not sep:
+        return ""
+    if "." in first or ":" in first or first == "localhost":
+        return first.rstrip("/")
+    return ""
+
+
 def _registry_server_from_repo_prefix(repo_prefix: str) -> str:
     first = (repo_prefix or "").strip().split("/", 1)[0].strip()
     if "." in first or ":" in first or first == "localhost":
@@ -448,7 +468,30 @@ class LocalDockerExecution:
         try:
             self._client.images.get(ref)
         except docker.errors.ImageNotFound:
-            self._client.images.pull(ref, auth_config=_registry_auth_config())
+            last_error: Optional[Exception] = None
+            for attempt in range(4):
+                try:
+                    self._client.images.pull(ref, auth_config=_registry_auth_config_for_ref(ref))
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    text = f"{type(exc).__name__}: {exc}".lower()
+                    transient = any(
+                        needle in text
+                        for needle in (
+                            "toomanyrequests",
+                            "rate exceeded",
+                            "locked for",
+                            "unavailable",
+                            "connection reset",
+                            "read timed out",
+                        )
+                    )
+                    if transient and attempt < 3:
+                        time.sleep(min(8.0, 1.0 * (2 ** attempt)))
+                        continue
+                    break
+            raise last_error or RuntimeError(f"failed to pull image {ref}")
 
     def create_container(
         self,

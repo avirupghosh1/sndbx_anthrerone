@@ -167,13 +167,6 @@ class Config:
         float(os.getenv("RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC", "2.0")),
     )
     WARM_POOL_IMAGE_PREFETCH_ENABLED: bool = _env_bool("WARM_POOL_IMAGE_PREFETCH_ENABLED", True)
-    TEMPLATE_REGISTRY_PUSH_ENABLED: bool = _env_bool("TEMPLATE_REGISTRY_PUSH_ENABLED", False)
-    TEMPLATE_REGISTRY_REPO_PREFIX: str = (
-        os.getenv("TEMPLATE_REGISTRY_REPO_PREFIX") or ""
-    ).strip().rstrip("/")
-    TEMPLATE_REGISTRY_INSECURE_SKIP_TLS_VERIFY: bool = _env_bool(
-        "TEMPLATE_REGISTRY_INSECURE_SKIP_TLS_VERIFY", False
-    )
     # Per-``RUN`` exec timeout during parsed Dockerfile builds.
     TEMPLATE_DOCKERFILE_RUN_TIMEOUT_SEC: float = float(os.getenv("TEMPLATE_DOCKERFILE_RUN_TIMEOUT_SEC", "7200"))
     # Docker SDK HTTP timeout (``docker commit`` on large images can exceed 60s default).
