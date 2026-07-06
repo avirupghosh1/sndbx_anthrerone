@@ -55,8 +55,21 @@ def build_execution_backend(config: "Config | None" = None) -> SandboxExecutionP
         return FirecrackerVmmPlane(config)
 
     oci = config.docker_oci_runtime()
-    # docker-py ``from_env()`` reads ``DOCKER_HOST`` / TLS env from the process environment.
-    # Sync from Config so a single source (env or ``.env`` via ``main``) reliably targets a remote VM daemon.
+    if bool(getattr(config, "is_control_plane", lambda: False)()) and (
+        (getattr(config, "RUNTIME_GATEWAY_URL", "") or "").strip()
+        or (getattr(config, "RUNTIME_GATEWAY_TARGETS_JSON", "") or "").strip()
+    ):
+        from .runtime_gateway_execution import RuntimeGatewayControlPlane
+
+        kind = "gvisor" if oci else "docker"
+        logger.info(
+            "Sandbox execution: runtime-gateway control plane (kind=%s); API will not connect to dockerd",
+            kind,
+        )
+        return RuntimeGatewayControlPlane(backend_kind=kind)
+
+    # Direct Docker is a local/combined fallback only. docker-py ``from_env()`` reads
+    # ``DOCKER_HOST`` / TLS env from the process environment.
     dh = (getattr(config, "DOCKER_HOST", None) or "").strip()
     if dh:
         os.environ["DOCKER_HOST"] = dh

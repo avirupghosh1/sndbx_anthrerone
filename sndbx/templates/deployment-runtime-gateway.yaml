@@ -48,7 +48,10 @@ spec:
           imagePullPolicy: {{ .Values.images.dockerDind.pullPolicy }}
           securityContext:
             privileged: true
+          command:
+            - dockerd-entrypoint.sh
           args:
+            - dockerd
 {{ toYaml .Values.runtimeGateway.docker.args | indent 12 }}
             {{- if eq (include "sndbx.templateRegistryInternalEnabled" .) "true" }}
             - --insecure-registry={{ include "sndbx.templateRegistryServer" . }}
@@ -56,23 +59,25 @@ spec:
           env:
             - name: DOCKER_TLS_CERTDIR
               value: ""
-          ports:
-            - name: docker
-              containerPort: {{ .Values.service.runtimeGateway.dockerPort }}
-              protocol: TCP
           volumeMounts:
             - name: docker-graph
               mountPath: /var/lib/docker
           readinessProbe:
-            tcpSocket:
-              port: docker
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - docker --host tcp://127.0.0.1:2375 info >/dev/null 2>&1
             initialDelaySeconds: {{ .Values.runtimeGateway.docker.readinessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.runtimeGateway.docker.readinessProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.runtimeGateway.docker.readinessProbe.timeoutSeconds }}
             failureThreshold: {{ .Values.runtimeGateway.docker.readinessProbe.failureThreshold }}
           livenessProbe:
-            tcpSocket:
-              port: docker
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - docker --host tcp://127.0.0.1:2375 info >/dev/null 2>&1
             initialDelaySeconds: {{ .Values.runtimeGateway.docker.livenessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.runtimeGateway.docker.livenessProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.runtimeGateway.docker.livenessProbe.timeoutSeconds }}

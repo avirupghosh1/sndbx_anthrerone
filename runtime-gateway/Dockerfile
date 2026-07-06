@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY runtime-gateway /app
 COPY ["api-service/envd_guest", "/app/api_server_envd_guest"]
+COPY ["api-service/orchestrator/container_manager.py", "/app/runtime_container_manager.py"]
 
 EXPOSE 8080
 

@@ -62,7 +62,6 @@ service:
     port: 8000
   runtimeGateway:
     httpPort: 8080
-    dockerPort: 2375
 
 apiService:
   resources:
@@ -103,7 +102,7 @@ runtimeGateway:
     failureThreshold: 5
   docker:
     args:
-      - --host=tcp://0.0.0.0:2375
+      - --host=tcp://127.0.0.1:2375
       - --storage-driver=overlay2
       - --tls=false
     resources:
@@ -136,7 +135,6 @@ config:
     API_SERVICE_ROLE: "control"
     SANDBOX_ENGINE: "docker"
     SANDBOX_RUNTIME: "docker"
-    DOCKER_HOST: "tcp://{{ include \"sndbx.runtimeGatewayName\" . }}-0.{{ include \"sndbx.runtimeGatewayHeadlessName\" . }}.{{ .Values.namespace }}.svc.cluster.local:2375"
     TEMPLATE_DOCKERFILE_BUILD_MODE: "docker_cli"
     TEMPLATE_BUILD_VIA_RUNTIME_GATEWAY: "true"
     RUNTIME_GATEWAY_URL: "http://{{ include \"sndbx.runtimeGatewayServiceFqdn\" . }}:8080"
@@ -157,6 +155,7 @@ config:
     SANDBOX_WARM_POOL_SIZE: "5"
     SANDBOX_WARM_POOL_PROVISION_CONCURRENCY: "2"
     SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC: "180.0"
+    SANDBOX_WARM_POOL_IDLE_POLL_SEC: "0.25"
     GUEST_BOOTSTRAP_AGENT_WAIT_SEC: "30.0"
     SANDBOX_COLD_CREATE_READY_WAIT_SEC: "0.5"
     SANDBOX_ROUTE_READY_WAIT_SEC: "12.0"
@@ -170,7 +169,6 @@ config:
     RUNTIME_GATEWAY_STATEFULSET_NAME: "{{ include \"sndbx.runtimeGatewayName\" . }}"
     RUNTIME_GATEWAY_HEADLESS_SERVICE: "{{ include \"sndbx.runtimeGatewayHeadlessName\" . }}"
     RUNTIME_GATEWAY_SERVICE_PORT: "{{ .Values.service.runtimeGateway.httpPort }}"
-    RUNTIME_GATEWAY_DOCKER_PORT: "{{ .Values.service.runtimeGateway.dockerPort }}"
     API_SERVICE_INSTANCE_ID: ""
     WARM_POOL_COORDINATOR_LEASE_NAME: "warm-pool-coordinator"
     WARM_POOL_COORDINATOR_LEASE_TTL_SEC: "15"
@@ -183,6 +181,7 @@ config:
     CONTROL_PLANE_URL: "http://{{ include \"sndbx.apiServiceFqdn\" . }}:8000"
     CONTROL_PLANE_TIMEOUT_SEC: "10"
     DOCKER_HOST: "tcp://127.0.0.1:2375"
+    SANDBOX_DOCKER_OCI_RUNTIME: "{{ .Values.config.apiService.SANDBOX_DOCKER_OCI_RUNTIME }}"
     ENVD_EMBED_AT_TEMPLATE_BUILD: "true"
     UPSTREAM_RESOLVE_MODE: "control_plane"
     K8S_NAMESPACE: "{{ .Values.namespace }}"
@@ -194,6 +193,9 @@ config:
     TEMPLATE_REGISTRY_REPO_PREFIX: "{{ include \"sndbx.templateRegistryRepoPrefix\" . }}"
     TEMPLATE_REGISTRY_AUTH_REQUIRED: "{{ include \"sndbx.templateRegistryAuthRequired\" . }}"
     TEMPLATE_REGISTRY_LAYOUT: "{{ .Values.templateRegistry.layout }}"
+    TEMPLATE_REGISTRY_CACHE_ENABLED: "{{ .Values.templateRegistry.internal.proxy.enabled }}"
+    TEMPLATE_REGISTRY_CACHE_SERVER: "{{ include \"sndbx.templateRegistryServer\" . }}"
+    TEMPLATE_REGISTRY_CACHE_UPSTREAM_SERVER: "{{ .Values.templateRegistry.internal.proxy.remoteServer }}"
 
 templateRegistry:
   # Enable this before expecting custom built templates to move freely across multiple
@@ -215,6 +217,12 @@ templateRegistry:
     image: registry:2
     pullPolicy: IfNotPresent
     servicePort: 5000
+    proxy:
+      # Optional pull-through cache mode. Use this only when the internal registry
+      # should front an upstream registry such as public.ecr.aws or a private ECR host.
+      enabled: false
+      remoteUrl: ""
+      remoteServer: ""
     persistence:
       enabled: true
       size: 20Gi

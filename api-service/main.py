@@ -123,7 +123,6 @@ async def diagnostic_health_check():
         "version": config.API_VERSION,
         "api_service_role": getattr(config, "API_SERVICE_ROLE", "control"),
         "sandbox_runtime": sm.get_execution_kind() if sm else None,
-        "docker_host": getattr(config, "DOCKER_HOST", None),
     }
     if sm is not None:
         blocker = sm.describe_docker_workload_blocker()
@@ -138,6 +137,15 @@ async def diagnostic_health_check():
             out["warm_pool"] = warm.stats()
         except Exception:
             out["warm_pool"] = {"enabled": True, "error": "stats_unavailable"}
+    if sm is not None:
+        try:
+            out["warm_pool_segments"] = sm.warm_pool_segment_diagnostics()
+        except Exception:
+            out["warm_pool_segments"] = {"error": "stats_unavailable"}
+        try:
+            out["runtime_gateways"] = sm.runtime_gateway_diagnostics()
+        except Exception:
+            out["runtime_gateways"] = {"error": "stats_unavailable"}
     return out
 
 
@@ -160,7 +168,6 @@ async def startup_event():
     logger.info(f"API Key: {config.API_KEY}")
     logger.info("Database: PostgreSQL")
     logger.info(f"Execution plane: {sandbox_manager.get_execution_kind()}")
-    logger.info("Docker host: %s", getattr(config, "DOCKER_HOST", "") or "<default local engine>")
     wp = getattr(sandbox_manager, "warm_pool", None)
     if wp is not None:
         logger.info("Warm sandbox pool: %s", wp.stats())

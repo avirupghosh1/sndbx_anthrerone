@@ -40,6 +40,12 @@
 {{- if and .Values.templateRegistry.pushEnabled (eq (default "" .Values.templateRegistry.repoPrefix) "") (not $internalRegistryEnabled) -}}
 {{- fail "templateRegistry.pushEnabled=true requires templateRegistry.repoPrefix or templateRegistry.internal.enabled=auto/true" -}}
 {{- end -}}
+{{- if and .Values.templateRegistry.internal.proxy.enabled (not $internalRegistryEnabled) -}}
+{{- fail "templateRegistry.internal.proxy.enabled=true requires the internal template registry to be enabled" -}}
+{{- end -}}
+{{- if and .Values.templateRegistry.internal.proxy.enabled (or (eq (default "" .Values.templateRegistry.internal.proxy.remoteUrl) "") (eq (default "" .Values.templateRegistry.internal.proxy.remoteServer) "")) -}}
+{{- fail "templateRegistry.internal.proxy.enabled=true requires templateRegistry.internal.proxy.remoteUrl and remoteServer" -}}
+{{- end -}}
 {{- $repoPrefix := default "" .Values.templateRegistry.repoPrefix -}}
 {{- if and .Values.templateRegistry.pushEnabled (ne $repoPrefix "") (or (contains "public.ecr.aws" $repoPrefix) (contains ".dkr.ecr." $repoPrefix)) (not .Values.templateRegistry.authRequired) -}}
 {{- fail "AWS ECR templateRegistry.repoPrefix requires templateRegistry.authRequired=true with registry credentials, or omit repoPrefix to use the internal registry" -}}

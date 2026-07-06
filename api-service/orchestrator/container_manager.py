@@ -346,7 +346,18 @@ class ContainerManager:
                 run_kwargs["ports"] = ports_map
             if self._oci_runtime:
                 run_kwargs["runtime"] = self._oci_runtime
-            container = self.client.containers.run(**run_kwargs)
+            try:
+                container = self.client.containers.run(**run_kwargs)
+            except Exception:
+                # Docker may leave a named container in Created state when the OCI
+                # runtime fails during start. Remove it so warm-pool retries do not
+                # fill the shard with dead containers.
+                try:
+                    stale = self.client.containers.get(name)
+                    stale.remove(force=True)
+                except Exception:
+                    pass
+                raise
 
             logger.info(f"Container created: {container.id[:12]}")
             return container.id

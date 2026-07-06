@@ -200,16 +200,32 @@ class WarmSandboxPool:
             return None
         sid = str(claimed.get("sandbox_id") or "").strip()
         self._wake.set()
-        logger.info("Warm pool: handed sandbox %s (template=%s)", sid, self._logical_template_id)
+        md = claimed.get("metadata") if isinstance(claimed, dict) else {}
+        md = md if isinstance(md, dict) else {}
+        logger.info(
+            "Warm handoff latency: sandbox=%s template=%s source=%s gateway=%s acquire_wait_seconds=%s",
+            sid,
+            self._logical_template_id,
+            str(md.get("sandbox_allocation_source") or "warm_pool_acquire"),
+            str(claimed.get("gateway_instance_id") or "-"),
+            md.get("sandbox_allocation_acquire_wait_seconds"),
+        )
         return sid
 
     def _run(self) -> None:
+        idle_poll_seconds = max(
+            0.1,
+            min(
+                5.0,
+                float(getattr(self._manager._config, "SANDBOX_WARM_POOL_IDLE_POLL_SEC", 0.25) or 0.25),
+            ),
+        )
         while not self._stop.is_set():
             try:
                 self._top_up()
             except Exception as ex:  # noqa: BLE001
                 logger.exception("Warm pool top-up error: %s", ex)
-            self._wake.wait(1.5)
+            self._wake.wait(idle_poll_seconds)
             self._wake.clear()
 
     @contextmanager
@@ -280,6 +296,7 @@ class WarmSandboxPool:
             timeout=self._timeout,
             extra_used_bytes_by_gateway=dict(self._pending_gateway_bytes),
             extra_warm_counts_by_gateway=dict(self._pending_gateway_counts),
+            force_refresh=False,
         )
         if target is None:
             return None, 0
@@ -288,7 +305,7 @@ class WarmSandboxPool:
             target,
             template_id=self._logical_template_id,
             image_ref=image_ref,
-            force_refresh=True,
+            force_refresh=False,
         )
         return target.instance_id, reserved
 
@@ -318,6 +335,7 @@ class WarmSandboxPool:
             sid: Optional[str] = None
             gateway_instance_id = ""
             reserved_bytes = 0
+            success = False
             try:
                 sid, gateway_instance_id, reserved_bytes = future.result()
                 if not sid:
@@ -343,6 +361,7 @@ class WarmSandboxPool:
                         self._logical_template_id,
                         nready,
                     )
+                success = True
             except Exception as ex:  # noqa: BLE001
                 self._manager.db.set_warm_pool_segment_error(
                     self.pool_key_string,
@@ -360,9 +379,10 @@ class WarmSandboxPool:
                             0,
                             int(self._pending_gateway_counts.get(gateway_instance_id) or 0) - 1,
                         )
-                self._manager.db.release_warm_pool_slots(
+                self._manager.db.complete_warm_pool_slots(
                     warm_pool_key=self.pool_key_string,
                     count=1,
+                    success=success,
                 )
 
     def _reconcile_inventory_if_due(self) -> None:

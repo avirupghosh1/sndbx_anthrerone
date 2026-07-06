@@ -1,12 +1,8 @@
 # dockerd + gVisor (runsc) for runtime-gateway DinD sidecar.
 #
-# Online build (downloads runsc inside the image; ~171MB):
+# Build (downloads runsc inside the image; ~171MB):
 #   cd cont_in_vm
-#   docker build -f runtime-gateway/Dockerfile.gvisor -t dockerd-gvisor:27 .
-#
-# Offline build (if Docker build network cannot reach storage.googleapis.com):
-#   ./runtime-gateway/download-gvisor-bin.sh amd64
-#   docker build -f runtime-gateway/Dockerfile.gvisor.offline -t dockerd-gvisor:27 .
+#   docker build -f runtime-gateway/Dockerfile.gvisor -t dockerd-gvisor:27 runtime-gateway
 
 FROM docker:27-dind
 

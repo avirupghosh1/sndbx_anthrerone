@@ -266,6 +266,43 @@ def _registry_server_from_repo_prefix(repo_prefix: str) -> str:
     return ""
 
 
+def _registry_cache_ref_for_image_ref(image_ref: str) -> str:
+    from config import get_config
+
+    ref = (image_ref or "").strip()
+    if not ref or "@" in ref:
+        return ""
+    cfg = get_config()
+    if not bool(getattr(cfg, "TEMPLATE_REGISTRY_CACHE_ENABLED", False)):
+        return ""
+    cache_server = (getattr(cfg, "TEMPLATE_REGISTRY_CACHE_SERVER", "") or "").strip().rstrip("/")
+    if not cache_server:
+        return ""
+    image_server = _registry_server_from_image_ref(ref)
+    if not image_server:
+        return ""
+    upstream_server = (
+        getattr(cfg, "TEMPLATE_REGISTRY_CACHE_UPSTREAM_SERVER", "")
+        or getattr(cfg, "TEMPLATE_REGISTRY_SERVER", "")
+        or ""
+    ).strip().rstrip("/")
+    if upstream_server and image_server.lower() != upstream_server.lower():
+        return ""
+    _server, _sep, path = ref.partition("/")
+    if not path:
+        return ""
+    return f"{cache_server}/{path}"
+
+
+def _split_repository_tag(image_ref: str) -> tuple[str, Optional[str]]:
+    ref = (image_ref or "").strip()
+    slash = ref.rfind("/")
+    colon = ref.rfind(":")
+    if colon > slash:
+        return ref[:colon], ref[colon + 1 :] or None
+    return ref, None
+
+
 def _is_ecr_repo_prefix(repo_prefix: str) -> bool:
     server = _registry_server_from_repo_prefix(repo_prefix).lower()
     return (
@@ -469,28 +506,49 @@ class LocalDockerExecution:
             self._client.images.get(ref)
         except docker.errors.ImageNotFound:
             last_error: Optional[Exception] = None
-            for attempt in range(4):
-                try:
-                    self._client.images.pull(ref, auth_config=_registry_auth_config_for_ref(ref))
-                    return
-                except Exception as exc:  # noqa: BLE001
-                    last_error = exc
-                    text = f"{type(exc).__name__}: {exc}".lower()
-                    transient = any(
-                        needle in text
-                        for needle in (
-                            "toomanyrequests",
-                            "rate exceeded",
-                            "locked for",
-                            "unavailable",
-                            "connection reset",
-                            "read timed out",
+            pull_refs = []
+            cache_ref = _registry_cache_ref_for_image_ref(ref)
+            if cache_ref and cache_ref != ref:
+                pull_refs.append(cache_ref)
+            pull_refs.append(ref)
+            for pull_ref in pull_refs:
+                for attempt in range(4):
+                    try:
+                        self._client.images.pull(
+                            pull_ref,
+                            auth_config=_registry_auth_config_for_ref(pull_ref),
                         )
-                    )
-                    if transient and attempt < 3:
-                        time.sleep(min(8.0, 1.0 * (2 ** attempt)))
-                        continue
-                    break
+                        if pull_ref != ref:
+                            pulled = self._client.images.get(pull_ref)
+                            repo, tag = _split_repository_tag(ref)
+                            pulled.tag(repo, tag=tag)
+                            logger.info("Image pulled through registry cache: source=%s local_ref=%s", pull_ref, ref)
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        last_error = exc
+                        text = f"{type(exc).__name__}: {exc}".lower()
+                        transient = any(
+                            needle in text
+                            for needle in (
+                                "toomanyrequests",
+                                "rate exceeded",
+                                "locked for",
+                                "unavailable",
+                                "connection reset",
+                                "read timed out",
+                            )
+                        )
+                        if transient and attempt < 3:
+                            time.sleep(min(8.0, 1.0 * (2 ** attempt)))
+                            continue
+                        if pull_ref != ref:
+                            logger.warning(
+                                "Registry cache pull failed source=%s local_ref=%s: %s",
+                                pull_ref,
+                                ref,
+                                exc,
+                            )
+                        break
             raise last_error or RuntimeError(f"failed to pull image {ref}")
 
     def create_container(

@@ -16,13 +16,37 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 from starlette.applications import Starlette
-from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from config import get_config
 from middleware import SandboxDataPlaneMiddleware
+from runtime_routes import (
+    container_commit,
+    container_exec,
+    container_exec_stream,
+    container_kill,
+    container_network,
+    container_pause,
+    container_ports,
+    container_resume,
+    container_state,
+    container_stats,
+    create_container,
+    docker_check,
+    file_delete,
+    file_archive_upload,
+    file_list,
+    file_mkdir,
+    file_read,
+    file_write,
+    image_exists,
+    image_metadata,
+    image_pull,
+    prune_containers,
+    prune_images,
+)
 from template_routes import build_dockerfile, build_dockerfile_stream, build_template_snapshot
 
 logging.basicConfig(
@@ -250,49 +274,6 @@ async def runtime_probe(request: Request) -> JSONResponse:
     )
 
 
-async def runtime_image_pull(request: Request) -> JSONResponse:
-    from internal_auth import internal_api_key_valid, unauthorized_response
-    from template_builder import LocalDockerExecution
-
-    if not internal_api_key_valid(request):
-        return unauthorized_response()
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    image = str((payload or {}).get("image") or "").strip()
-    if not image:
-        return JSONResponse({"ok": False, "detail": "image is required"}, status_code=400)
-    started = time.monotonic()
-
-    def _pull() -> None:
-        plane = LocalDockerExecution(timeout=600)
-        try:
-            plane.ensure_image(image)
-        finally:
-            plane.close()
-
-    try:
-        await run_in_threadpool(_pull)
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse(
-            {
-                "ok": False,
-                "image": image,
-                "detail": f"{type(exc).__name__}: {exc}",
-                "elapsed_seconds": round(max(0.0, time.monotonic() - started), 3),
-            },
-            status_code=502,
-        )
-    return JSONResponse(
-        {
-            "ok": True,
-            "image": image,
-            "elapsed_seconds": round(max(0.0, time.monotonic() - started), 3),
-        }
-    )
-
-
 def _docker_graph_used_bytes(graph: str) -> int:
     """Return bytes consumed by this shard's Docker graph directory."""
     try:
@@ -312,9 +293,31 @@ routes = [
     Route("/health", health),
     Route("/ready", ready),
     Route("/", root),
+    Route("/internal/runtime/docker/check", docker_check),
     Route("/internal/runtime/status", runtime_status),
     Route("/internal/runtime/probe", runtime_probe, methods=["POST"]),
-    Route("/internal/runtime/images/pull", runtime_image_pull, methods=["POST"]),
+    Route("/internal/runtime/images/pull", image_pull, methods=["POST"]),
+    Route("/internal/runtime/images/exists", image_exists, methods=["POST"]),
+    Route("/internal/runtime/images/metadata", image_metadata, methods=["POST"]),
+    Route("/internal/runtime/containers/create", create_container, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/exec", container_exec, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/exec/stream", container_exec_stream, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/files/read", file_read, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/files/write", file_write, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/files/list", file_list, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/files/delete", file_delete, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/files/mkdir", file_mkdir, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/files/archive", file_archive_upload, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/stats", container_stats),
+    Route("/internal/runtime/containers/{container_id}/state", container_state),
+    Route("/internal/runtime/containers/{container_id}/network", container_network),
+    Route("/internal/runtime/containers/{container_id}/ports", container_ports, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/commit", container_commit, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/kill", container_kill, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/pause", container_pause, methods=["POST"]),
+    Route("/internal/runtime/containers/{container_id}/resume", container_resume, methods=["POST"]),
+    Route("/internal/runtime/prune/containers", prune_containers, methods=["POST"]),
+    Route("/internal/runtime/prune/images", prune_images, methods=["POST"]),
     Route("/internal/templates/build/dockerfile", build_dockerfile, methods=["POST"]),
     Route("/internal/templates/build/dockerfile/stream", build_dockerfile_stream, methods=["POST"]),
     Route("/internal/templates/build/snapshot", build_template_snapshot, methods=["POST"]),

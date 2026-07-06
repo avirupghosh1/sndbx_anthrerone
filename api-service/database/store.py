@@ -384,6 +384,10 @@ class Database:
                     desired_size INTEGER NOT NULL DEFAULT 0,
                     inflight_count INTEGER NOT NULL DEFAULT 0,
                     inflight_updated_at TEXT,
+                    handoff_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    last_handoff_at TEXT,
+                    last_refill_at TEXT,
                     ready_image_ref TEXT,
                     preferred_gateway_instance_id TEXT,
                     last_error TEXT,
@@ -516,6 +520,18 @@ class Database:
             cursor.execute(
                 "ALTER TABLE warm_pool_segments ADD COLUMN inflight_updated_at TEXT"
             )
+        if cols and "handoff_count" not in cols:
+            cursor.execute(
+                "ALTER TABLE warm_pool_segments ADD COLUMN handoff_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if cols and "failed_count" not in cols:
+            cursor.execute(
+                "ALTER TABLE warm_pool_segments ADD COLUMN failed_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if cols and "last_handoff_at" not in cols:
+            cursor.execute("ALTER TABLE warm_pool_segments ADD COLUMN last_handoff_at TEXT")
+        if cols and "last_refill_at" not in cols:
+            cursor.execute("ALTER TABLE warm_pool_segments ADD COLUMN last_refill_at TEXT")
 
     def create_client(
         self,
@@ -957,6 +973,15 @@ class Database:
         claim_started = time.monotonic()
         conn = self._connect()
         cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT warm_pool_key
+            FROM warm_pool_segments
+            WHERE warm_pool_key = ?
+            FOR UPDATE
+            """,
+            (key,),
+        )
         sql = """
                 SELECT *
                 FROM sandboxes
@@ -1014,6 +1039,17 @@ class Database:
         )
         updated = cursor.fetchone()
         result = self._sandbox_dict_from_row(cursor, updated) if updated else None
+        if result:
+            cursor.execute(
+                """
+                UPDATE warm_pool_segments
+                SET handoff_count = handoff_count + 1,
+                    last_handoff_at = ?,
+                    updated_at = ?
+                WHERE warm_pool_key = ?
+                """,
+                (now, now, key),
+            )
         conn.commit()
         conn.close()
         return result
@@ -1099,8 +1135,9 @@ class Database:
                     """
                     INSERT INTO warm_pool_segments
                     (warm_pool_key, template_id, cpu_limit, memory_limit, timeout, desired_size, inflight_count,
-                     inflight_updated_at, ready_image_ref, preferred_gateway_instance_id, last_error, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     inflight_updated_at, handoff_count, failed_count, last_handoff_at, last_refill_at,
+                     ready_image_ref, preferred_gateway_instance_id, last_error, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         key,
@@ -1110,6 +1147,10 @@ class Database:
                         int(timeout),
                         max(0, int(desired_size)),
                         0,
+                        None,
+                        0,
+                        0,
+                        None,
                         None,
                         (ready_image_ref or "").strip() or None,
                         (preferred_gateway_instance_id or "").strip() or None,
@@ -1146,6 +1187,10 @@ class Database:
             "desired_size": int(src.get("desired_size") or 0),
             "inflight_count": int(src.get("inflight_count") or 0),
             "inflight_updated_at": src.get("inflight_updated_at"),
+            "handoff_count": int(src.get("handoff_count") or 0),
+            "failed_count": int(src.get("failed_count") or 0),
+            "last_handoff_at": src.get("last_handoff_at"),
+            "last_refill_at": src.get("last_refill_at"),
             "ready_image_ref": src.get("ready_image_ref"),
             "preferred_gateway_instance_id": src.get("preferred_gateway_instance_id"),
             "last_error": src.get("last_error"),
@@ -1180,6 +1225,10 @@ class Database:
                     "desired_size": int(src.get("desired_size") or 0),
                     "inflight_count": int(src.get("inflight_count") or 0),
                     "inflight_updated_at": src.get("inflight_updated_at"),
+                    "handoff_count": int(src.get("handoff_count") or 0),
+                    "failed_count": int(src.get("failed_count") or 0),
+                    "last_handoff_at": src.get("last_handoff_at"),
+                    "last_refill_at": src.get("last_refill_at"),
                     "ready_image_ref": src.get("ready_image_ref"),
                     "preferred_gateway_instance_id": src.get("preferred_gateway_instance_id"),
                     "last_error": src.get("last_error"),
@@ -1203,7 +1252,6 @@ class Database:
         want = max(0, int(batch_max))
         if want <= 0:
             return 0
-        ready = max(0, int(ready_count))
         conn = self._connect()
         cursor = conn.cursor()
         cursor.execute(
@@ -1222,6 +1270,18 @@ class Database:
             return 0
         desired = max(0, int(row[0] or 0))
         inflight = max(0, int(row[1] or 0))
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM sandboxes
+            WHERE state = 'running'
+              AND is_warm_pool = 1
+              AND warm_pool_key = ?
+            """,
+            (key,),
+        )
+        ready_row = cursor.fetchone()
+        ready = max(0, int((ready_row or [0])[0] or 0))
         max_useful_inflight = max(0, desired - ready)
         if inflight > max_useful_inflight:
             inflight = max_useful_inflight
@@ -1238,10 +1298,10 @@ class Database:
             cursor.execute(
                 """
                 UPDATE warm_pool_segments
-                SET inflight_count = ?, inflight_updated_at = ?, updated_at = ?
+                SET inflight_count = ?, inflight_updated_at = ?, last_refill_at = ?, updated_at = ?
                 WHERE warm_pool_key = ?
                 """,
-                (inflight + reserve, now, now, key),
+                (inflight + reserve, now, now, now, key),
             )
         conn.commit()
         conn.close()
@@ -1282,6 +1342,9 @@ class Database:
         return n > 0
 
     def release_warm_pool_slots(self, *, warm_pool_key: str, count: int) -> bool:
+        return self.complete_warm_pool_slots(warm_pool_key=warm_pool_key, count=count, success=True)
+
+    def complete_warm_pool_slots(self, *, warm_pool_key: str, count: int, success: bool) -> bool:
         now = _utc_now_iso()
         key = (warm_pool_key or "").strip()
         release = max(0, int(count))
@@ -1309,10 +1372,18 @@ class Database:
             UPDATE warm_pool_segments
             SET inflight_count = ?,
                 inflight_updated_at = CASE WHEN ? > 0 THEN ? ELSE NULL END,
+                failed_count = failed_count + ?,
                 updated_at = ?
             WHERE warm_pool_key = ?
             """,
-            (max(0, inflight - release), max(0, inflight - release), now, now, key),
+            (
+                max(0, inflight - release),
+                max(0, inflight - release),
+                now,
+                0 if success else release,
+                now,
+                key,
+            ),
         )
         n = cursor.rowcount
         conn.commit()

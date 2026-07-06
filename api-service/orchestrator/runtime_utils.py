@@ -10,6 +10,8 @@ if TYPE_CHECKING:
 
 def is_container_like_execution(execution: Any) -> bool:
     """True when bootstrap/exec/file paths match Docker-style sandboxes (incl. K8s pods)."""
+    if bool(getattr(execution, "is_container_like", False)):
+        return True
     from orchestrator.container_manager import ContainerManager
     from orchestrator.k8s_pod_manager import K8sPodManager
 
