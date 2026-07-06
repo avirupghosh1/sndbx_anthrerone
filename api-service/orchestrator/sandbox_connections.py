@@ -167,12 +167,11 @@ def _guest_port_upstream_target_docker(
     guest_port: int,
     meta: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    from orchestrator.container_manager import ContainerManager
-
-    if not isinstance(execution, ContainerManager):
+    ip_fn = getattr(execution, "get_container_internal_ipv4", None)
+    if not callable(ip_fn):
         return None
     p = max(1, min(65535, int(guest_port)))
-    ip = execution.get_container_internal_ipv4(container_id)
+    ip = ip_fn(container_id)
     if not ip:
         return None
     return {

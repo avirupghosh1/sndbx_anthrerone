@@ -114,6 +114,10 @@ class Config:
         30.0,
         float(os.getenv("SANDBOX_WARM_POOL_INFLIGHT_STALE_SEC", "300.0")),
     )
+    SANDBOX_WARM_POOL_IDLE_POLL_SEC: float = max(
+        0.1,
+        min(5.0, float(os.getenv("SANDBOX_WARM_POOL_IDLE_POLL_SEC", "0.25"))),
+    )
 
     # Docker ``docker commit`` repository prefix for POST /sandboxes/{id}/snapshot (local image names)
     SANDBOX_SNAPSHOT_REPO: str = os.getenv("SANDBOX_SNAPSHOT_REPO", "mysandbox-snap")
@@ -149,7 +153,6 @@ class Config:
         os.getenv("RUNTIME_GATEWAY_STATEFULSET_NAME") or "runtime-gateway"
     ).strip()
     RUNTIME_GATEWAY_SERVICE_PORT: int = int(os.getenv("RUNTIME_GATEWAY_SERVICE_PORT", "8080"))
-    RUNTIME_GATEWAY_DOCKER_PORT: int = int(os.getenv("RUNTIME_GATEWAY_DOCKER_PORT", "2375"))
     RUNTIME_GATEWAY_TARGETS_JSON: str = (os.getenv("RUNTIME_GATEWAY_TARGETS_JSON") or "").strip()
     API_SERVICE_INSTANCE_ID: str = (os.getenv("API_SERVICE_INSTANCE_ID") or os.getenv("HOSTNAME") or "api-service").strip()
     WARM_POOL_COORDINATOR_LEASE_NAME: str = (

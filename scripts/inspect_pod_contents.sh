@@ -11,6 +11,7 @@ set -euo pipefail
 #   NAMESPACE         kube namespace                   (default: sandboxes)
 #   SELECTOR          pod label selector               (default: app=runtime-gateway)
 #   DOCKER_CONTAINER  dockerd container name           (default: dockerd)
+#   DOCKER_HOST_IN_POD dockerd endpoint inside pod     (default: tcp://127.0.0.1:2375)
 #   GATEWAY_CONTAINER gateway (app) container name     (default: gateway)
 #   IMAGE_FILTER      optional grep -E filter for images (default: none)
 #   ALL_CONTAINERS    1 = include stopped sandboxes too  (default: 1)
@@ -21,6 +22,7 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-sandboxes}"
 SELECTOR="${SELECTOR:-app=runtime-gateway}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-dockerd}"
+DOCKER_HOST_IN_POD="${DOCKER_HOST_IN_POD:-tcp://127.0.0.1:2375}"
 GATEWAY_CONTAINER="${GATEWAY_CONTAINER:-gateway}"
 IMAGE_FILTER="${IMAGE_FILTER:-}"
 ALL_CONTAINERS="${ALL_CONTAINERS:-1}"
@@ -39,6 +41,7 @@ if [ -z "$LIMIT_RATIO" ]; then
 fi
 LIMIT_RATIO="${LIMIT_RATIO:-0.80}"
 echo "RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO = ${LIMIT_RATIO}"
+echo "Docker endpoint inside dockerd sidecars = ${DOCKER_HOST_IN_POD}"
 
 fmt() {
   if command -v column >/dev/null 2>&1; then
@@ -100,7 +103,7 @@ for pod in $pods; do
   echo
   echo "--- Docker usage on this pod (real per-shard consumption) ---"
   dfp="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- \
-    docker system df 2>/dev/null || true)"
+    docker --host "$DOCKER_HOST_IN_POD" system df 2>/dev/null || true)"
   if [ -n "$dfp" ]; then
     printf '%s\n' "$dfp" | sed 's/^/  /'
   else
@@ -110,7 +113,7 @@ for pod in $pods; do
   echo
   echo "--- Sandboxes (containers named sandbox-*) ---"
   sandboxes="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- \
-    docker ps $ps_flag --filter 'name=sandbox-' \
+    docker --host "$DOCKER_HOST_IN_POD" ps $ps_flag --filter 'name=sandbox-' \
     --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true)"
   if [ -n "$sandboxes" ]; then
     {
@@ -125,7 +128,7 @@ for pod in $pods; do
   echo
   echo "--- Templates (images on this pod) ---"
   images="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- \
-    docker images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' 2>/dev/null || true)"
+    docker --host "$DOCKER_HOST_IN_POD" images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' 2>/dev/null || true)"
   if [ -n "$IMAGE_FILTER" ] && [ -n "$images" ]; then
     images="$(printf '%s\n' "$images" | grep -E "$IMAGE_FILTER" || true)"
   fi

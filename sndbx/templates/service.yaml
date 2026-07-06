@@ -35,10 +35,6 @@ spec:
       port: {{ .Values.service.runtimeGateway.httpPort }}
       targetPort: http
       protocol: TCP
-    - name: docker
-      port: {{ .Values.service.runtimeGateway.dockerPort }}
-      targetPort: docker
-      protocol: TCP
 ---
 apiVersion: {{ .Values.api.service | quote }}
 kind: Service
@@ -57,8 +53,4 @@ spec:
     - name: http
       port: {{ .Values.service.runtimeGateway.httpPort }}
       targetPort: http
-      protocol: TCP
-    - name: docker
-      port: {{ .Values.service.runtimeGateway.dockerPort }}
-      targetPort: docker
       protocol: TCP

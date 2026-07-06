@@ -54,6 +54,11 @@ Template registry credentials are consumed by `runtime-gateway`, not
 runtime-gateway API to pull a missing template image; the runtime-gateway pod
 performs the authenticated registry pull against its own Docker daemon.
 
+`api-service` must not be given per-shard `DOCKER_HOST` values. In the Helm
+deployment it talks to runtime-gateway over HTTP only. The dockerd sidecar binds
+to `127.0.0.1:2375` inside each runtime-gateway pod and is not exposed through a
+Kubernetes Service.
+
 ## AWS Aurora Postgres
 
 AWS Aurora PostgreSQL works with the current app path. Use standard Postgres
@@ -139,6 +144,19 @@ The Docker daemon sidecar is rendered with:
 ```
 
 This registry is internal ClusterIP only. It is not exposed through ingress.
+
+Optional pull-through cache mode can front an upstream registry such as ECR:
+
+```sh
+templateRegistry.internal.proxy.enabled=true
+templateRegistry.internal.proxy.remoteUrl=https://public.ecr.aws
+templateRegistry.internal.proxy.remoteServer=public.ecr.aws
+```
+
+In this mode runtime-gateway can pull a fully-qualified upstream image through
+the internal registry cache, tag it back to the original ref locally, and then
+create the sandbox using the original image ref. This cache is shared across
+runtime-gateway shards; Docker's normal layer cache is still per-shard/PVC.
 
 ## Registry Mode B: AWS ECR
 

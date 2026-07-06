@@ -58,6 +58,23 @@ spec:
           env:
             - name: REGISTRY_STORAGE_DELETE_ENABLED
               value: "true"
+            {{- if .Values.templateRegistry.internal.proxy.enabled }}
+            - name: REGISTRY_PROXY_REMOTEURL
+              value: {{ .Values.templateRegistry.internal.proxy.remoteUrl | quote }}
+            {{- $registrySecretName := .Values.templateRegistry.existingSecretName | default (include "sndbx.secretName" .) }}
+            {{- if eq (include "sndbx.templateRegistryAuthRequired" .) "true" }}
+            - name: REGISTRY_PROXY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $registrySecretName }}
+                  key: {{ .Values.templateRegistry.usernameSecretKey | quote }}
+            - name: REGISTRY_PROXY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $registrySecretName }}
+                  key: {{ .Values.templateRegistry.passwordSecretKey | quote }}
+            {{- end }}
+            {{- end }}
           volumeMounts:
             - name: registry-data
               mountPath: /var/lib/registry

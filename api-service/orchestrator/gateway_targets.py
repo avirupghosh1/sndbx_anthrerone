@@ -10,7 +10,6 @@ from typing import Any, Iterable, List, Optional
 class GatewayTarget:
     instance_id: str
     api_base: str
-    docker_host: str
     route_base: str
 
 
@@ -41,15 +40,13 @@ def build_gateway_targets(config: Any) -> List[GatewayTarget]:
         if not isinstance(item, dict):
             continue
         api_base = _trim_url(str(item.get("api_base") or item.get("url") or ""))
-        docker_host = str(item.get("docker_host") or "").strip()
         route_base = _trim_url(str(item.get("route_base") or api_base))
         instance_id = str(item.get("instance_id") or item.get("id") or f"runtime-gateway-{idx}").strip()
-        if api_base and docker_host and route_base:
+        if api_base and route_base:
             out.append(
                 GatewayTarget(
                     instance_id=instance_id,
                     api_base=api_base,
-                    docker_host=docker_host,
                     route_base=route_base,
                 )
             )
@@ -59,13 +56,11 @@ def build_gateway_targets(config: Any) -> List[GatewayTarget]:
     shard_count = max(1, int(getattr(config, "RUNTIME_GATEWAY_SHARD_COUNT", 1) or 1))
     if shard_count == 1:
         api_base = _trim_url(getattr(config, "RUNTIME_GATEWAY_URL", "") or "")
-        docker_host = str(getattr(config, "DOCKER_HOST", "") or "").strip()
-        if api_base and docker_host:
+        if api_base:
             return [
                 GatewayTarget(
                     instance_id="runtime-gateway-0",
                     api_base=api_base,
-                    docker_host=docker_host,
                     route_base=api_base,
                 )
             ]
@@ -75,7 +70,6 @@ def build_gateway_targets(config: Any) -> List[GatewayTarget]:
     sts = (getattr(config, "RUNTIME_GATEWAY_STATEFULSET_NAME", None) or "runtime-gateway").strip()
     headless = (getattr(config, "RUNTIME_GATEWAY_HEADLESS_SERVICE", None) or f"{sts}-headless").strip()
     http_port = int(getattr(config, "RUNTIME_GATEWAY_SERVICE_PORT", 8080) or 8080)
-    docker_port = int(getattr(config, "RUNTIME_GATEWAY_DOCKER_PORT", 2375) or 2375)
     for idx in range(shard_count):
         host = f"{sts}-{idx}.{headless}.{namespace}.svc.cluster.local"
         api_base = f"http://{host}:{http_port}"
@@ -83,7 +77,6 @@ def build_gateway_targets(config: Any) -> List[GatewayTarget]:
             GatewayTarget(
                 instance_id=f"{sts}-{idx}",
                 api_base=api_base,
-                docker_host=f"tcp://{host}:{docker_port}",
                 route_base=api_base,
             )
         )

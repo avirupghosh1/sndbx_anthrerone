@@ -5,6 +5,7 @@ NAMESPACE="${NAMESPACE:-sandboxes}"
 DB_URL="${DB_URL:-postgresql://avirup.ghosh@localhost:5433/postgres}"
 SHARDS="${SHARDS:-3}"
 IMAGE_FILTER="${IMAGE_FILTER:-mysandbox|custodian|python|agentlib|REPOSITORY}"
+DOCKER_HOST_IN_POD="${DOCKER_HOST_IN_POD:-tcp://127.0.0.1:2375}"
 
 section() {
   printf '\n===== %s =====\n' "$1"
@@ -12,6 +13,7 @@ section() {
 
 section "Kubernetes pods"
 kubectl -n "$NAMESPACE" get pods -o wide
+echo "Docker endpoint inside dockerd sidecars: ${DOCKER_HOST_IN_POD}"
 
 section "Warm-pool segments"
 psql "$DB_URL" -c "
@@ -89,9 +91,9 @@ for i in $(seq 0 "$((SHARDS - 1))"); do
     continue
   fi
   kubectl -n "$NAMESPACE" exec "$pod" -c dockerd -- \
-    docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+    docker --host "$DOCKER_HOST_IN_POD" ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
 
   section "Shard ${pod}: relevant images"
   kubectl -n "$NAMESPACE" exec "$pod" -c dockerd -- sh -lc \
-    "docker images --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' | grep -E '${IMAGE_FILTER}' || true"
+    "docker --host '$DOCKER_HOST_IN_POD' images --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' | grep -E '${IMAGE_FILTER}' || true"
 done

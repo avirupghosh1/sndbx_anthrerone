@@ -87,9 +87,6 @@ spec:
     - name: http
       port: 8080
       targetPort: 8080
-    - name: docker
-      port: 2375
-      targetPort: 2375
 ---
 apiVersion: v1
 kind: Service
@@ -104,9 +101,6 @@ spec:
     - name: http
       port: 8080
       targetPort: 8080
-    - name: docker
-      port: 2375
-      targetPort: 2375
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -130,30 +124,36 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
+          command:
+            - dockerd-entrypoint.sh
           args:
-            - --host=tcp://0.0.0.0:2375
+            - dockerd
+            - --host=tcp://127.0.0.1:2375
             - --storage-driver=overlay2
             - --tls=false
             - --insecure-registry=registry.sandboxes.svc.cluster.local:5000
           env:
             - name: DOCKER_TLS_CERTDIR
               value: ""
-          ports:
-            - containerPort: 2375
-              name: docker
           volumeMounts:
             - name: docker-graph
               mountPath: /var/lib/docker
           readinessProbe:
-            tcpSocket:
-              port: 2375
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - docker --host tcp://127.0.0.1:2375 info >/dev/null 2>&1
             initialDelaySeconds: 5
             timeoutSeconds: 3
             periodSeconds: 5
             failureThreshold: 6
           livenessProbe:
-            tcpSocket:
-              port: 2375
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - docker --host tcp://127.0.0.1:2375 info >/dev/null 2>&1
             initialDelaySeconds: 15
             timeoutSeconds: 3
             periodSeconds: 15
@@ -249,6 +249,7 @@ data:
   CONTROL_PLANE_URL: "http://api-service.sandboxes.svc.cluster.local:8000"
   CONTROL_PLANE_TIMEOUT_SEC: "10"
   DOCKER_HOST: "tcp://127.0.0.1:2375"
+  SANDBOX_DOCKER_OCI_RUNTIME: ""
   ENVD_EMBED_AT_TEMPLATE_BUILD: "true"
   UPSTREAM_RESOLVE_MODE: "control_plane"
   K8S_NAMESPACE: "sandboxes"

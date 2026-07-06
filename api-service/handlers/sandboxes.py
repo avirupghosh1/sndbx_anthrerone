@@ -31,6 +31,13 @@ def _resolve_template_id_for_principal(sandbox_manager: SandboxManager, principa
     owned = sandbox_manager.db.get_sandbox_template_by_alias(principal.client_id, requested)
     if owned:
         return str(owned["template_id"])
+    materialized = sandbox_manager.db.get_best_sandbox_template_by_alias(
+        requested,
+        owner_client_id=principal.client_id,
+        exclude_template_id=requested,
+    )
+    if materialized:
+        return str(materialized["template_id"])
     if principal.client_id == "bootstrap-local-client":
         # Local compatibility: the static API_KEY is a bootstrap/dev key, while
         # templates may have been built through a real portal client key.

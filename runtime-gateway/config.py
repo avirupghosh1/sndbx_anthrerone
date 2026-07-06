@@ -41,6 +41,10 @@ class Config:
     ).strip()
     CONTROL_PLANE_TIMEOUT_SEC: float = max(1.0, float(os.getenv("CONTROL_PLANE_TIMEOUT_SEC", "10")))
     DOCKER_HOST: str = (os.getenv("DOCKER_HOST") or "tcp://127.0.0.1:2375").strip()
+    SANDBOX_DOCKER_OCI_RUNTIME: str = (os.getenv("SANDBOX_DOCKER_OCI_RUNTIME") or "").strip()
+    TEMPLATE_DOCKER_CLIENT_TIMEOUT_SEC: int = max(
+        60, int(os.getenv("TEMPLATE_DOCKER_CLIENT_TIMEOUT_SEC", "600") or "600")
+    )
     TEMPLATE_DOCKER_BUILD_TIMEOUT_SEC: int = int(os.getenv("TEMPLATE_DOCKER_BUILD_TIMEOUT_SEC", "3600"))
     ENVD_EMBED_AT_TEMPLATE_BUILD: bool = _env_bool("ENVD_EMBED_AT_TEMPLATE_BUILD", True)
     ENVD_DOCKERFILE_RESTORE_USER: str = (os.getenv("ENVD_DOCKERFILE_RESTORE_USER") or "auto").strip()
@@ -85,6 +89,13 @@ class Config:
     TEMPLATE_REGISTRY_AUTH_REQUIRED: bool = _env_bool("TEMPLATE_REGISTRY_AUTH_REQUIRED", False)
     TEMPLATE_REGISTRY_USERNAME: str = (os.getenv("TEMPLATE_REGISTRY_USERNAME") or "").strip()
     TEMPLATE_REGISTRY_PASSWORD: str = (os.getenv("TEMPLATE_REGISTRY_PASSWORD") or "").strip()
+    TEMPLATE_REGISTRY_CACHE_ENABLED: bool = _env_bool("TEMPLATE_REGISTRY_CACHE_ENABLED", False)
+    TEMPLATE_REGISTRY_CACHE_SERVER: str = (
+        os.getenv("TEMPLATE_REGISTRY_CACHE_SERVER") or ""
+    ).strip().rstrip("/")
+    TEMPLATE_REGISTRY_CACHE_UPSTREAM_SERVER: str = (
+        os.getenv("TEMPLATE_REGISTRY_CACHE_UPSTREAM_SERVER") or ""
+    ).strip().rstrip("/")
 
 
 _config: Optional[Config] = None
