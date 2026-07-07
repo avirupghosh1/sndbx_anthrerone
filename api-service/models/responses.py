@@ -23,16 +23,16 @@ class SandboxResponse(BaseModel):
     )
     runtime: str = Field(
         default="docker",
-        description="Engine label: ``docker``, ``gvisor`` (Docker + ``runsc``), or ``firecracker`` (KVM microVM).",
+        description="Engine label: ``docker`` or ``gvisor`` (Docker + ``runsc``).",
     )
     sandbox_domain: str = Field(
         default="localhost",
-        description="Domain suffix for ``get_host(port)`` → ``{port}-{sandbox_id}.{sandbox_domain}``",
+        description="Domain suffix for ``get_host(port)`` -> ``{port}-{sandbox_id}.{sandbox_domain}``",
     )
     envd_port: int = Field(default=49983, description="In-guest envd HTTP port (data plane)")
     envd_access_token: Optional[str] = Field(
         default=None,
-        description="Layer-2 token for SDK→sandbox data plane (returned on create; use ``GET …/envd-connection`` later)",
+        description="Layer-2 token for SDK-to-sandbox data plane (returned on create; use ``GET /envd-connection`` later)",
     )
     traffic_access_token: Optional[str] = Field(
         default=None,

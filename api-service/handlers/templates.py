@@ -51,8 +51,8 @@ def _validate_template_id(template_id: str) -> str:
         raise HTTPException(
             status_code=400,
             detail=(
-                "template_id must be 1–63 chars, start with a letter, "
-                "and use only [a-zA-Z0-9._-] (no `/` — use base_image for the Docker ref)."
+                "template_id must be 1-63 chars, start with a letter, "
+                "and use only [a-zA-Z0-9._-] (no `/`; use base_image for the Docker ref)."
             ),
         )
     return tid
@@ -169,24 +169,12 @@ async def register_template_from_dockerfile(
 ):
     """Register a template from a Dockerfile.
 
-    **Docker / gVisor sandboxes:** ``warm_snapshot_image`` is the built OCI image tag (same as before).
-
-    **Firecracker sandboxes:** the API still builds with **Docker Engine** on the host, then exports
-    the image to a host ``*.ext4`` and stores that path in ``warm_snapshot_image`` (see
-    ``docs/FIRECRACKER.md``). Requires ``docker`` on ``PATH``, a working engine (``DOCKER_HOST``), and
-    a privileged one-shot container for ``mkfs.ext4`` (default builder image ``alpine:3.19``).
-
-    **Lima VM sandboxes** (``SANDBOX_ISOLATION=lima``): not supported from this endpoint.
+    ``warm_snapshot_image`` is always the built OCI image tag. In production the build is
+    delegated to runtime-gateway so the image lands in the Docker graph used by sandbox shards.
     """
     alias = _validate_template_id(request.template_id)
     existing = await run_io(sandbox_manager.db.get_sandbox_template_by_alias, principal.client_id, alias)
     tid = str(existing["template_id"]) if existing else _storage_template_id(principal, alias)
-    kind = sandbox_manager.execution.get_backend_kind()
-    if kind == "lima":
-        raise HTTPException(
-            status_code=400,
-            detail="POST /templates/from-dockerfile requires Docker Engine on the host (Lima VM isolation has no Docker build path).",
-        )
 
     raw = (request.context_tar_gzip_base64 or "").strip()
     ctx: bytes | None = None
@@ -198,6 +186,11 @@ async def register_template_from_dockerfile(
 
     cfg = get_config()
     mode = (cfg.TEMPLATE_DOCKERFILE_BUILD_MODE or "parsed").strip().lower()
+    if mode not in ("docker_cli", "parsed"):
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported TEMPLATE_DOCKERFILE_BUILD_MODE. Use docker_cli or parsed.",
+        )
     build_id = await _create_build_record(
         sandbox_manager,
         template_id=tid,
@@ -336,88 +329,8 @@ async def register_template_from_dockerfile(
         )
         if bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)):
             reg_env[ENVD_TEMPLATE_BAKED_ENV] = "1"
-        
-    elif mode == "kaniko":
-        from orchestrator.kaniko_builder import build_with_kaniko
-        df_content = request.dockerfile
-        if request.start_cmd:
-            df_content += f"\nRUN {request.start_cmd}\n"
-        
-        try:
-            tag = await run_io(
-                build_with_kaniko,
-                dockerfile=df_content,
-                template_id=tid,
-                context_tar_gzip=ctx,
-                image_tag=request.image_tag,
-                registry_host=cfg.KANIKO_REGISTRY_HOST,
-                image_pull_host=cfg.KANIKO_IMAGE_PULL_HOST,
-                namespace=cfg.K8S_NAMESPACE,
-                api_service_host=cfg.KANIKO_API_SERVICE_HOST,
-                embed_envd=bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)),
-            )
-        except RuntimeError as ex:
-            await _finish_build_record(
-                sandbox_manager,
-                build_id,
-                status="failed",
-                effective_mode="kaniko",
-                build_log="",
-                error_text=str(ex),
-            )
-            raise HTTPException(status_code=400, detail=str(ex)) from ex
-            
-        reg_env, reg_start = _fields_from_dockerfile_request(
-            request.dockerfile,
-            request.env,
-            request.start_cmd or "",
-        )
-        if bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)):
-            reg_env[ENVD_TEMPLATE_BAKED_ENV] = "1"
 
-    if mode in ("docker_cli", "kaniko"):
-        if kind == "firecracker":
-            try:
-
-                def _fc_cli() -> str:
-                    return sandbox_manager.materialize_firecracker_rootfs_from_oci(tag, tid)
-
-                ext4_path = await run_io(_fc_cli)
-            except RuntimeError as ex:
-                raise HTTPException(status_code=400, detail=str(ex)) from ex
-            row = await run_io(
-                sandbox_manager.db.upsert_sandbox_template,
-                tid,
-                tag,
-                reg_env,
-                reg_start,
-                int(request.settle_seconds),
-                (request.ready_cmd or "").strip(),
-                principal.client_id,
-                principal.key_id,
-                alias,
-            )
-            await run_io(
-                sandbox_manager.db.set_template_build_source,
-                tid,
-                source_kind="dockerfile",
-                source_build_mode=mode,
-                dockerfile_text=request.dockerfile,
-                build_args=request.build_args or {},
-                context_tar_gzip_base64=request.context_tar_gzip_base64,
-            )
-            await run_io(sandbox_manager.db.set_template_warm_snapshot, tid, ext4_path, None)
-            await run_io(sandbox_manager.sync_warm_pool_default_segment, tid, ext4_path)
-            await _finish_build_record(
-                sandbox_manager,
-                build_id,
-                status="success",
-                effective_mode=mode,
-                image_tag=tag,
-                build_log=(build_log if mode == "docker_cli" else f"{mode} build completed"),
-            )
-            return TemplateDefinitionResponse(**_row_to_response(row))
-
+    if mode == "docker_cli":
         row = await run_io(
             sandbox_manager.db.upsert_sandbox_template,
             tid,
@@ -447,7 +360,7 @@ async def register_template_from_dockerfile(
             status="success",
             effective_mode=mode,
             image_tag=tag,
-            build_log=(build_log if mode == "docker_cli" else f"{mode} build completed"),
+            build_log=build_log,
         )
         return TemplateDefinitionResponse(**_row_to_response(row))
 

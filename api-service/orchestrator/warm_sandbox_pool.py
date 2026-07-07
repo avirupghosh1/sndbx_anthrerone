@@ -2,12 +2,10 @@
 
 When ``SANDBOX_WARM_POOL_SIZE > 0``, one or more **pool segments** run in the background.
 Each segment is keyed by ``(logical template_id, cpu, memory, timeout)``
-and may provision from a **warm snapshot image** (Docker custom templates), from an
-``fc-bundle:`` ref (Firecracker), or from the base image (default ``SANDBOX_WARM_POOL_TEMPLATE_ID``
-profile). **Lima VM sandboxes:** warm pool is not started (see ``SandboxManager``).
+and may provision from a **warm snapshot image** (Docker custom templates) or from
+the base image (default ``SANDBOX_WARM_POOL_TEMPLATE_ID`` profile).
 
 See ``docs/CUSTOM_TEMPLATES.md`` for custom templates + snapshot-backed warm pools (Docker).
-``docs/FIRECRACKER.md`` covers Firecracker + optional ``SANDBOX_WARM_POOL_PROVISION_CONCURRENCY``.
 """
 
 from __future__ import annotations
@@ -483,8 +481,7 @@ class MultiWarmSandboxPool:
             if row:
                 row = self._manager._ensure_template_runtime_image(tid, row)
                 wi = (row.get("warm_snapshot_image") or "").strip()
-                # Skip Firecracker / Lima markers — pool still uses base OCI ref for those engines elsewhere.
-                if wi and wi not in ("__fc_rootfs__", "__lima_vm__"):
+                if wi:
                     snap = wi
         except Exception:
             logger.debug("warm pool: could not read warm_snapshot for %r", tid, exc_info=True)

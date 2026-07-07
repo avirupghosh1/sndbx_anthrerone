@@ -58,12 +58,12 @@ class Config:
     # Database
     DATABASE_URL: str = _require_database_url()
 
-    # Sandbox VM engine: ``docker`` (local dev), ``k8s`` (cluster pods), or ``firecracker``.
-    SANDBOX_ENGINE: str = os.getenv("SANDBOX_ENGINE", "k8s").strip().lower()
+    # Sandbox engine is Docker only. Isolation can be default runc or Docker's runsc/gVisor runtime.
+    SANDBOX_ENGINE: str = os.getenv("SANDBOX_ENGINE", "docker").strip().lower()
 
     # Docker
-    DOCKER_HOST: Optional[str] = os.getenv("DOCKER_HOST", None)  # e.g. ssh://user@linux-vm — see docs/REMOTE_SANDBOX_VM.md
-    # macOS + Colima (no /var/run/docker.sock): unix://${HOME}/.colima/default/docker.sock — see docs/E2B_DROPIN_TESTING.md
+    DOCKER_HOST: Optional[str] = os.getenv("DOCKER_HOST", None)  # e.g. ssh://user@linux-vm; see docs/REMOTE_SANDBOX_VM.md
+    # macOS + Colima (no /var/run/docker.sock): unix://${HOME}/.colima/default/docker.sock; see docs/E2B_DROPIN_TESTING.md
     
     # Sandbox defaults
     DEFAULT_TEMPLATE: str = os.getenv("DEFAULT_TEMPLATE", "python:3.11")
@@ -87,7 +87,7 @@ class Config:
         int(os.getenv("TEMPLATE_IMAGE_RETENTION_SEC", "172800")),
     )
 
-    # Warm pool: pre-create sandboxes matching this profile for faster POST /sandboxes (Docker or Firecracker engine).
+    # Warm pool: pre-create sandboxes matching this profile for faster POST /sandboxes.
     SANDBOX_WARM_POOL_SIZE: int = int(os.getenv("SANDBOX_WARM_POOL_SIZE", "0"))
     SANDBOX_WARM_POOL_TEMPLATE_ID: str = os.getenv(
         "SANDBOX_WARM_POOL_TEMPLATE_ID",
@@ -101,7 +101,6 @@ class Config:
         os.getenv("SANDBOX_WARM_POOL_TIMEOUT", os.getenv("DEFAULT_TIMEOUT", "3600"))
     )
     # How many sandboxes this process may provision in parallel per warm-pool segment (1 = sequential).
-    # Firecracker: keep ≤ ``FIRECRACKER_TAP_SLOTS`` total concurrent boots across segments and cold creates.
     SANDBOX_WARM_POOL_PROVISION_CONCURRENCY: int = max(
         1,
         int(os.getenv("SANDBOX_WARM_POOL_PROVISION_CONCURRENCY", "1")),
@@ -127,9 +126,9 @@ class Config:
     TEMPLATE_BUILD_MEMORY: str = os.getenv("TEMPLATE_BUILD_MEMORY", "2g")
     # After settle, repeatedly run ``ready_cmd`` (shell) until exit 0 or this timeout (0 = skip).
     TEMPLATE_READY_TIMEOUT_SEC: int = int(os.getenv("TEMPLATE_READY_TIMEOUT_SEC", "600"))
-    # ``POST /templates/from-dockerfile`` — real Docker Engine build wall-clock cap (``docker_cli`` mode).
+    # ``POST /templates/from-dockerfile``: real Docker Engine build wall-clock cap (``docker_cli`` mode).
     TEMPLATE_DOCKER_BUILD_TIMEOUT_SEC: int = int(os.getenv("TEMPLATE_DOCKER_BUILD_TIMEOUT_SEC", "3600"))
-    # ``parsed`` (default): Dockerfile parsed → exec in build container → ``docker commit`` + warm snapshot.
+    # ``parsed`` (default): Dockerfile parsed -> exec in build container -> ``docker commit`` + warm snapshot.
     # ``docker_cli``: Docker SDK build against the configured Docker Engine (local or remote ``DOCKER_HOST``).
     TEMPLATE_DOCKERFILE_BUILD_MODE: str = os.getenv("TEMPLATE_DOCKERFILE_BUILD_MODE", "parsed").strip().lower()
     # Runtime-gateway architecture: forward template build execution to the gateway pod, where the
@@ -148,6 +147,9 @@ class Config:
     RUNTIME_GATEWAY_SCHEDULER: str = (os.getenv("RUNTIME_GATEWAY_SCHEDULER") or "round_robin").strip().lower()
     RUNTIME_GATEWAY_HEADLESS_SERVICE: str = (
         os.getenv("RUNTIME_GATEWAY_HEADLESS_SERVICE") or "runtime-gateway-headless"
+    ).strip()
+    RUNTIME_GATEWAY_NAMESPACE: str = (
+        os.getenv("RUNTIME_GATEWAY_NAMESPACE") or "sandboxes"
     ).strip()
     RUNTIME_GATEWAY_STATEFULSET_NAME: str = (
         os.getenv("RUNTIME_GATEWAY_STATEFULSET_NAME") or "runtime-gateway"
@@ -178,42 +180,17 @@ class Config:
     )
 
     # Workload isolation / execution:
-    # - ``docker`` (default): Linux containers on Docker Engine (``SANDBOX_ENGINE=docker``).
+    # - ``docker`` (default): Linux containers on Docker Engine, default OCI runtime (runc).
     # - ``gvisor`` / ``runsc`` / ``gv``: Docker Engine with ``runsc`` OCI runtime.
-    # - ``lima`` / ``colima`` / ``lima-vm``: one **Lima/QEMU VM per sandbox** via ``limactl`` (not Docker
-    #   containers). ``SANDBOX_ENGINE`` is ignored when Lima isolation is active (see ``execution_backend``).
-    # Non-empty ``SANDBOX_DOCKER_OCI_RUNTIME`` overrides ``SANDBOX_ISOLATION`` for the OCI name (Docker only).
+    # Non-empty ``SANDBOX_DOCKER_OCI_RUNTIME`` overrides ``SANDBOX_ISOLATION`` for the OCI runtime name.
     SANDBOX_ISOLATION: str = os.getenv("SANDBOX_ISOLATION", "docker").strip().lower()
     SANDBOX_DOCKER_OCI_RUNTIME: str = os.getenv("SANDBOX_DOCKER_OCI_RUNTIME", "").strip()
-
-    # --- Lima VM sandboxes (``SANDBOX_ISOLATION=lima|colima``; ``limactl`` on the API host) ---
-    LIMACTL_PATH: str = os.getenv("LIMACTL_PATH", "limactl").strip() or "limactl"
-    LIMA_SANDBOX_TEMPLATE: str = os.getenv(
-        "LIMA_SANDBOX_TEMPLATE",
-        "template://ubuntu-24.04",
-    ).strip()
-    LIMA_CREATE_EXTRA_ARGS: str = os.getenv("LIMA_CREATE_EXTRA_ARGS", "").strip()
-    LIMA_START_TIMEOUT_SEC: int = int(os.getenv("LIMA_START_TIMEOUT_SEC", "600"))
-    LIMA_SHELL_USE_SUDO: str = os.getenv("LIMA_SHELL_USE_SUDO", "true").strip()
-
-    # When the API runs in Docker, ``limactl`` is usually absent and Lima must not run nested
-    # inside the container. Point these at a host (or VM) that has Lima + QEMU installed; the API
-    # will run ``ssh user@host limactl …`` instead of calling ``limactl`` locally.
-    LIMA_REMOTE_HOST: str = os.getenv("LIMA_REMOTE_HOST", "").strip()
-    LIMA_REMOTE_LIMACTL_PATH: str = os.getenv("LIMA_REMOTE_LIMACTL_PATH", "limactl").strip() or "limactl"
-    LIMA_REMOTE_SSH_EXTRA_ARGS: str = os.getenv("LIMA_REMOTE_SSH_EXTRA_ARGS", "").strip()
-
-    def use_lima_vm_sandboxes(self) -> bool:
-        """True when each sandbox is a Lima/Colima-style VM (``limactl``), not a Docker container."""
-        return (self.SANDBOX_ISOLATION or "").strip().lower() in ("lima", "colima", "lima-vm")
 
     def docker_oci_runtime(self) -> Optional[str]:
         """Return ``runsc`` for gVisor-backed sandboxes, or ``None`` for default ``runc``."""
         import logging
 
         log = logging.getLogger(__name__)
-        if self.use_lima_vm_sandboxes():
-            return None
         raw = (self.SANDBOX_DOCKER_OCI_RUNTIME or "").strip().lower()
         if raw:
             if raw == "runsc":
@@ -228,55 +205,17 @@ class Config:
         iso = (self.SANDBOX_ISOLATION or "docker").strip().lower()
         if iso in ("gvisor", "runsc", "gv"):
             return "runsc"
+        if iso not in ("docker", "runc", "default", "container", "containers"):
+            log.warning(
+                "SANDBOX_ISOLATION=%r unsupported; use docker/runc or gvisor/runsc. Using default runc.",
+                self.SANDBOX_ISOLATION,
+            )
         return None
-
-    # --- Firecracker (only when ``SANDBOX_ENGINE=firecracker``; Linux + KVM + tap + SSH rootfs) ---
-    FIRECRACKER_BINARY: str = os.getenv("FIRECRACKER_BINARY", "/usr/local/bin/firecracker").strip()
-    FIRECRACKER_KERNEL: str = os.getenv("FIRECRACKER_KERNEL", "").strip()
-    FIRECRACKER_ROOTFS: str = os.getenv("FIRECRACKER_ROOTFS", "").strip()
-    FIRECRACKER_GATEWAY: str = os.getenv("FIRECRACKER_GATEWAY", "172.16.0.1").strip()
-    FIRECRACKER_SUBNET_PREFIX: str = os.getenv("FIRECRACKER_SUBNET_PREFIX", "172.16.0").strip()
-    FIRECRACKER_GUEST_OCTET_BASE: int = int(os.getenv("FIRECRACKER_GUEST_OCTET_BASE", "10"))
-    FIRECRACKER_TAP_PATTERN: str = os.getenv("FIRECRACKER_TAP_PATTERN", "tapfc{slot}").strip()
-    FIRECRACKER_TAP_SLOTS: int = int(os.getenv("FIRECRACKER_TAP_SLOTS", "8"))
-    FIRECRACKER_SSH_USER: str = os.getenv("FIRECRACKER_SSH_USER", "root").strip()
-    FIRECRACKER_SSH_KEY: str = os.getenv("FIRECRACKER_SSH_KEY", "").strip()
-    FIRECRACKER_SSH_KNOWN_HOSTS: str = os.getenv("FIRECRACKER_SSH_KNOWN_HOSTS", "/dev/null").strip()
-    FIRECRACKER_ENABLE_PCI: str = os.getenv("FIRECRACKER_ENABLE_PCI", "false").strip()
-    # Try ``cp --reflink=auto`` on Linux (CoW on btrfs/xfs) before ``shutil.copy2``; big win for large ext4.
-    FIRECRACKER_ROOTFS_FAST_COPY: bool = os.getenv("FIRECRACKER_ROOTFS_FAST_COPY", "true").lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-    # Seconds between SSH readiness probes after InstanceStart (clamped 0.05…2).
-    FIRECRACKER_SSH_POLL_SEC: float = max(
-        0.05,
-        min(2.0, float(os.getenv("FIRECRACKER_SSH_POLL_SEC", "0.25"))),
-    )
-    # Directory for Firecracker full VM snapshots (``fc-bundle:``); each snapshot is a subfolder.
-    FIRECRACKER_SNAPSHOT_DIR: str = os.getenv(
-        "FIRECRACKER_SNAPSHOT_DIR",
-        os.path.join(os.getcwd(), "fc-snapshots"),
-    ).strip()
-    # ``POST /templates/from-dockerfile`` under ``SANDBOX_ENGINE=firecracker``: OCI image → host ext4
-    # (Docker Engine still required on the API host for build + export).
-    FIRECRACKER_DOCKERFILE_ROOTFS_DIR: str = os.getenv(
-        "FIRECRACKER_DOCKERFILE_ROOTFS_DIR",
-        os.path.join(os.getcwd(), "fc-dockerfile-rootfs"),
-    ).strip()
-    FIRECRACKER_DOCKERFILE_EXT4_MIN_MB: int = max(256, int(os.getenv("FIRECRACKER_DOCKERFILE_EXT4_MIN_MB", "4096")))
-    FIRECRACKER_DOCKERFILE_EXT4_MAX_MB: int = max(
-        FIRECRACKER_DOCKERFILE_EXT4_MIN_MB,
-        int(os.getenv("FIRECRACKER_DOCKERFILE_EXT4_MAX_MB", "65536")),
-    )
-    FIRECRACKER_EXT4_BUILDER_IMAGE: str = (os.getenv("FIRECRACKER_EXT4_BUILDER_IMAGE") or "alpine:3.19").strip()
-    FIRECRACKER_DOCKERFILE_INJECT_SSH_PUBKEY: bool = _env_bool("FIRECRACKER_DOCKERFILE_INJECT_SSH_PUBKEY", True)
 
     # --- E2B drop-in (WebSocket agent proxy + traffic token; Docker engine only for WS upstream) ---
     # Shared secret for ``e2b-traffic-access-token`` (set in production; min 16 random bytes recommended).
     E2B_DROPIN_WS_SECRET: str = os.getenv("E2B_DROPIN_WS_SECRET", "").strip()
-    # Legacy Docker local-dev flags (not used by control-plane K8s create/bootstrap).
+    # Legacy Docker local-dev flags (not used by runtime-gateway control-plane create/bootstrap).
     E2B_DROPIN_AGENT_PORT: int = int(os.getenv("E2B_DROPIN_AGENT_PORT", "8765"))
     E2B_DROPIN_PUBLISH_AGENT_PORT: bool = _env_bool("E2B_DROPIN_PUBLISH_AGENT_PORT", False)
     E2B_DROPIN_AUTO_START_AGENT: bool = _env_bool("E2B_DROPIN_AUTO_START_AGENT", False)
@@ -299,7 +238,7 @@ class Config:
     # Optional override when the API is behind TLS / a gateway (must be ``wss://host`` or ``ws://host`` with no path).
     E2B_DROPIN_PUBLIC_WS_BASE: str = os.getenv("E2B_DROPIN_PUBLIC_WS_BASE", "").strip()
 
-    # --- Envd-style guest daemon (HTTP Phase 1; Docker publish :49983 → host) ---
+    # --- Envd-style guest daemon (HTTP Phase 1; Docker publish :49983 -> host) ---
     ENVD_PUBLISH_PORT: bool = _env_bool("ENVD_PUBLISH_PORT", False)
     ENVD_PORT: int = max(1, min(65535, int(os.getenv("ENVD_PORT", "49983"))))
     ENVD_UPSTREAM_HTTP_HOST: str = (os.getenv("ENVD_UPSTREAM_HTTP_HOST") or "127.0.0.1").strip() or "127.0.0.1"
@@ -329,9 +268,6 @@ class Config:
     SANDBOX_DATA_PLANE_DEBUG: bool = _env_bool("SANDBOX_DATA_PLANE_DEBUG", False)
     SANDBOX_DEFAULT_ALLOW_PUBLIC_TRAFFIC: bool = _env_bool("SANDBOX_DEFAULT_ALLOW_PUBLIC_TRAFFIC", False)
     ENVD_ALWAYS_ON: bool = _env_bool("ENVD_ALWAYS_ON", True)
-    # K8s: when true, start envd + template ``start_cmd`` as part of container PID 1 and let pod
-    # readiness wait on the agent port instead of serializing that work after the pod becomes Ready.
-    K8S_TEMPLATE_BOOTSTRAP_IN_POD: bool = _env_bool("K8S_TEMPLATE_BOOTSTRAP_IN_POD", True)
     # TCP port clients connect to on the proxy (debug: e.g. 8080; prod: 443 or omit).
     SANDBOX_DATA_PLANE_HTTP_PORT: int = int(os.getenv("SANDBOX_DATA_PLANE_HTTP_PORT", "8080"))
     SANDBOX_DATA_PLANE_LISTEN_PORT: Optional[int] = (
@@ -341,25 +277,9 @@ class Config:
     )
     SANDBOX_DATA_PLANE_SCHEME: str = (os.getenv("SANDBOX_DATA_PLANE_SCHEME") or "http").strip().rstrip(":/")
 
-    # --- Kubernetes runtime (Linux cluster; guest port == pod containerPort) ---
-    SANDBOX_RUNTIME: str = (os.getenv("SANDBOX_RUNTIME") or "k8s").strip().lower()
-    K8S_NAMESPACE: str = (os.getenv("K8S_NAMESPACE") or "sandboxes").strip()
-    K8S_POD_SERVICE_TEMPLATE: str = (
-        os.getenv("K8S_POD_SERVICE_TEMPLATE") or "sandbox-{sandbox_id}.{namespace}.svc.cluster.local"
-    ).strip()
-    K8S_POD_READY_TIMEOUT_SEC: float = max(30.0, float(os.getenv("K8S_POD_READY_TIMEOUT_SEC", "180")))
-    K8S_IMAGE_PULL_SECRET: str = (os.getenv("K8S_IMAGE_PULL_SECRET") or "").strip()
-    # ``IfNotPresent`` / ``Never`` for images built into minikube docker (host-side template builds).
-    K8S_SANDBOX_IMAGE_PULL_POLICY: str = (
-        os.getenv("K8S_SANDBOX_IMAGE_PULL_POLICY") or "Never"
-    ).strip()
-    K8S_SANDBOX_CPU_LIMIT: str = (os.getenv("K8S_SANDBOX_CPU_LIMIT") or "500m").strip()
-    K8S_SANDBOX_MEMORY_LIMIT: str = (os.getenv("K8S_SANDBOX_MEMORY_LIMIT") or "1536Mi").strip()
-    # One kubectl exec for envd + agent start (avoids ~2s overhead per exec on K8s).
-    K8S_COMBINED_GUEST_BOOTSTRAP: bool = _env_bool("K8S_COMBINED_GUEST_BOOTSTRAP", True)
-    K8S_POD_READY_POLL_SEC: float = max(
-        0.1, min(2.0, float(os.getenv("K8S_POD_READY_POLL_SEC", "0.2")))
-    )
+    # Runtime is Docker Engine only. ``runsc``/gVisor is selected via SANDBOX_ISOLATION or
+    # SANDBOX_DOCKER_OCI_RUNTIME and executed by runtime-gateway's dockerd sidecar in prod.
+    SANDBOX_RUNTIME: str = (os.getenv("SANDBOX_RUNTIME") or "docker").strip().lower()
     # Guest agent listen wait during POST /sandboxes (envd starts in background by default).
     GUEST_BOOTSTRAP_AGENT_WAIT_SEC: float = max(
         1.0, float(os.getenv("GUEST_BOOTSTRAP_AGENT_WAIT_SEC", "8"))
@@ -376,34 +296,6 @@ class Config:
     SANDBOX_ROUTE_READY_WAIT_SEC: float = max(
         0.0, float(os.getenv("SANDBOX_ROUTE_READY_WAIT_SEC", "12.0") or "12.0")
     )
-
-    # Kaniko template builds (requires ``minikube addons enable registry`` on Mac dev).
-    KANIKO_REGISTRY_HOST: str = (
-        os.getenv("KANIKO_REGISTRY_HOST") or "registry.kube-system.svc.cluster.local:80"
-    ).strip().rstrip("/")
-    # Image ref stored on templates / used by sandbox pods (in-cluster pull).
-    KANIKO_IMAGE_PULL_HOST: str = (
-        os.getenv("KANIKO_IMAGE_PULL_HOST") or os.getenv("KANIKO_REGISTRY_HOST") or "registry.kube-system.svc.cluster.local:80"
-    ).strip().rstrip("/")
-    KANIKO_API_SERVICE_HOST: str = (
-        os.getenv("KANIKO_API_SERVICE_HOST") or "api-service.sandboxes.svc.cluster.local:8000"
-    ).strip()
-    KANIKO_API_KEY_SECRET_NAME: str = (
-        os.getenv("KANIKO_API_KEY_SECRET_NAME") or "sandbox-secrets"
-    ).strip()
-    KANIKO_API_KEY_SECRET_KEY: str = (
-        os.getenv("KANIKO_API_KEY_SECRET_KEY") or "API_KEY"
-    ).strip()
-    KANIKO_JOB_TIMEOUT_SEC: int = max(60, int(os.getenv("KANIKO_JOB_TIMEOUT_SEC", "1800")))
-
-    def is_k8s_runtime(self) -> bool:
-        rt = (self.SANDBOX_RUNTIME or "").strip().lower()
-        if rt in ("docker", "runc", "container"):
-            return False
-        if rt in ("k8s", "kubernetes"):
-            return True
-        eng = (self.SANDBOX_ENGINE or "").strip().lower()
-        return eng in ("k8s", "kubernetes")
 
     def is_control_plane(self) -> bool:
         return (self.API_SERVICE_ROLE or "control").strip().lower() != "combined"
