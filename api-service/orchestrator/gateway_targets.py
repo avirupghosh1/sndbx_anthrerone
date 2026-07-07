@@ -66,7 +66,10 @@ def build_gateway_targets(config: Any) -> List[GatewayTarget]:
             ]
         return []
 
-    namespace = (getattr(config, "K8S_NAMESPACE", None) or "sandboxes").strip()
+    namespace = (
+        getattr(config, "RUNTIME_GATEWAY_NAMESPACE", None)
+        or "sandboxes"
+    ).strip()
     sts = (getattr(config, "RUNTIME_GATEWAY_STATEFULSET_NAME", None) or "runtime-gateway").strip()
     headless = (getattr(config, "RUNTIME_GATEWAY_HEADLESS_SERVICE", None) or f"{sts}-headless").strip()
     http_port = int(getattr(config, "RUNTIME_GATEWAY_SERVICE_PORT", 8080) or 8080)

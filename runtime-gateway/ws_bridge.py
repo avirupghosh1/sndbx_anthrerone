@@ -58,7 +58,35 @@ async def connect_upstream_with_retries(
     raise last_exc
 
 
+def _is_downstream_already_closed(exc: BaseException) -> bool:
+    message = str(exc)
+    return (
+        "Unexpected ASGI message" in message
+        and ("websocket.close" in message or "websocket.send" in message)
+    )
+
+
+async def _close_upstream(upstream: Any, code: int = 1000) -> None:
+    try:
+        await upstream.close(code=code)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _close_downstream(websocket: WebSocket, code: int = 1000) -> None:
+    try:
+        await websocket.close(code=code)
+    except RuntimeError as exc:
+        if not _is_downstream_already_closed(exc):
+            raise
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def run_starlette_upstream_pumps(websocket: WebSocket, upstream: Any) -> None:
+    downstream_closed = asyncio.Event()
+    upstream_closed = asyncio.Event()
+
     async def pump_client_to_upstream() -> None:
         try:
             while True:
@@ -74,30 +102,51 @@ async def run_starlette_upstream_pumps(websocket: WebSocket, upstream: Any) -> N
                     await upstream.send(msg["bytes"])
         except WebSocketDisconnect:
             pass
+        except RuntimeError as exc:
+            if not _is_downstream_already_closed(exc):
+                raise
+        finally:
+            downstream_closed.set()
+            if not upstream_closed.is_set():
+                await _close_upstream(upstream)
 
     async def pump_upstream_to_client() -> None:
         try:
             async for raw in upstream:
+                if downstream_closed.is_set():
+                    break
                 if isinstance(raw, str):
-                    await websocket.send_text(raw)
+                    try:
+                        await websocket.send_text(raw)
+                    except RuntimeError as exc:
+                        if not _is_downstream_already_closed(exc):
+                            raise
+                        break
                 else:
-                    await websocket.send_bytes(raw)
+                    try:
+                        await websocket.send_bytes(raw)
+                    except RuntimeError as exc:
+                        if not _is_downstream_already_closed(exc):
+                            raise
+                        break
         except ConnectionClosed:
             pass
+        except WebSocketDisconnect:
+            pass
+        finally:
+            upstream_closed.set()
+            if not downstream_closed.is_set():
+                await _close_downstream(websocket)
 
     t1 = asyncio.create_task(pump_client_to_upstream())
     t2 = asyncio.create_task(pump_upstream_to_client())
-    _done, _ = await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
-    if t1 in _done and not t2.done():
-        try:
-            await asyncio.wait_for(t2, timeout=30.0)
-        except asyncio.TimeoutError:
-            t2.cancel()
-    elif t2 in _done:
-        await asyncio.sleep(0)
-        if not t1.done():
-            t1.cancel()
+    await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
     for p in (t1, t2):
         if not p.done():
             p.cancel()
-    await asyncio.gather(t1, t2, return_exceptions=True)
+    results = await asyncio.gather(t1, t2, return_exceptions=True)
+    for result in results:
+        if isinstance(result, asyncio.CancelledError):
+            continue
+        if isinstance(result, BaseException):
+            raise result

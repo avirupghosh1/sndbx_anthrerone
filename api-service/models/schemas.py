@@ -78,7 +78,7 @@ class RegisterTemplateRequest(BaseModel):
 
     First ``POST /sandboxes`` with this ``template_id`` performs a **one-time** build:
     run container from ``base_image``, apply ``env`` at create time, run ``start_cmd``,
-    wait ``settle_seconds``, ``docker commit`` → warm snapshot; subsequent sandboxes reuse
+    wait ``settle_seconds``, ``docker commit`` -> warm snapshot; subsequent sandboxes reuse
     that image (and optional warm pool). See ``docs/CUSTOM_TEMPLATES.md``.
     """
 
@@ -86,7 +86,7 @@ class RegisterTemplateRequest(BaseModel):
         ...,
         min_length=1,
         max_length=64,
-        description="Logical id (letters, digits, ``._-`` only; no ``/`` — not a raw image ref).",
+        description="Logical id (letters, digits, ``._-`` only; no ``/``; not a raw image ref).",
     )
     base_image: str = Field(..., min_length=1, description="Docker image to pull for the build container")
     env: Optional[Dict[str, str]] = Field(default=None, description="Container environment during build and run")
@@ -123,15 +123,13 @@ class RegisterTemplateFromDockerfileRequest(BaseModel):
     """Register a template from a Dockerfile.
 
     **Default** (``TEMPLATE_DOCKERFILE_BUILD_MODE=parsed``): the API parses the Dockerfile with
-    ``dockerfile-parse``, runs ``RUN`` / ``COPY`` / … **inside a throwaway build container** (same
-    idea as E2B’s step runner), then ``docker commit``. **Docker / gVisor** sandboxes store the OCI
-    tag in ``warm_snapshot_image``. **Firecracker** sandboxes export that image to a host
-    ``*.ext4`` (see ``docs/FIRECRACKER.md``) and store that path in ``warm_snapshot_image``.
+    ``dockerfile-parse``, runs ``RUN`` / ``COPY`` / ``ADD`` inside a throwaway build container (same
+    idea as E2B's step runner), then ``docker commit``. Docker / gVisor sandboxes store the OCI
+    tag in ``warm_snapshot_image``.
 
     **Recommended for remote runtimes** (``TEMPLATE_DOCKERFILE_BUILD_MODE=docker_cli`` with
     ``TEMPLATE_BUILD_VIA_RUNTIME_GATEWAY=true``): the API forwards the build request to
     runtime-gateway, which owns Docker access, registry credentials, and the produced tag.
-    **Firecracker** again materializes ``warm_snapshot_image`` as an ext4 path instead of the OCI tag.
     """
 
     template_id: str = Field(

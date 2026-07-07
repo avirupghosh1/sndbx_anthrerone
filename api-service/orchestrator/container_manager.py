@@ -47,21 +47,15 @@ class ContainerConfig:
     timeout: int = 3600
     environment: Optional[Dict[str, str]] = None
     volumes: Optional[Dict[str, Dict[str, str]]] = None
-    # Firecracker: optional host path to ext4 rootfs (overrides default from env).
-    rootfs_path: Optional[str] = None
-    # Firecracker: boot from a snapshot bundle ref ``fc-bundle:…`` (see ``firecracker_plane``).
-    fc_bundle_ref: Optional[str] = None
-    # Guest TCP ports exposed on the workload (K8s containerPort / optional Docker publish).
+    # Guest TCP ports expected inside the workload; Docker publishes only explicit legacy ports below.
     guest_ports: Optional[List[int]] = None
-    # Legacy Docker-only host publish (local dev); ignored on K8s runtime.
+    # Legacy Docker-only host publish for local direct-engine dev.
     publish_e2b_agent_port: bool = False
     e2b_agent_port: int = 8765
     publish_envd_port: bool = False
     envd_port: int = 49983
-    # K8s-only: optional PID 1 command override used to launch guest daemons before pod readiness.
+    # Optional PID 1 command override used to launch guest daemons before normal sandbox work.
     startup_command: Optional[List[str]] = None
-    # K8s-only: optional readiness TCP socket port. When set, pod Ready waits for the guest listener.
-    readiness_tcp_port: Optional[int] = None
 
 
 class ContainerManager:
@@ -327,8 +321,7 @@ class ContainerManager:
             )
             if startup_cmd:
                 # Docker ``command=`` only overrides ``CMD`` and still preserves the image
-                # ``ENTRYPOINT``. Use ``entrypoint=`` here so the startup wrapper is truly PID 1,
-                # matching the K8s pod path.
+                # ``ENTRYPOINT``. Use ``entrypoint=`` here so the startup wrapper is truly PID 1.
                 run_kwargs["entrypoint"] = startup_cmd
             else:
                 run_kwargs["command"] = "/bin/bash"

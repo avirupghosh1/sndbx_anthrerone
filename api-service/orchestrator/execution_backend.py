@@ -1,4 +1,4 @@
-"""Construct the sandbox execution plane: Docker, Firecracker, or Lima VMs."""
+"""Construct the sandbox execution plane: Docker Engine with optional gVisor."""
 
 from __future__ import annotations
 
@@ -16,43 +16,22 @@ logger = logging.getLogger(__name__)
 
 
 def build_execution_backend(config: "Config | None" = None) -> SandboxExecutionPlane:
-    """Return ``LimaVmPlane``, ``FirecrackerVmmPlane``, or Docker ``ContainerManager``."""
+    """Return runtime-gateway control plane or direct Docker ``ContainerManager``."""
     if config is None:
         from config import get_config
 
         config = get_config()
 
-    if config.use_lima_vm_sandboxes():
-        from .lima_plane import LimaVmPlane
-
-        iso = (getattr(config, "SANDBOX_ISOLATION", "") or "").strip().lower()
-        eng = (getattr(config, "SANDBOX_ENGINE", None) or "docker").strip().lower()
-        if eng in ("firecracker", "fc", "microvm"):
-            logger.warning(
-                "SANDBOX_ISOLATION=%s selects Lima VMs; ignoring SANDBOX_ENGINE=%s",
-                iso,
-                eng,
-            )
-        logger.info("Sandbox execution: Lima VMs (SANDBOX_ISOLATION=%s)", iso)
-        return LimaVmPlane(config)
-
-    if config.is_k8s_runtime():
-        from .k8s_pod_manager import K8sPodManager
-
-        oci = config.docker_oci_runtime()
-        logger.info(
-            "Sandbox execution: Kubernetes Pods (namespace=%s, oci_runtime=%s)",
-            getattr(config, "K8S_NAMESPACE", "sandboxes"),
-            oci,
-        )
-        return K8sPodManager(oci_runtime=oci)
-
     engine = (getattr(config, "SANDBOX_ENGINE", None) or "docker").strip().lower()
-    if engine in ("firecracker", "fc", "microvm"):
-        from .firecracker_plane import FirecrackerVmmPlane
-
-        logger.info("Sandbox execution: Firecracker microVMs (SANDBOX_ENGINE=%s)", engine)
-        return FirecrackerVmmPlane(config)
+    if engine not in ("docker", "container", "containers"):
+        raise RuntimeError(
+            f"Unsupported SANDBOX_ENGINE={engine!r}. This service supports Docker Engine only."
+        )
+    runtime = (getattr(config, "SANDBOX_RUNTIME", None) or "docker").strip().lower()
+    if runtime not in ("docker", "container", "containers", "runc", "runsc", "gvisor"):
+        raise RuntimeError(
+            f"Unsupported SANDBOX_RUNTIME={runtime!r}. Use docker/runc or gvisor/runsc."
+        )
 
     oci = config.docker_oci_runtime()
     if bool(getattr(config, "is_control_plane", lambda: False)()) and (

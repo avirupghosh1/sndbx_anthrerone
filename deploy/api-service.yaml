@@ -9,33 +9,6 @@ metadata:
   name: sandbox-controller
   namespace: sandboxes
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: sandbox-controller
-  namespace: sandboxes
-rules:
-  - apiGroups: [""]
-    resources: ["pods", "pods/exec", "pods/log", "services"]
-    verbs: ["create", "delete", "get", "list", "watch", "patch"]
-  - apiGroups: ["batch"]
-    resources: ["jobs", "jobs/status"]
-    verbs: ["create", "delete", "get", "list", "watch", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: sandbox-controller
-  namespace: sandboxes
-subjects:
-  - kind: ServiceAccount
-    name: sandbox-controller
-    namespace: sandboxes
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: sandbox-controller
----
 apiVersion: v1
 kind: Service
 metadata:
@@ -161,7 +134,7 @@ data:
   DATABASE_URL: "postgresql://avirup.ghosh@host.minikube.internal:5433/postgres"
   PORT: "8000"
   HOST: "0.0.0.0"
-  K8S_NAMESPACE: "sandboxes"
+  RUNTIME_GATEWAY_NAMESPACE: "sandboxes"
   RUNTIME_GATEWAY_SHARD_COUNT: "3"
   RUNTIME_GATEWAY_STATEFULSET_NAME: "runtime-gateway"
   RUNTIME_GATEWAY_HEADLESS_SERVICE: "runtime-gateway-headless"

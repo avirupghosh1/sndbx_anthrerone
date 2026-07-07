@@ -6,8 +6,6 @@ api:
   configmap: v1
   secret: v1
   serviceaccount: v1
-  role: rbac.authorization.k8s.io/v1
-  rolebinding: rbac.authorization.k8s.io/v1
 
 namespace: spr-apps
 tier: tier1
@@ -164,7 +162,7 @@ config:
     ENVD_PUBLISH_PORT: "false"
     PORT: "8000"
     HOST: "0.0.0.0"
-    K8S_NAMESPACE: "{{ .Values.namespace }}"
+    RUNTIME_GATEWAY_NAMESPACE: "{{ .Values.namespace }}"
     RUNTIME_GATEWAY_SHARD_COUNT: "{{ .Values.replicas.runtimeGateway }}"
     RUNTIME_GATEWAY_STATEFULSET_NAME: "{{ include \"sndbx.runtimeGatewayName\" . }}"
     RUNTIME_GATEWAY_HEADLESS_SERVICE: "{{ include \"sndbx.runtimeGatewayHeadlessName\" . }}"
@@ -236,15 +234,6 @@ templateRegistry:
       limits:
         cpu: "1"
         memory: 512Mi
-
-rbac:
-  rules:
-    - apiGroups: [""]
-      resources: ["pods", "pods/exec", "pods/log", "services"]
-      verbs: ["create", "delete", "get", "list", "watch", "patch"]
-    - apiGroups: ["batch"]
-      resources: ["jobs", "jobs/status"]
-      verbs: ["create", "delete", "get", "list", "watch", "patch"]
 
 secrets:
   create: false

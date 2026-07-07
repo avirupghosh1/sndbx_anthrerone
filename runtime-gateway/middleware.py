@@ -77,6 +77,14 @@ class SandboxDataPlaneMiddleware:
             forwarded_headers["x-sandbox-id"] = sandbox_id
             forwarded_headers["x-guest-port"] = str(guest_port)
             if scope["type"] == "websocket":
+                logger.info(
+                    "data-plane WS route mode=forward sandbox_id=%s guest_port=%s self_gateway=%s owner_gateway=%s upstream=%s",
+                    sandbox_id,
+                    guest_port,
+                    self_gateway,
+                    owner_gateway,
+                    forwarded_base,
+                )
                 await self._proxy_websocket(scope, receive, send, forwarded_base, forwarded_headers)
                 return
             request = Request(scope, receive)
@@ -100,6 +108,13 @@ class SandboxDataPlaneMiddleware:
             return
 
         if scope["type"] == "websocket":
+            logger.info(
+                "data-plane WS route mode=direct sandbox_id=%s guest_port=%s self_gateway=%s upstream=%s",
+                sandbox_id,
+                guest_port,
+                self_gateway,
+                upstream_base,
+            )
             await self._proxy_websocket(scope, receive, send, upstream_base, headers)
             return
 

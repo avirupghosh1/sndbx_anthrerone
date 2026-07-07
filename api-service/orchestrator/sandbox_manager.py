@@ -1,9 +1,8 @@
-"""Sandbox management over Docker Engine, Firecracker microVMs, or Lima VMs."""
+"""Sandbox management over Docker Engine runtime-gateway shards."""
 
 import base64
 import json
 import logging
-import os
 import re
 import secrets
 import shlex
@@ -19,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
 import httpx
 
 from .container_manager import ContainerManager, ContainerConfig
-from orchestrator.runtime_utils import is_container_like_execution, is_k8s_execution
+from orchestrator.runtime_utils import is_container_like_execution
 from orchestrator.guest_ports import resolve_guest_ports
 
 
@@ -46,8 +45,6 @@ from .envd_template_bake import (
     uvicorn_envd_start_background_script,
     uvicorn_envd_start_script,
 )
-from .firecracker_plane import FC_WARM_DOCKERLESS_MARKER
-from .lima_plane import LIMA_WARM_DOCKERLESS_MARKER
 from .template_image import resolve_sandbox_image
 from .runtime_gateway_templates import (
     build_dockerfile_template_via_gateway,
@@ -81,15 +78,6 @@ def _looks_like_explicit_image_ref(template_id: Optional[str]) -> bool:
         return True
     last = resolved.rsplit("/", 1)[-1]
     return "/" in resolved or ":" in last
-
-
-def _docker_engine_for_template_build(config: Any) -> Optional[ContainerManager]:
-    """Docker ``runc`` client used to build Dockerfile templates when sandboxes run on Firecracker."""
-    dh = (getattr(config, "DOCKER_HOST", None) or "").strip()
-    if dh:
-        os.environ["DOCKER_HOST"] = dh
-    cm = ContainerManager(oci_runtime=None)
-    return cm if cm.check_docker() else None
 
 
 class SandboxManager:
@@ -136,12 +124,7 @@ class SandboxManager:
         try:
             cfg = self._config
             kind = self.execution.get_backend_kind()
-            if cfg.SANDBOX_WARM_POOL_SIZE > 0 and kind == "lima":
-                logger.warning(
-                    "SANDBOX_WARM_POOL_SIZE=%s is not supported with Lima per-VM sandboxes; warm pool disabled.",
-                    cfg.SANDBOX_WARM_POOL_SIZE,
-                )
-            elif cfg.SANDBOX_WARM_POOL_SIZE > 0:
+            if cfg.SANDBOX_WARM_POOL_SIZE > 0:
                 from .warm_sandbox_pool import MultiWarmSandboxPool
 
                 self.warm_pool = MultiWarmSandboxPool(self, cfg)
@@ -1323,8 +1306,8 @@ class SandboxManager:
         """
         sid = (sandbox_id or "").strip()
         kind = self.execution.get_backend_kind()
-        if kind not in ("docker", "gvisor", "k8s"):
-            return None, f"runtime {kind!r} does not support envd (need docker, gvisor, or k8s)"
+        if kind not in ("docker", "gvisor"):
+            return None, f"runtime {kind!r} does not support envd (need docker or gvisor)"
         if not is_container_like_execution(self.execution):
             return None, "execution backend does not support in-guest envd"
         row = self.db.get_sandbox(sid)
@@ -1462,10 +1445,6 @@ class SandboxManager:
     ) -> Optional[Dict[str, Any]]:
         if not is_container_like_execution(self.execution):
             return None
-        if is_k8s_execution(self.execution) and not bool(
-            getattr(self._config, "K8S_TEMPLATE_BOOTSTRAP_IN_POD", True)
-        ):
-            return None
 
         sc, _img_ref, tpl_env, guest_port = self._resolve_template_start_spec(template_id)
         if not sc and not start_envd:
@@ -1498,7 +1477,6 @@ class SandboxManager:
             gp = guest_port
         return {
             "startup_command": ["/bin/sh", "-lc", "\n".join(parts)],
-            "readiness_tcp_port": (gp if 1 <= gp <= 65535 and is_k8s_execution(self.execution) else None),
             "start_cmd": sc,
             "guest_port": gp if 1 <= gp <= 65535 else guest_port,
             "envd_port": p if start_envd else 0,
@@ -1825,8 +1803,8 @@ class SandboxManager:
         if not sc:
             logger.debug("template start_cmd empty for %r — skip bootstrap", tid)
             return
-        exec_user = None if is_k8s_execution(self.execution) else "root"
-        if img_ref and is_container_like_execution(self.execution) and not is_k8s_execution(self.execution):
+        exec_user = "root"
+        if img_ref and is_container_like_execution(self.execution):
             exec_user = execution.image_default_user(img_ref)
         script = (
             "set -eu\n"
@@ -1880,154 +1858,16 @@ class SandboxManager:
         )
 
     def refresh_guest_routing_metadata(self, sandbox_id: str) -> None:
-        """Store upstream targets for runtime-gateway (K8s Service DNS or Docker bridge)."""
-        from orchestrator.sandbox_connections import build_guest_routing_record, k8s_pod_service_host
+        """Store Docker bridge upstream targets for runtime-gateway."""
+        from orchestrator.sandbox_connections import build_guest_routing_record
 
         sid = (sandbox_id or "").strip()
         md: Dict[str, Any] = {}
-        if getattr(self._config, "is_k8s_runtime", None) and self._config.is_k8s_runtime():
-            pod_ip = ""
-            row = self.get_sandbox(sid)
-            if row:
-                cid = (row.get("container_id") or "").strip()
-                if cid:
-                    try:
-                        pod_ip = (self._execution_for_row(row).get_container_internal_ipv4(cid) or "").strip()
-                    except Exception:
-                        pod_ip = ""
-            md["k8s"] = {
-                "namespace": (getattr(self._config, "K8S_NAMESPACE", None) or "sandboxes").strip(),
-                "service_host": k8s_pod_service_host(self._config, sid),
-                "pod_ip": pod_ip,
-            }
         record = build_guest_routing_record(self, sid)
         if record:
             md["guest_routing"] = record
         if md:
             self.db.merge_sandbox_metadata(sid, md)
-
-    def _bootstrap_guest_services_k8s_combined(
-        self,
-        sandbox_id: str,
-        container_id: str,
-        template_id: str,
-        *,
-        start_envd: bool,
-        envd_port: int,
-    ) -> bool:
-        """Single kubectl exec fast path; if envd is missing from the image, bake it first."""
-        sc, img_ref, _tpl_env, guest_port = self._resolve_template_start_spec(template_id)
-        row = self.get_sandbox(sandbox_id) or {}
-        execution = self._execution_for_row(row)
-        exec_user = None if is_k8s_execution(self.execution) else "root"
-        if img_ref and is_container_like_execution(self.execution) and not is_k8s_execution(self.execution):
-            exec_user = execution.image_default_user(img_ref)
-
-        wait_sec = self._guest_bootstrap_agent_wait_seconds()
-        poll_sec = self._guest_bootstrap_poll_seconds()
-        declared_baked = self._template_declares_envd_baked(template_id)
-        parts = ["set -eu"]
-
-        if start_envd:
-            p = max(1, min(65535, int(envd_port)))
-            envd_wait = guest_tcp_wait_loop_script(
-                p,
-                max_seconds=min(wait_sec, 15.0),
-                poll_seconds=poll_sec,
-                log_path="/tmp/envd.log",
-            )
-            if not declared_baked:
-                pip_to = float(getattr(self._config, "ENVD_BOOTSTRAP_PIP_TIMEOUT_SEC", 300.0) or 300.0)
-                if not self._ensure_envd_baked(sandbox_id, container_id, pip_timeout=pip_to):
-                    logger.warning("k8s combined guest bootstrap: envd bake failed sandbox=%s", sandbox_id)
-                    return False
-            # Subshell: wait loop uses ``exit 0`` on success — must not terminate the
-            # combined script before ``start_cmd`` runs.
-            parts.append(
-                f"{uvicorn_envd_start_background_script(p)}\n(\n{envd_wait}\n)"
-            )
-
-        if sc:
-            parts.append(": > /tmp/template-start.log")
-            parts.append(
-                "if command -v setsid >/dev/null 2>&1; then\n"
-                f"  setsid -f /bin/sh -c {shlex.quote(sc)} >>/tmp/template-start.log 2>&1 &\n"
-                "else\n"
-                f"  nohup /bin/sh -c {shlex.quote(sc)} >>/tmp/template-start.log 2>&1 &\n"
-                "fi"
-            )
-
-        if 1 <= guest_port <= 65535:
-            agent_wait = guest_tcp_wait_loop_script(
-                guest_port,
-                max_seconds=wait_sec,
-                poll_seconds=poll_sec,
-                log_path="/tmp/template-start.log",
-            )
-            parts.append(f"(\n{agent_wait}\n)")
-        elif sc:
-            parts.append("sleep 0.5")
-
-        if len(parts) == 1:
-            return True
-
-        script = "\n".join(parts)
-        def _run_script() -> Dict[str, Any]:
-            with self._sandbox_io_lock(sandbox_id):
-                return execution.run_command(
-                    container_id,
-                    script,
-                    timeout=wait_sec + 30.0,
-                    user=exec_user,
-                )
-
-        st = _run_script()
-        if int(st.get("exit_code") or 0) != 0 and start_envd and declared_baked:
-            pip_to = float(getattr(self._config, "ENVD_BOOTSTRAP_PIP_TIMEOUT_SEC", 300.0) or 300.0)
-            logger.warning(
-                "k8s combined guest bootstrap: declared baked template failed first attempt sandbox=%s template=%s output=%s; retrying after bake probe",
-                sandbox_id,
-                template_id,
-                (st.get("stderr") or st.get("stdout") or "")[:1500],
-            )
-            if not self._ensure_envd_baked(sandbox_id, container_id, pip_timeout=pip_to):
-                logger.warning("k8s combined guest bootstrap: fallback bake failed sandbox=%s", sandbox_id)
-                return False
-            st = _run_script()
-
-        if int(st.get("exit_code") or 0) != 0 and 1 <= guest_port <= 65535:
-            logger.warning(
-                "k8s combined guest bootstrap: agent :%s not ready sandbox=%s template=%s log=%s",
-                guest_port,
-                sandbox_id,
-                template_id,
-                (st.get("stderr") or st.get("stdout") or "")[:2500],
-            )
-            return False
-        if int(st.get("exit_code") or 0) != 0:
-            logger.warning(
-                "k8s combined guest bootstrap failed sandbox=%s template=%s output=%s",
-                sandbox_id,
-                template_id,
-                (st.get("stderr") or st.get("stdout") or "")[:2000],
-            )
-            return False
-
-        if sc:
-            logger.info(
-                "template start_cmd bootstrapped sandbox=%s template=%r cmd=%r port=%s",
-                sandbox_id,
-                template_id,
-                sc[:120],
-                guest_port or "?",
-            )
-        if start_envd:
-            logger.info(
-                "envd auto-start: sandbox %s guest tcp/%s ready",
-                sandbox_id,
-                envd_port,
-            )
-        return True
 
     def _bootstrap_guest_services(self, sandbox_id: str, container_id: str, template_id: str) -> bool:
         """Idempotent guest daemons after the workload is running (control-plane responsibility)."""
@@ -2107,20 +1947,6 @@ class SandboxManager:
                 logger.info("envd auto-start: sandbox %s guest tcp/%s ready (startup)", sandbox_id, envd_port_cfg)
             self.refresh_guest_routing_metadata(sandbox_id)
             return True
-
-        if (
-            is_k8s_execution(self.execution)
-            and bool(getattr(self._config, "K8S_COMBINED_GUEST_BOOTSTRAP", True))
-        ):
-            ok = self._bootstrap_guest_services_k8s_combined(
-                sandbox_id,
-                container_id,
-                template_id,
-                start_envd=auto_start_envd,
-                envd_port=envd_port_cfg,
-            )
-            self.refresh_guest_routing_metadata(sandbox_id)
-            return ok
 
         if auto_start_envd:
             if not self._bootstrap_envd_daemon(
@@ -2422,7 +2248,7 @@ class SandboxManager:
         if (template_id or "").strip() != pid:
             return
         ref = (warm_ref or "").strip()
-        if not ref or ref in (FC_WARM_DOCKERLESS_MARKER, LIMA_WARM_DOCKERLESS_MARKER):
+        if not ref:
             return
         pool.ensure_pool_for(
             pid,
@@ -2438,22 +2264,6 @@ class SandboxManager:
 
     def _build_registered_template_snapshot(self, template_id: str) -> bool:
         """One-time: base image + env + ``start_cmd`` + settle, then ``docker commit``."""
-        if self.execution.get_backend_kind() == "firecracker":
-            self.db.set_template_warm_snapshot(template_id, FC_WARM_DOCKERLESS_MARKER, None)
-            logger.info(
-                "Firecracker engine: skipping Docker-based template snapshot for %r (marker %s)",
-                template_id,
-                FC_WARM_DOCKERLESS_MARKER,
-            )
-            return True
-        if self.execution.get_backend_kind() == "lima":
-            self.db.set_template_warm_snapshot(template_id, LIMA_WARM_DOCKERLESS_MARKER, None)
-            logger.info(
-                "Lima isolation: skipping Docker-based template snapshot for %r (marker %s)",
-                template_id,
-                LIMA_WARM_DOCKERLESS_MARKER,
-            )
-            return True
         lock = self._template_lock(template_id)
         with lock:
             row = self.db.get_sandbox_template(template_id)
@@ -2461,19 +2271,6 @@ class SandboxManager:
                 return False
             if row.get("warm_snapshot_image"):
                 return True
-
-            # K8s + host-built image (``--host-docker``): skip tpl-build / docker commit.
-            if self.execution.get_backend_kind() == "k8s":
-                bi = (row.get("base_image") or "").strip()
-                sc = (row.get("start_cmd") or "").strip()
-                if bi and bi != template_id and (":" in bi or "/" in bi) and not sc:
-                    self.db.set_template_warm_snapshot(template_id, bi, None)
-                    logger.info(
-                        "Template %s: using pre-built base_image as warm snapshot (k8s): %s",
-                        template_id,
-                        bi,
-                    )
-                    return True
 
             cfg = self._config
             if gateway_template_build_enabled(cfg):
@@ -2621,20 +2418,7 @@ class SandboxManager:
             extract_start_cmd_from_dockerfile,
         )
 
-        kind = self.execution.get_backend_kind()
-        if kind == "lima":
-            raise RuntimeError(
-                "Parsed Dockerfile template build requires Docker Engine (Lima VM isolation has no Docker build path)."
-            )
         plane: Any = self.execution
-        if kind == "firecracker":
-            docker_cm = _docker_engine_for_template_build(self._config)
-            if docker_cm is None:
-                raise RuntimeError(
-                    "Firecracker engine: Dockerfile template build needs Docker Engine on this host "
-                    "(set DOCKER_HOST, ensure `docker info` works, and keep `docker` on PATH)."
-                )
-            plane = docker_cm
         if not hasattr(plane, "put_archive_to_container"):
             raise RuntimeError("Parsed Dockerfile builds require Docker ContainerManager.put_archive_to_container")
 
@@ -2765,14 +2549,6 @@ class SandboxManager:
         if not image_ref:
             raise RuntimeError("Dockerfile template build produced no image")
 
-        warm_ref = image_ref
-        if self.execution.get_backend_kind() == "firecracker":
-            from .fc_dockerfile_rootfs_export import materialize_firecracker_template_ext4
-
-            warm_ref = materialize_firecracker_template_ext4(
-                self._config, oci_image_ref=image_ref, template_id=template_id
-            )
-
         self.db.upsert_sandbox_template(
             template_id,
             image_ref,
@@ -2794,22 +2570,14 @@ class SandboxManager:
                 base64.b64encode(context_tar_gzip).decode("ascii") if context_tar_gzip else None
             ),
         )
-        if not self.db.set_template_warm_snapshot(template_id, warm_ref, None):
+        if not self.db.set_template_warm_snapshot(template_id, image_ref, None):
             raise RuntimeError(
                 f"set_template_warm_snapshot failed for template_id={template_id!r} "
-                f"(warm_ref={warm_ref!r}); template row missing after upsert — check DATABASE_URL / DB."
+                f"(image_ref={image_ref!r}); template row missing after upsert — check DATABASE_URL / DB."
             )
-        logger.info("Template %s (parsed Dockerfile) warm snapshot: %s", template_id, warm_ref)
-        self.sync_warm_pool_default_segment(template_id, warm_ref)
+        logger.info("Template %s (parsed Dockerfile) warm snapshot: %s", template_id, image_ref)
+        self.sync_warm_pool_default_segment(template_id, image_ref)
         return self.db.get_sandbox_template(template_id) or {}
-
-    def materialize_firecracker_rootfs_from_oci(self, oci_image_ref: str, template_id: str) -> str:
-        """Export a built OCI tag to a host ``.ext4`` for Firecracker (see ``fc_dockerfile_rootfs_export``)."""
-        from .fc_dockerfile_rootfs_export import materialize_firecracker_template_ext4
-
-        return materialize_firecracker_template_ext4(
-            self._config, oci_image_ref=oci_image_ref, template_id=template_id
-        )
 
     def _create_sandbox_fresh(
         self,
@@ -2842,32 +2610,7 @@ class SandboxManager:
         metadata = meta
 
         snap = (from_snapshot_image or "").strip()
-        root_override: Optional[str] = None
-        fc_bundle_ref: Optional[str] = None
-        if self.execution.get_backend_kind() == "firecracker":
-            image = (template_id or "").strip() or "firecracker"
-            if snap:
-                if snap == FC_WARM_DOCKERLESS_MARKER:
-                    snap = ""
-                elif snap.startswith("fc-bundle:"):
-                    fc_bundle_ref = snap
-                    snap = ""
-                elif snap.endswith(".ext4") or os.path.isfile(snap):
-                    root_override = snap
-                else:
-                    logger.warning(
-                        "Firecracker: ignoring docker image / snapshot ref %r (use host .ext4 path or fc-bundle:…)",
-                        snap,
-                    )
-        elif self.execution.get_backend_kind() == "lima":
-            image = (template_id or "").strip() or "lima"
-            if snap and snap != LIMA_WARM_DOCKERLESS_MARKER:
-                logger.warning(
-                    "Lima: ignoring Docker image / snapshot ref %r (use LIMA_SANDBOX_TEMPLATE / template_id as template://…)",
-                    snap,
-                )
-            snap = ""
-        elif snap:
+        if snap:
             image = snap
         else:
             image = _resolve_sandbox_image(template_id)
@@ -2932,18 +2675,11 @@ class SandboxManager:
         if meta_env:
             env_for_create = {**(env_for_create or {}), **meta_env}
 
-        if is_k8s_execution(self.execution):
-            cpu_limit = (getattr(self._config, "K8S_SANDBOX_CPU_LIMIT", None) or cpu_limit).strip()
-            memory_limit = (
-                getattr(self._config, "K8S_SANDBOX_MEMORY_LIMIT", None) or memory_limit
-            ).strip()
-
         envd_port_cfg = max(1, min(65535, int(getattr(self._config, "ENVD_PORT", 49983))))
         is_container_backend = is_container_like_execution(self.execution)
         envd_always = is_container_backend and bool(getattr(self._config, "ENVD_ALWAYS_ON", True))
         publish_envd_legacy = (
             is_container_backend
-            and not is_k8s_execution(self.execution)
             and bool(getattr(self._config, "ENVD_PUBLISH_PORT", False))
         )
         publish_envd = publish_envd_legacy
@@ -2984,13 +2720,10 @@ class SandboxManager:
             memory_limit=memory_limit,
             timeout=timeout,
             environment=env_for_create,
-            rootfs_path=root_override,
-            fc_bundle_ref=fc_bundle_ref,
             guest_ports=guest_ports,
             publish_envd_port=publish_envd,
             envd_port=envd_port_cfg,
             startup_command=list(startup_boot.get("startup_command") or []) if startup_boot else None,
-            readiness_tcp_port=(startup_boot.get("readiness_tcp_port") if startup_boot else None),
         )
 
         container_id = execution.create_container(container_name, config)
@@ -3166,7 +2899,7 @@ class SandboxManager:
         sandbox_id: str,
         label: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Docker: ``docker commit`` into a new image, or Firecracker: full VM snapshot (``fc-bundle:`` ref)."""
+        """Persist the Docker writable layer as a new image."""
         sandbox = self.get_sandbox(sandbox_id)
         if not sandbox:
             logger.error("create_filesystem_snapshot: unknown sandbox %s", sandbox_id)

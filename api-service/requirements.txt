@@ -11,8 +11,7 @@ httpx==0.25.2
 websockets>=12.0,<15
 python-dotenv==1.0.0
 psycopg[binary]>=3.2.0,<4
-# Dockerfile → in-container RUN/COPY/… (E2B-style parsed build); see orchestrator/template_dockerfile_builder.py
+# Dockerfile -> in-container RUN/COPY/... (E2B-style parsed build); see orchestrator/template_dockerfile_builder.py
 dockerfile-parse>=2.0.0,<3
-kubernetes>=28.1.0,<35
 jinja2==3.1.4
 python-multipart==0.0.9
