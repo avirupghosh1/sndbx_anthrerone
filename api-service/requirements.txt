@@ -1,17 +1,12 @@
 fastapi==0.104.1
 uvicorn==0.24.0
-# 2.5.x pydantic-core fails to build on Python 3.12.4+ / 3.13 / 3.14 (ForwardRef._evaluate / recursive_guard).
-# Use 2.12+ for current CPython typing and prebuilt wheels.
 pydantic>=2.12.0,<3
-# 7.1+ required for requests 2.32+ (fixes "Not supported URL scheme http+docker")
-# [ssh] pulls Paramiko so DOCKER_HOST=ssh://… (remote Linux VM) works with docker-py
 docker[ssh]>=7.1.0,<8
 pytest==7.4.3
 httpx==0.25.2
 websockets>=12.0,<15
 python-dotenv==1.0.0
 psycopg[binary]>=3.2.0,<4
-# Dockerfile -> in-container RUN/COPY/... (E2B-style parsed build); see orchestrator/template_dockerfile_builder.py
 dockerfile-parse>=2.0.0,<3
 jinja2==3.1.4
 python-multipart==0.0.9
