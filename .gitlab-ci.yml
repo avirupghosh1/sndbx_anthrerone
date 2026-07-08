@@ -34,7 +34,7 @@ variables:
   GIT_REPO_URL: "https://github.com/avirupghosh1/sndbx_anthrerone.git"
   HELM_GIT_REPO_URL: "git@prod-gitlab.sprinklr.com:sprinklr-k8s/helm-internal-tools.git"
   KUBE_CLUSTER: "apps-gke"
-  CHART_NAME: "sndbx"
+  CHART_NAME: "sandbox"
   CHART_RELEASE_NAME: "qa6-tier1"
   CHART_NAMESPACE: "spr-apps"
   CHART_REPO_BRANCH: "origin/main"
