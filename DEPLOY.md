@@ -203,7 +203,7 @@ For manual deploys where no CI-built registry image is passed, the chart falls
 back to the configured production image repo, rendered as:
 
 ```text
-<images.apiService.repo>/registry:2
+<images.apiService.repo>/registry:3
 ```
 
 Set `templateRegistry.internal.image` directly if you want a different

@@ -2,11 +2,13 @@
 #
 # Build (downloads runsc inside the image; ~171MB):
 #   cd cont_in_vm
-#   docker build -f runtime-gateway/Dockerfile.gvisor -t dockerd-gvisor:27 runtime-gateway
+#   docker build -f runtime-gateway/Dockerfile.gvisor -t dockerd-gvisor:28 runtime-gateway
 
-FROM docker:27-dind
+FROM docker:28-dind
 
-RUN apk add --no-cache curl ca-certificates
+RUN apk update \
+    && apk upgrade --no-cache \
+    && apk add --no-cache curl ca-certificates
 
 # gVisor buckets use x86_64 / aarch64. TARGETARCH is set by BuildKit; legacy
 # docker build leaves it empty — we fall back to uname -m.
