@@ -73,6 +73,24 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: DATABASE_TYPE
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: DATABASE_TYPE
+                  optional: true
+            - name: DATABASE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: DATABASE_USERNAME
+                  optional: true
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: DATABASE_PASSWORD
+                  optional: true
           readinessProbe:
             httpGet:
               path: /ready
@@ -131,7 +149,9 @@ data:
   SANDBOX_WARM_POOL_INFLIGHT_STALE_SEC: "300.0"
   ENVD_ALWAYS_ON: "true"
   ENVD_PUBLISH_PORT: "false"
-  DATABASE_URL: "postgresql://avirup.ghosh@host.minikube.internal:5433/postgres"
+  DATABASE_TYPE: "mongo"
+  DATABASE_URL: "mongodb://host.minikube.internal:27017/sandboxes"
+  MONGODB_DATABASE: "sandboxes"
   PORT: "8000"
   HOST: "0.0.0.0"
   RUNTIME_GATEWAY_NAMESPACE: "sandboxes"

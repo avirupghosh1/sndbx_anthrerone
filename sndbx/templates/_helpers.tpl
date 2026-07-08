@@ -68,6 +68,15 @@ false
 {{- end -}}
 {{- end -}}
 
+{{- define "sndbx.templateRegistryImage" -}}
+{{- $image := default "" .Values.templateRegistry.internal.image -}}
+{{- if ne $image "" -}}
+{{- $image -}}
+{{- else -}}
+{{- printf "%s/registry:2" (.Values.images.apiService.repo | toString) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "sndbx.templateRegistryServer" -}}
 {{- if eq (include "sndbx.templateRegistryInternalEnabled" .) "true" -}}
 {{- printf "%s.%s.svc.cluster.local:%v" (include "sndbx.templateRegistryName" .) .Values.namespace .Values.templateRegistry.internal.servicePort -}}

@@ -13,11 +13,12 @@ stages:
   - deploy
 
 # Shared change set so all image builds and the deploy trigger together.
-# Keeps deploy-qa6 `needs` satisfied (api-service, runtime-gateway, gvisor).
+# Keeps deploy-qa6 `needs` satisfied for every image it consumes.
 .sndbx-changes: &sndbx-changes
   - .gitlab-ci.yml
   - api-service/**/*
   - runtime-gateway/**/*
+  - template-registry/**/*
   - sndbx/**/*
 
 variables:
@@ -43,7 +44,7 @@ variables:
   TEMPLATE_REGISTRY_REPO_PREFIX: ""
   TEMPLATE_REGISTRY_SERVER: ""
   TEMPLATE_REGISTRY_SECRET_NAME: "sndbx-qa6-tier1-secret"
-  TEMPLATE_REGISTRY_AUTH_REQUIRED: "true"
+  TEMPLATE_REGISTRY_AUTH_REQUIRED: "false"
   TEMPLATE_REGISTRY_LAYOUT: "auto"
   TEMPLATE_REGISTRY_INTERNAL_ENABLED: "auto"
   DATABASE_SECRET_NAME: "sndbx-qa6-tier1-secret"
@@ -51,6 +52,7 @@ variables:
   API_SERVICE_IMAGE_NAME: "api-service"
   RUNTIME_GATEWAY_IMAGE_NAME: "runtime-gateway"
   GVISOR_IMAGE_NAME: "dockerd-gvisor"
+  TEMPLATE_REGISTRY_IMAGE_NAME: "template-registry"
   POLL_INTERVAL: "15"
   MAX_WAIT_SECONDS: "1200"
 
@@ -75,7 +77,7 @@ variables:
         -s -D - -o /dev/null -w "\n%{http_code}")
 
       HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-      QUEUE_URL=$(echo "$RESPONSE" | grep -i "^Location:" | sed 's/Location: *//;s/\r//')
+      QUEUE_URL=$(echo "$RESPONSE" | grep -i "^Location:" | sed 's/^[^:]*: *//;s/\r//')
 
       if [ "$HTTP_CODE" -ne 201 ]; then
         echo "ERROR: Failed to trigger Jenkins job (HTTP $HTTP_CODE)"
@@ -192,6 +194,20 @@ build-runtime-gateway:
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
       changes: *sndbx-changes
 
+build-template-registry:
+  extends: .trigger-jenkins-and-wait
+  variables:
+    DOCKERFILE_PATH: "template-registry/Dockerfile"
+    DOCKER_CONTEXT_PATH: "template-registry"
+    IMAGE_NAME: "$TEMPLATE_REGISTRY_IMAGE_NAME"
+    DOTENV_IMAGE_NAME_VAR: "TEMPLATE_REGISTRY_BUILT_IMAGE_NAME"
+    DOTENV_IMAGE_TAG_VAR: "TEMPLATE_REGISTRY_BUILT_IMAGE_TAG"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
+    - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
+      changes: *sndbx-changes
+
 deploy-qa6:
   stage: deploy
   image: asia-south1-docker.pkg.dev/gc-qa6/gc-qa6/curl:latest
@@ -202,6 +218,8 @@ deploy-qa6:
     - job: build-runtime-gateway
       artifacts: true
     - job: build-gvisor-image
+      artifacts: true
+    - job: build-template-registry
       artifacts: true
   script:
     - set -euo pipefail
@@ -216,6 +234,7 @@ deploy-qa6:
       EXTRA_VALUES="--set images.apiService.repo=${DOCKER_REPO},images.apiService.name=${API_SERVICE_BUILT_IMAGE_NAME},images.apiService.tag=${API_SERVICE_BUILT_IMAGE_TAG},images.runtimeGateway.repo=${DOCKER_REPO},images.runtimeGateway.name=${RUNTIME_GATEWAY_BUILT_IMAGE_NAME},images.runtimeGateway.tag=${RUNTIME_GATEWAY_BUILT_IMAGE_TAG},images.dockerDind.repo=${DOCKER_REPO},images.dockerDind.name=${GVISOR_BUILT_IMAGE_NAME},images.dockerDind.tag=${GVISOR_BUILT_IMAGE_TAG}"
       EXTRA_VALUES="${EXTRA_VALUES},database.existingSecretName=${DATABASE_SECRET_NAME},database.existingSecretKey=${DATABASE_SECRET_KEY}"
       EXTRA_VALUES="${EXTRA_VALUES},templateRegistry.pushEnabled=true,templateRegistry.authRequired=${TEMPLATE_REGISTRY_AUTH_REQUIRED},templateRegistry.repoPrefix=${TEMPLATE_REGISTRY_REPO_PREFIX},templateRegistry.server=${TEMPLATE_REGISTRY_SERVER},templateRegistry.existingSecretName=${TEMPLATE_REGISTRY_SECRET_NAME},templateRegistry.layout=${TEMPLATE_REGISTRY_LAYOUT},templateRegistry.internal.enabled=${TEMPLATE_REGISTRY_INTERNAL_ENABLED}"
+      EXTRA_VALUES="${EXTRA_VALUES},templateRegistry.internal.image=${DOCKER_REPO}/${TEMPLATE_REGISTRY_BUILT_IMAGE_NAME}:${TEMPLATE_REGISTRY_BUILT_IMAGE_TAG}"
 
       RESPONSE=$(curl -X POST "$JENKINS_URL/$JENKINS_DEPLOY_JOB_PATH/buildWithParameters" \
         --user "$QA6_JENKINS_USER:$QA6_JENKINS_TOKEN" \
@@ -230,7 +249,7 @@ deploy-qa6:
         -s -D - -o /dev/null -w "\n%{http_code}")
 
       HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-      QUEUE_URL=$(echo "$RESPONSE" | grep -i "^Location:" | sed 's/Location: *//;s/\r//')
+      QUEUE_URL=$(echo "$RESPONSE" | grep -i "^Location:" | sed 's/^[^:]*: *//;s/\r//')
 
       if [ "$HTTP_CODE" -ne 201 ]; then
         echo "ERROR: Failed to trigger Jenkins deploy job (HTTP $HTTP_CODE)"

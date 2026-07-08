@@ -164,7 +164,7 @@ class SandboxManager:
     def is_warm_pool_leader(self) -> bool:
         cfg = self._config
         lease_name = str(getattr(cfg, "WARM_POOL_COORDINATOR_LEASE_NAME", "warm-pool-coordinator"))
-        return self.db.acquire_postgres_advisory_lock(lease_name)
+        return self.db.acquire_advisory_lock(lease_name)
 
     def _gateway_headers(self) -> Dict[str, str]:
         key = (getattr(self._config, "RUNTIME_GATEWAY_API_KEY", None) or "").strip()
@@ -535,7 +535,7 @@ class SandboxManager:
         extra_used_bytes_by_gateway: Optional[Dict[str, int]] = None,
     ) -> Optional[GatewayTarget]:
         best: Optional[GatewayTarget] = None
-        best_score: tuple[float, int, int, str] | None = None
+        best_score: tuple[float, int, int, int, str] | None = None
         image_ref = (preferred_image_ref or "").strip()
         statuses: Dict[str, Dict[str, Any]] = {}
         if len(candidates) > 1:
@@ -583,7 +583,8 @@ class SandboxManager:
                     cached = self._gateway_image_cache.get((target.instance_id, image_ref))
                 if cached and (time.time() - float(cached[0])) <= 10.0 and bool(cached[1]):
                     has_image_rank = 0
-            score = (ratio, used, has_image_rank, target.instance_id)
+            running_count = self.db.count_running_sandboxes(gateway_instance_id=target.instance_id)
+            score = (ratio, int(running_count), used, has_image_rank, target.instance_id)
             if best_score is None or score < best_score:
                 best = target
                 best_score = score
@@ -592,9 +593,9 @@ class SandboxManager:
                 "Scheduler decision: reason=free_disk gateway=%s disk_used_ratio=%.4f disk_used_bytes=%s image_ref=%s image_cached_rank=%s",
                 best.instance_id,
                 float(best_score[0]),
-                int(best_score[1]),
-                image_ref or "-",
                 int(best_score[2]),
+                image_ref or "-",
+                int(best_score[3]),
             )
         elif candidates:
             logger.warning(
@@ -641,56 +642,65 @@ class SandboxManager:
         segment = self.db.get_warm_pool_segment(warm_key)
         preferred_instance = str((segment or {}).get("preferred_gateway_instance_id") or "").strip()
         inventory = self._warm_pool_rows_by_gateway(warm_key)
-        inventory_targets: list[tuple[float, int, int, str, GatewayTarget]] = []
-        for instance_id, rows in inventory.items():
-            target = target_for_instance(targets, instance_id)
-            if target is not None:
-                status = self._gateway_runtime_status(target, force_refresh=force_refresh)
-                extra_used = int((extra_used_bytes_by_gateway or {}).get(target.instance_id) or 0)
-                used = int(status.get("disk_used_bytes") or 0) + max(0, extra_used)
-                total = int(status.get("disk_total_bytes") or 0)
-                ratio = (float(used) / float(total)) if total > 0 else float(status.get("disk_used_ratio") or 0.0)
-                warm_count = len(rows) + int((extra_warm_counts_by_gateway or {}).get(instance_id) or 0)
-                inventory_targets.append((-float(warm_count), ratio, used, target.instance_id, target))
-        inventory_targets.sort(key=lambda item: item[:4])
-        for _count_score, _ratio, _used, _instance_id, target in inventory_targets:
-            if self._gateway_can_accept_new_usage(
-                target,
-                force_refresh=force_refresh,
-                extra_used_bytes=int((extra_used_bytes_by_gateway or {}).get(target.instance_id) or 0),
-            ):
-                logger.info(
-                    "Scheduler decision: reason=max_warm_count gateway=%s template=%s warm_count=%s disk_used_ratio=%.4f",
-                    target.instance_id,
-                    template_id,
-                    int(-_count_score),
-                    float(_ratio),
-                )
-                return target
-        if preferred_instance:
-            preferred = target_for_instance(targets, preferred_instance)
-            if preferred is not None and self._gateway_can_accept_new_usage(
-                preferred,
-                force_refresh=force_refresh,
-                extra_used_bytes=int((extra_used_bytes_by_gateway or {}).get(preferred.instance_id) or 0),
-            ):
-                logger.info(
-                    "Scheduler decision: reason=preferred_segment gateway=%s template=%s",
-                    preferred.instance_id,
-                    template_id,
-                )
-                return preferred
         candidate_targets = targets if registry_ref or not owner_instance else []
         preferred_image_ref = (
             str((segment or {}).get("ready_image_ref") or "").strip()
             or registry_ref
         )
-        return self._best_gateway_by_free_disk(
-            candidate_targets,
-            force_refresh=force_refresh,
-            preferred_image_ref=preferred_image_ref or None,
-            extra_used_bytes_by_gateway=extra_used_bytes_by_gateway,
-        )
+        candidates: list[tuple[int, int, float, int, int, str, GatewayTarget]] = []
+        for target in candidate_targets:
+            status = self._gateway_runtime_status(target, force_refresh=force_refresh)
+            if not status.get("reachable"):
+                continue
+            extra_used = int((extra_used_bytes_by_gateway or {}).get(target.instance_id) or 0)
+            used = int(status.get("disk_used_bytes") or 0) + max(0, extra_used)
+            total = int(status.get("disk_total_bytes") or 0)
+            ratio = (float(used) / float(total)) if total > 0 else float(status.get("disk_used_ratio") or 0.0)
+            limit_ratio = float(getattr(self._config, "RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO", 0.80) or 0.80)
+            if ratio >= limit_ratio:
+                logger.info(
+                    "Runtime-gateway shard full: gateway=%s used=%.1f%% limit=%.1f%% used_bytes=%s total_bytes=%s source=%s",
+                    target.instance_id,
+                    ratio * 100.0,
+                    limit_ratio * 100.0,
+                    used,
+                    total,
+                    str(status.get("disk_metric_source") or ""),
+                )
+                continue
+            warm_count = len(inventory.get(target.instance_id, [])) + int(
+                (extra_warm_counts_by_gateway or {}).get(target.instance_id) or 0
+            )
+            running_count = self.db.count_running_sandboxes(gateway_instance_id=target.instance_id) + int(
+                (extra_warm_counts_by_gateway or {}).get(target.instance_id) or 0
+            )
+            preferred_rank = 0 if preferred_instance and target.instance_id == preferred_instance else 1
+            candidates.append(
+                (
+                    int(warm_count),
+                    int(running_count),
+                    float(ratio),
+                    int(used),
+                    int(preferred_rank),
+                    target.instance_id,
+                    target,
+                )
+            )
+        candidates.sort(key=lambda item: item[:6])
+        if candidates:
+            warm_count, running_count, ratio, used, _preferred_rank, _instance_id, target = candidates[0]
+            logger.info(
+                "Scheduler decision: reason=balanced_warm_pool gateway=%s template=%s warm_count=%s running_count=%s disk_used_ratio=%.4f disk_used_bytes=%s image_ref=%s",
+                target.instance_id,
+                template_id,
+                warm_count,
+                running_count,
+                ratio,
+                used,
+                preferred_image_ref or "-",
+            )
+            return target
+        return None
 
     def acquire_warm_pool_sandbox(
         self,

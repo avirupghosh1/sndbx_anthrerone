@@ -49,7 +49,7 @@ spec:
       {{- end }}
       containers:
         - name: registry
-          image: {{ .Values.templateRegistry.internal.image | quote }}
+          image: {{ include "sndbx.templateRegistryImage" . | quote }}
           imagePullPolicy: {{ .Values.templateRegistry.internal.pullPolicy }}
           ports:
             - name: registry

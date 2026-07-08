@@ -58,7 +58,12 @@ if portal_static_dir.exists():
     app.mount("/portal/static", StaticFiles(directory=str(portal_static_dir)), name="portal-static")
 
 # Initialize database
-db = Database(config.DATABASE_URL)
+db = Database(
+    config.DATABASE_URL,
+    database_type=getattr(config, "DATABASE_TYPE", ""),
+    database_username=getattr(config, "DATABASE_USERNAME", ""),
+    database_password=getattr(config, "DATABASE_PASSWORD", ""),
+)
 
 from orchestrator.execution_backend import build_execution_backend
 
@@ -91,7 +96,7 @@ app.include_router(portal.router)
 async def health_check():
     """Cheap health endpoint for Kubernetes probes.
 
-    Keep this independent of Docker/runtime-gateway/Postgres-heavy diagnostics. If
+    Keep this independent of Docker/runtime-gateway/database-heavy diagnostics. If
     probes block behind runtime checks, Kubernetes can kill the control plane in
     the middle of sandbox creation and break runtime-gateway route lookups.
     """
@@ -165,7 +170,7 @@ async def startup_event():
     ensure_bootstrap_client_and_key()
     logger.info("Starting Sandbox API Server (role=%s)", getattr(config, "API_SERVICE_ROLE", "control"))
     logger.info(f"API Key: {config.API_KEY}")
-    logger.info("Database: PostgreSQL")
+    logger.info("Database: %s", getattr(config, "DATABASE_BACKEND", "unknown"))
     logger.info(f"Execution plane: {sandbox_manager.get_execution_kind()}")
     wp = getattr(sandbox_manager, "warm_pool", None)
     if wp is not None:

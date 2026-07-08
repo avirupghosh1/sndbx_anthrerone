@@ -193,18 +193,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: TEMPLATE_REGISTRY_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: sandbox-secrets
-                  key: TEMPLATE_REGISTRY_USERNAME
-                  optional: true
-            - name: TEMPLATE_REGISTRY_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: sandbox-secrets
-                  key: TEMPLATE_REGISTRY_PASSWORD
-                  optional: true
           readinessProbe:
             httpGet:
               path: /health
@@ -259,11 +247,11 @@ data:
   # Minikube's default storage provisioner backs every PVC from the same node filesystem,
   # so statvfs(/var/lib/docker) is identical for all shards. Use the declared local PVC
   # capacity so scheduling sees per-shard Docker graph usage during local validation.
-  DOCKER_GRAPH_CAPACITY_BYTES: "107374182400"
+  DOCKER_GRAPH_CAPACITY_BYTES: "53687091200"
   TEMPLATE_REGISTRY_PUSH_ENABLED: "true"
-  TEMPLATE_REGISTRY_REPO_PREFIX: "public.ecr.aws/j9i0k7m2/sndbx/sndbx-1"
-  TEMPLATE_REGISTRY_SERVER: "public.ecr.aws"
-  TEMPLATE_REGISTRY_AUTH_REQUIRED: "true"
+  TEMPLATE_REGISTRY_REPO_PREFIX: "registry.sandboxes.svc.cluster.local:5000/templates"
+  TEMPLATE_REGISTRY_SERVER: "registry.sandboxes.svc.cluster.local:5000"
+  TEMPLATE_REGISTRY_AUTH_REQUIRED: "false"
   TEMPLATE_REGISTRY_LAYOUT: "auto"
 ---
 apiVersion: networking.k8s.io/v1

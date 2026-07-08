@@ -26,10 +26,19 @@ imagePullSecrets:
   - spr-nexus
 
 database:
-  # Postgres is required; set either url or existingSecretName.
+  # Production reads database settings from the app Secret by default.
+  # DATABASE_TYPE must be postgres or mongo. DATABASE_URL can be a full DSN or
+  # a host/path endpoint. For MongoDB, DATABASE_USERNAME may be empty only
+  # when auth is disabled or the username is already present in DATABASE_URL.
+  type: ""
   url: ""
+  username: ""
+  password: ""
   existingSecretName: ""
   existingSecretKey: DATABASE_URL
+  typeExistingSecretKey: DATABASE_TYPE
+  usernameExistingSecretKey: DATABASE_USERNAME
+  passwordExistingSecretKey: DATABASE_PASSWORD
 
 serviceAccount:
   create: true
@@ -123,7 +132,7 @@ runtimeGateway:
     persistence:
       enabled: true
       size: 50Gi
-      capacityBytes: "107374182400"
+      capacityBytes: "53687091200"
       accessModes:
         - ReadWriteOnce
       storageClassName: ""
@@ -173,6 +182,7 @@ config:
     RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO: "0.15"
     RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC: "2.0"
     WARM_POOL_IMAGE_PREFETCH_ENABLED: "true"
+  
   runtimeGateway:
     SANDBOX_DOMAIN: "sndbx.example.com"
     SANDBOX_INGRESS_DEBUG: "false"
@@ -196,13 +206,13 @@ config:
     TEMPLATE_REGISTRY_CACHE_UPSTREAM_SERVER: "{{ .Values.templateRegistry.internal.proxy.remoteServer }}"
 
 templateRegistry:
-  # Enable this before expecting custom built templates to move freely across multiple
-  # runtime-gateway shards. Without it, template images remain pinned to their build owner.
-  pushEnabled: false
+  # Production default: save built templates in the chart-managed in-cluster
+  # registry pod, avoiding external registry credentials.
+  pushEnabled: true
   authRequired: false
   repoPrefix: ""
-  # auto keeps Artifact Registry/GCR-style repo-per-template refs and uses a single
-  # configured repository with template-specific tags for AWS ECR hosts.
+  # auto keeps registry/repository-per-template refs unless an explicit external
+  # registry layout is configured later.
   layout: auto
   server: ""
   existingSecretName: ""
@@ -212,12 +222,15 @@ templateRegistry:
     # auto enables the in-cluster registry when pushEnabled=true and repoPrefix is empty.
     # Set false to require an external registry; set true to force the internal registry.
     enabled: auto
-    image: registry:2
+    # CI sets this to the template-registry image built from
+    # template-registry/Dockerfile. Leave blank for manual deploys to pull
+    # <images.apiService.repo>/registry:2, or set a full image ref.
+    image: ""
     pullPolicy: IfNotPresent
     servicePort: 5000
     proxy:
       # Optional pull-through cache mode. Use this only when the internal registry
-      # should front an upstream registry such as public.ecr.aws or a private ECR host.
+      # should front an upstream registry.
       enabled: false
       remoteUrl: ""
       remoteServer: ""
@@ -242,6 +255,10 @@ secrets:
     apiKey: ""
     internalApiKey: ""
     portalSessionSecret: ""
+    databaseType: ""
+    databaseUrl: ""
+    databaseUsername: ""
+    databasePassword: ""
     registryUsername: ""
     registryPassword: ""
 

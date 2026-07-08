@@ -32,13 +32,35 @@ def _resolve_ingress_auto_publish_upstream() -> bool:
     return _default_ingress_auto_publish_upstream()
 
 
+def _normalize_database_type(raw: str, database_url: str) -> str:
+    value = (raw or "").strip().lower()
+    aliases = {
+        "postgres": "postgres",
+        "postgresql": "postgres",
+        "pg": "postgres",
+        "mongo": "mongo",
+        "mongodb": "mongo",
+    }
+    if value:
+        if value not in aliases:
+            raise RuntimeError("DATABASE_TYPE must be postgres or mongo")
+        return aliases[value]
+    if database_url.startswith(("mongodb://", "mongodb+srv://")):
+        return "mongo"
+    if database_url.startswith(("postgres://", "postgresql://")):
+        return "postgres"
+    raise RuntimeError("DATABASE_TYPE is required when DATABASE_URL does not include a database scheme")
+
+
 def _require_database_url() -> str:
     value = (os.getenv("DATABASE_URL") or "").strip()
     if not value:
-        raise RuntimeError("DATABASE_URL is required and must point to PostgreSQL")
-    if not value.startswith(("postgres://", "postgresql://")):
-        raise RuntimeError("DATABASE_URL must use postgres:// or postgresql://")
+        raise RuntimeError("DATABASE_URL is required and must point to PostgreSQL or MongoDB")
     return value
+
+
+def _database_backend(database_type: str) -> str:
+    return "mongodb" if database_type == "mongo" else "postgresql"
 
 
 class Config:
@@ -57,6 +79,14 @@ class Config:
     
     # Database
     DATABASE_URL: str = _require_database_url()
+    DATABASE_TYPE: str = _normalize_database_type(os.getenv("DATABASE_TYPE", ""), DATABASE_URL)
+    DATABASE_BACKEND: str = _database_backend(DATABASE_TYPE)
+    DATABASE_USERNAME: str = os.getenv("DATABASE_USERNAME", "").strip()
+    DATABASE_PASSWORD: str = (
+        os.getenv("DATABASE_PASSWORD") or os.getenv("MONGODB_PASSWORD") or ""
+    ).strip()
+    # Backward-compatible alias used by older callers/secrets.
+    MONGODB_PASSWORD: str = DATABASE_PASSWORD
 
     # Sandbox engine is Docker only. Isolation can be default runc or Docker's runsc/gVisor runtime.
     SANDBOX_ENGINE: str = os.getenv("SANDBOX_ENGINE", "docker").strip().lower()

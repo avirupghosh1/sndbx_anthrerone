@@ -26,6 +26,9 @@ Both manifests expect a `sandbox-secrets` secret in namespace `sandboxes` with:
 - `API_KEY`
 - `INTERNAL_API_KEY`
 - `PORTAL_SESSION_SECRET`
+- `DATABASE_TYPE`
+- `DATABASE_USERNAME`
+- `DATABASE_PASSWORD`
 
 ## Access Modes
 
@@ -51,16 +54,14 @@ In local mode:
 
 ## Persistence
 
-- API metadata persists in PostgreSQL via `DATABASE_URL`
+- API metadata persists via `DATABASE_TYPE` plus `DATABASE_URL`, using PostgreSQL or MongoDB
 - Docker image/container graph persists in per-shard runtime-gateway PVCs at `/var/lib/docker`
 - For clean registry-pull validation, deploy the Helm chart with `runtimeGateway.docker.persistence.enabled=false` so every restarted shard starts with an empty Docker graph.
 
 ## Template Registry
 
-- Non-ECR registries keep the existing repository-per-template layout: `<repoPrefix>/<template-id>:<tag>`.
-- AWS ECR public/private URIs use a single configured repository with template-specific tags when `TEMPLATE_REGISTRY_LAYOUT=auto` or `single_repository`: `<repoPrefix>:<template-id>-<tag>`.
-- For ECR auth, set `TEMPLATE_REGISTRY_SERVER` to the registry host, `TEMPLATE_REGISTRY_USERNAME=AWS`, and `TEMPLATE_REGISTRY_PASSWORD` to the output of `aws ecr-public get-login-password --region us-east-1` for public ECR or `aws ecr get-login-password --region <region>` for private ECR.
 - In Helm and the GitLab deploy job, `templateRegistry.pushEnabled=true` with no template registry repo prefix uses the chart-managed internal registry by default. That path persists template images in the registry PVC and avoids requiring external registry credentials.
+- Jenkins builds a `template-registry` image from `template-registry/Dockerfile` and passes that image to Helm for the registry pod. Manual deploys can still set `templateRegistry.internal.image`, or fall back to `<images.apiService.repo>/registry:2`.
 
 ## Current Supported Flow
 

@@ -29,7 +29,13 @@ _PBKDF2_ITERS = 240_000
 
 
 def _db() -> Database:
-    return Database(get_config().DATABASE_URL)
+    cfg = get_config()
+    return Database(
+        cfg.DATABASE_URL,
+        database_type=getattr(cfg, "DATABASE_TYPE", ""),
+        database_username=getattr(cfg, "DATABASE_USERNAME", ""),
+        database_password=getattr(cfg, "DATABASE_PASSWORD", ""),
+    )
 
 
 def _utc_now() -> datetime:

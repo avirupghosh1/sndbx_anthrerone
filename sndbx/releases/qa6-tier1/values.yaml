@@ -12,6 +12,9 @@ replicas:
 database:
   existingSecretName: sndbx-qa6-tier1-secret
   existingSecretKey: DATABASE_URL
+  typeExistingSecretKey: DATABASE_TYPE
+  usernameExistingSecretKey: DATABASE_USERNAME
+  passwordExistingSecretKey: DATABASE_PASSWORD
 
 images:
   apiService:
@@ -58,11 +61,13 @@ runtimeGateway:
 
 templateRegistry:
   pushEnabled: true
-  authRequired: true
-  repoPrefix: asia-south1-docker.pkg.dev/gc-qa6/gc-qa6/sndbx-templates
-  layout: repository_per_template
-  server: asia-south1-docker.pkg.dev
-  existingSecretName: sndbx-qa6-tier1-secret
+  authRequired: false
+  repoPrefix: ""
+  layout: auto
+  server: ""
+  existingSecretName: ""
+  internal:
+    enabled: true
 
 config:
   apiService:

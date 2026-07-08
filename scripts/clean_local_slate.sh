@@ -5,7 +5,8 @@ set -euo pipefail
 # It removes runtime containers/images, runtime/template DB rows, and local PVCs.
 
 NAMESPACE="${NAMESPACE:-sandboxes}"
-DB_URL="${DB_URL:-postgresql://avirup.ghosh@localhost:5433/postgres}"
+DB_URL="${DB_URL:-mongodb://127.0.0.1:27017/sandboxes}"
+DB_TYPE="${DB_TYPE:-}"
 EXPECTED_CONTEXT="${EXPECTED_CONTEXT:-minikube}"
 CLEAN_SLATE_CONFIRM="${CLEAN_SLATE_CONFIRM:-}"
 
@@ -13,6 +14,7 @@ API_DEPLOY="${API_DEPLOY:-api-service}"
 REGISTRY_DEPLOY="${REGISTRY_DEPLOY:-registry}"
 RUNTIME_STS="${RUNTIME_STS:-runtime-gateway}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-dockerd}"
+DOCKER_HOST_IN_POD="${DOCKER_HOST_IN_POD:-tcp://127.0.0.1:2375}"
 
 PRUNE_DOCKER="${PRUNE_DOCKER:-1}"
 TRUNCATE_DB="${TRUNCATE_DB:-1}"
@@ -21,6 +23,35 @@ WAIT_TIMEOUT_SEC="${WAIT_TIMEOUT_SEC:-180}"
 
 section() {
   printf '\n===== %s =====\n' "$1"
+}
+
+is_mongo_url() {
+  local db_type_lc
+  db_type_lc="$(printf '%s' "$DB_TYPE" | tr '[:upper:]' '[:lower:]')"
+  case "$db_type_lc" in
+    mongo|mongodb) return 0 ;;
+    postgres|postgresql|pg) return 1 ;;
+  esac
+  case "$DB_URL" in
+    mongodb://*|mongodb+srv://*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+run_mongo() {
+  mongosh "$DB_URL" --quiet --eval "$1"
+}
+
+require_tool() {
+  local tool="$1"
+  local hint="${2:-}"
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "Required command not found: $tool" >&2
+    if [ -n "$hint" ]; then
+      echo "$hint" >&2
+    fi
+    exit 2
+  fi
 }
 
 exists() {
@@ -101,8 +132,16 @@ EOF
 
 require_confirmation
 require_context
-command -v kubectl >/dev/null
-command -v psql >/dev/null
+require_tool kubectl
+if is_mongo_url; then
+  if [ "$TRUNCATE_DB" = "1" ]; then
+    require_tool mongosh "Install MongoDB Shell or rerun with TRUNCATE_DB=0 to skip Mongo cleanup."
+  fi
+else
+  if [ "$TRUNCATE_DB" = "1" ]; then
+    require_tool psql "Install psql or rerun with TRUNCATE_DB=0 to skip PostgreSQL cleanup."
+  fi
+fi
 
 api_replicas="$(replicas_for deployment "$API_DEPLOY")"
 registry_replicas="$(replicas_for deployment "$REGISTRY_DEPLOY")"
@@ -113,6 +152,7 @@ section "Target"
 printf 'context=%s\n' "$(kubectl config current-context)"
 printf 'namespace=%s\n' "$NAMESPACE"
 printf 'database=%s\n' "$DB_URL"
+printf 'docker_host_in_pod=%s\n' "$DOCKER_HOST_IN_POD"
 printf 'api_replicas=%s registry_replicas=%s runtime_replicas=%s\n' \
   "$api_replicas" "$registry_replicas" "$runtime_replicas"
 
@@ -129,13 +169,16 @@ if [ "$PRUNE_DOCKER" = "1" ]; then
       continue
     fi
     echo "prune $pod"
-    kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- sh -lc '
-      ids="$(docker ps -aq)"
+    if ! kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- sh -lc '
+      docker_host="$1"
+      ids="$(docker --host "$docker_host" ps -aq)"
       if [ -n "$ids" ]; then
-        docker rm -f $ids >/dev/null
+        docker --host "$docker_host" rm -f $ids >/dev/null
       fi
-      docker system prune -a --volumes -f
-    '
+      docker --host "$docker_host" system prune -a --volumes -f
+    ' sh "$DOCKER_HOST_IN_POD"; then
+      echo "warning: failed to prune $pod; continuing because PVC deletion will clear local Docker graph" >&2
+    fi
   done < <(runtime_pods)
 fi
 
@@ -153,6 +196,25 @@ wait_for_local_pods_gone
 
 if [ "$TRUNCATE_DB" = "1" ]; then
   section "Truncate runtime database rows"
+  if is_mongo_url; then
+    run_mongo '
+      [
+        "agent_messages",
+        "commands_history",
+        "agents",
+        "sandbox_snapshots",
+        "sandboxes",
+        "sandbox_templates",
+        "template_builds",
+        "warm_pool_segments",
+        "service_leases",
+        "distributed_locks",
+      ].forEach((name) => {
+        const result = db.getCollection(name).deleteMany({});
+        print(name + ": deleted " + result.deletedCount);
+      });
+    '
+  else
   psql "$DB_URL" -v ON_ERROR_STOP=1 -c "
     TRUNCATE
       agent_messages,
@@ -166,6 +228,7 @@ if [ "$TRUNCATE_DB" = "1" ]; then
       service_leases
     RESTART IDENTITY CASCADE;
   "
+  fi
 fi
 
 if [ "$DELETE_PVCS" = "1" ]; then
@@ -188,6 +251,17 @@ fi
 
 section "Post-clean checks"
 kubectl -n "$NAMESPACE" get pods,pvc || true
+if is_mongo_url; then
+  run_mongo '
+    printjson([
+      {collection: "sandboxes", count: db.sandboxes.countDocuments({})},
+      {collection: "sandbox_templates", count: db.sandbox_templates.countDocuments({})},
+      {collection: "template_builds", count: db.template_builds.countDocuments({})},
+      {collection: "warm_pool_segments", count: db.warm_pool_segments.countDocuments({})},
+      {collection: "service_leases", count: db.service_leases.countDocuments({})},
+    ]);
+  '
+else
 psql "$DB_URL" -v ON_ERROR_STOP=1 -c "
   SELECT 'sandboxes' AS table_name, count(*) FROM sandboxes
   UNION ALL SELECT 'sandbox_templates', count(*) FROM sandbox_templates
@@ -196,6 +270,7 @@ psql "$DB_URL" -v ON_ERROR_STOP=1 -c "
   UNION ALL SELECT 'service_leases', count(*) FROM service_leases
   ORDER BY table_name;
 "
+fi
 
 section "Next"
 cat <<EOF

@@ -45,12 +45,28 @@ def api_key_prefix(api_key: str) -> str:
 
 
 @lru_cache(maxsize=4)
-def _db_for_url(database_url: str) -> Database:
-    return Database(database_url)
+def _db_for_url(
+    database_url: str,
+    database_type: str = "",
+    database_username: str = "",
+    database_password: str = "",
+) -> Database:
+    return Database(
+        database_url,
+        database_type=database_type,
+        database_username=database_username,
+        database_password=database_password,
+    )
 
 
 def _db() -> Database:
-    return _db_for_url(get_config().DATABASE_URL)
+    cfg = get_config()
+    return _db_for_url(
+        cfg.DATABASE_URL,
+        getattr(cfg, "DATABASE_TYPE", ""),
+        getattr(cfg, "DATABASE_USERNAME", ""),
+        getattr(cfg, "DATABASE_PASSWORD", ""),
+    )
 
 
 def _internal_expected_key() -> str:

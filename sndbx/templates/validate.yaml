@@ -10,8 +10,8 @@
 {{- if and (not .Values.secrets.create) (eq (default "" .Values.secrets.name) "") -}}
 {{- fail "set secrets.name to an existing Kubernetes Secret or enable secrets.create" -}}
 {{- end -}}
-{{- if and .Values.secrets.create (or (eq (default "" .Values.secrets.data.apiKey) "") (eq (default "" .Values.secrets.data.internalApiKey) "") (eq (default "" .Values.secrets.data.portalSessionSecret) "")) -}}
-{{- fail "secrets.create=true requires non-empty secrets.data.apiKey, secrets.data.internalApiKey, and secrets.data.portalSessionSecret" -}}
+{{- if and .Values.secrets.create (or (eq (default "" .Values.secrets.data.apiKey) "") (eq (default "" .Values.secrets.data.internalApiKey) "") (eq (default "" .Values.secrets.data.portalSessionSecret) "") (eq (default "" .Values.secrets.data.databaseUrl) "") (eq (default "" .Values.secrets.data.databaseType) "") (eq (default "" .Values.secrets.data.databasePassword) "")) -}}
+{{- fail "secrets.create=true requires non-empty api/internal/portal and database url/type/password secret values" -}}
 {{- end -}}
 {{- if eq (len .Values.ingress.apiHosts) 0 -}}
 {{- fail "ingress.apiHosts must contain at least one host" -}}
@@ -19,11 +19,19 @@
 {{- if eq (len .Values.ingress.sandboxHosts) 0 -}}
 {{- fail "ingress.sandboxHosts must contain at least one host" -}}
 {{- end -}}
-{{- if and (eq (default "" .Values.database.url) "") (eq (default "" .Values.database.existingSecretName) "") -}}
-{{- fail "PostgreSQL is required: set database.url or database.existingSecretName" -}}
+{{- $databaseSecretName := .Values.database.existingSecretName | default .Values.secrets.name -}}
+{{- if and (eq (default "" $databaseSecretName) "") .Values.secrets.create -}}
+{{- $databaseSecretName = include "sndbx.secretName" . -}}
 {{- end -}}
-{{- if and (ne (default "" .Values.database.url) "") (not (or (hasPrefix "postgres://" .Values.database.url) (hasPrefix "postgresql://" .Values.database.url))) -}}
-{{- fail "database.url must use postgres:// or postgresql://" -}}
+{{- if and (eq (default "" .Values.database.url) "") (eq (default "" $databaseSecretName) "") -}}
+{{- fail "database is required: provide DATABASE_URL in secrets.name or set database.url" -}}
+{{- end -}}
+{{- $databaseType := lower (default "" .Values.database.type) -}}
+{{- if and (ne (default "" .Values.database.url) "") (eq (default "" $databaseSecretName) "") (eq $databaseType "") (not (or (hasPrefix "postgres://" .Values.database.url) (hasPrefix "postgresql://" .Values.database.url) (hasPrefix "mongodb://" .Values.database.url) (hasPrefix "mongodb+srv://" .Values.database.url))) -}}
+{{- fail "database.type is required when database.url does not include a supported database scheme" -}}
+{{- end -}}
+{{- if and (ne $databaseType "") (not (has $databaseType (list "postgres" "postgresql" "pg" "mongo" "mongodb"))) -}}
+{{- fail "database.type must be postgres or mongo" -}}
 {{- end -}}
 {{- $registryLayout := default "auto" .Values.templateRegistry.layout -}}
 {{- if not (has $registryLayout (list "auto" "repository_per_template" "single_repository")) -}}
@@ -45,10 +53,6 @@
 {{- end -}}
 {{- if and .Values.templateRegistry.internal.proxy.enabled (or (eq (default "" .Values.templateRegistry.internal.proxy.remoteUrl) "") (eq (default "" .Values.templateRegistry.internal.proxy.remoteServer) "")) -}}
 {{- fail "templateRegistry.internal.proxy.enabled=true requires templateRegistry.internal.proxy.remoteUrl and remoteServer" -}}
-{{- end -}}
-{{- $repoPrefix := default "" .Values.templateRegistry.repoPrefix -}}
-{{- if and .Values.templateRegistry.pushEnabled (ne $repoPrefix "") (or (contains "public.ecr.aws" $repoPrefix) (contains ".dkr.ecr." $repoPrefix)) (not .Values.templateRegistry.authRequired) -}}
-{{- fail "AWS ECR templateRegistry.repoPrefix requires templateRegistry.authRequired=true with registry credentials, or omit repoPrefix to use the internal registry" -}}
 {{- end -}}
 {{- $registrySecretName := .Values.templateRegistry.existingSecretName | default .Values.secrets.name -}}
 {{- if and (eq (include "sndbx.templateRegistryAuthRequired" .) "true") (not .Values.secrets.create) (eq (default "" $registrySecretName) "") -}}
