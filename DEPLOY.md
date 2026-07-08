@@ -197,17 +197,18 @@ With `templateRegistry.pushEnabled=true`, Helm creates:
 The registry pod image is built by the Jenkins pipeline from
 `template-registry/Dockerfile`, which wraps the standard Docker distribution
 registry image. The deploy job passes that built image to Helm as
-`templateRegistry.internal.image`.
+`images.templateRegistry.repo`, `images.templateRegistry.name`, and
+`images.templateRegistry.tag`.
 
 For manual deploys where no CI-built registry image is passed, the chart falls
 back to the configured production image repo, rendered as:
 
 ```text
-<images.apiService.repo>/registry:3
+<images.templateRegistry.repo>/registry:3
 ```
 
-Set `templateRegistry.internal.image` directly if you want a different
-pre-existing image ref.
+Set `templateRegistry.internal.image` only if you need a backward-compatible
+full-image override.
 
 Runtime-gateway then pushes template images to:
 

@@ -32,6 +32,11 @@ images:
     name: dockerd-gvisor
     tag: CHANGE_ME
     pullPolicy: IfNotPresent
+  templateRegistry:
+    repo: prod-nexus.sprinklr.com:8123
+    name: template-registry
+    tag: CHANGE_ME
+    pullPolicy: IfNotPresent
 
 apiService:
   resources:

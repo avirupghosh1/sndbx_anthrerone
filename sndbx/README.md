@@ -35,7 +35,7 @@ Expected image override keys from GitLab/Jenkins:
 - `templateRegistry.server`
 - `templateRegistry.existingSecretName`
 - `templateRegistry.internal.enabled`
-- `templateRegistry.internal.image`
+- `images.templateRegistry`
 
 The chart deploys:
 
@@ -65,7 +65,7 @@ Important production notes:
 - `api-service` requires PostgreSQL or MongoDB via `DATABASE_TYPE=postgres|mongo`; there is no local database fallback.
 - `DATABASE_URL` may be a full DSN or a host/path endpoint. The app injects `DATABASE_USERNAME` and `DATABASE_PASSWORD` when credentials are not already present. For MongoDB, include the database name in the URI path or set `MONGODB_DATABASE`; if `DATABASE_USERNAME` is empty and `DATABASE_PASSWORD` is set, the username must already be present in `DATABASE_URL`.
 - The Jenkins/image pipeline must publish four images for a full release: `api-service`, `runtime-gateway`, `dockerd-gvisor`, and `template-registry`.
-- The internal registry pod uses the CI-built `template-registry` image. For manual deploys, leave `templateRegistry.internal.image` empty to pull `<images.apiService.repo>/registry:3`, or set it to another pre-existing image.
+- The internal registry pod uses the CI-built `template-registry` image through `images.templateRegistry.*`. For manual deploys, it can pull `<images.templateRegistry.repo>/registry:3`, or you can set `templateRegistry.internal.image` as a full-image override.
 - Production template builds push to the chart-managed internal registry pod by default. No external template-registry credentials are required.
 - With `templateRegistry.pushEnabled=true` and an empty `templateRegistry.repoPrefix`, `templateRegistry.internal.enabled=auto` creates an in-cluster registry Deployment, Service, and PVC. Runtime-gateway pushes template images to `<release>-template-registry.<namespace>.svc.cluster.local:5000/templates`, and dockerd is configured with that internal registry as insecure HTTP.
 - For a clean registry-pull test, set `runtimeGateway.docker.persistence.enabled=false`; production keeps it `true` by default.

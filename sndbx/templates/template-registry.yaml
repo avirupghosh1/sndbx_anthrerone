@@ -50,7 +50,7 @@ spec:
       containers:
         - name: registry
           image: {{ include "sndbx.templateRegistryImage" . | quote }}
-          imagePullPolicy: {{ .Values.templateRegistry.internal.pullPolicy }}
+          imagePullPolicy: {{ tpl (.Values.templateRegistry.internal.pullPolicy | toString) . }}
           ports:
             - name: registry
               containerPort: {{ .Values.templateRegistry.internal.servicePort }}

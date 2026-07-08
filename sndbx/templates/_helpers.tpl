@@ -73,7 +73,7 @@ false
 {{- if ne $image "" -}}
 {{- $image -}}
 {{- else -}}
-{{- printf "%s/registry:3" (.Values.images.apiService.repo | toString) -}}
+{{- include "sndbx.image" .Values.images.templateRegistry -}}
 {{- end -}}
 {{- end -}}
 

@@ -63,6 +63,11 @@ images:
     name: dockerd-gvisor
     tag: CHANGE_ME
     pullPolicy: IfNotPresent
+  templateRegistry:
+    repo: prod-nexus.sprinklr.com:8123
+    name: registry
+    tag: "3"
+    pullPolicy: IfNotPresent
 
 service:
   apiService:
@@ -222,11 +227,10 @@ templateRegistry:
     # auto enables the in-cluster registry when pushEnabled=true and repoPrefix is empty.
     # Set false to require an external registry; set true to force the internal registry.
     enabled: auto
-    # CI sets this to the template-registry image built from
-    # template-registry/Dockerfile. Leave blank for manual deploys to pull
-    # <images.apiService.repo>/registry:3, or set a full image ref.
+    # Backward-compatible full image override. Prefer images.templateRegistry
+    # for normal Helm/Jenkins releases.
     image: ""
-    pullPolicy: IfNotPresent
+    pullPolicy: "{{ .Values.images.templateRegistry.pullPolicy }}"
     servicePort: 5000
     proxy:
       # Optional pull-through cache mode. Use this only when the internal registry

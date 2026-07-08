@@ -61,7 +61,7 @@ In local mode:
 ## Template Registry
 
 - In Helm and the GitLab deploy job, `templateRegistry.pushEnabled=true` with no template registry repo prefix uses the chart-managed internal registry by default. That path persists template images in the registry PVC and avoids requiring external registry credentials.
-- Jenkins builds a `template-registry` image from `template-registry/Dockerfile` and passes that image to Helm for the registry pod. Manual deploys can still set `templateRegistry.internal.image`, or fall back to `<images.apiService.repo>/registry:3`.
+- Jenkins builds a `template-registry` image from `template-registry/Dockerfile` and passes that image through `images.templateRegistry.*` for the registry pod. Manual deploys can fall back to `<images.templateRegistry.repo>/registry:3`, or set `templateRegistry.internal.image` as a full-image override.
 
 ## Current Supported Flow
 
