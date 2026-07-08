@@ -2,10 +2,10 @@ fastapi==0.139.0
 uvicorn==0.51.0
 pydantic>=2.12.0,<3
 docker[ssh]>=7.1.0,<8
-pytest==7.4.3
+pytest==9.0.3
 httpx==0.25.2
 websockets>=12.0,<15
-python-dotenv==1.0.0
+python-dotenv==1.2.2
 psycopg[binary]>=3.2.0,<4
 pymongo[srv]>=4.7.0,<5
 dockerfile-parse>=2.0.0,<3
