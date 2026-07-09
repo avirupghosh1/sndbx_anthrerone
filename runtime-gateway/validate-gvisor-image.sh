@@ -4,11 +4,11 @@
 #   CVE-2025-15467, CVE-2025-69419, CVE-2025-69420, CVE-2025-69421
 #   CVE-2026-28387, CVE-2026-28388, CVE-2026-28389, CVE-2026-28390
 #   CVE-2026-31789 (CRITICAL), CVE-2026-31790
-# Docker CLI must be >= 29.2.0 (CVE-2025-15558).
+# Docker CLI must match the pinned patched docker:29.6.1-dind-alpine3.24 base.
 set -eu
 
 MIN_OPENSSL="3.5.6-r0"
-MIN_DOCKER_CLI="29.2.0"
+MIN_DOCKER_CLI="29.6.1"
 
 fail=0
 
@@ -53,6 +53,7 @@ require_docker_cli_min() {
 
 echo "=== gVisor DinD image security validation ==="
 echo "Alpine release: $(cat /etc/alpine-release 2>/dev/null || echo unknown)"
+echo "OpenSSL runtime: $(openssl version 2>/dev/null || echo unavailable)"
 
 require_apk_min openssl "$MIN_OPENSSL"
 require_apk_min libssl3 "$MIN_OPENSSL"
