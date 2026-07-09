@@ -2,9 +2,10 @@
 #
 # Build (downloads runsc inside the image; ~171MB):
 #   cd cont_in_vm
-#   docker build -f runtime-gateway/Dockerfile.gvisor -t dockerd-gvisor:28 runtime-gateway
+#   docker build -f runtime-gateway/Dockerfile.gvisor -t dockerd-gvisor:29 runtime-gateway
 
-FROM docker:28-dind
+# docker:29-dind ships Docker CLI >= 29.2.0 (fixes CVE-2025-15558 flagged by Jenkins).
+FROM docker:29-dind
 
 RUN apk update \
     && apk upgrade --no-cache \

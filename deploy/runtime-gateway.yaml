@@ -120,7 +120,7 @@ spec:
     spec:
       containers:
         - name: dockerd
-          image: dockerd-gvisor:28
+          image: dockerd-gvisor:29
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true

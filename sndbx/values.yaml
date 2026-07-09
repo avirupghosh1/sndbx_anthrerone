@@ -56,7 +56,7 @@ images:
     tag: CHANGE_ME
     pullPolicy: IfNotPresent
   # dockerd sidecar for runtime-gateway. This is the gVisor-enabled DinD image
-  # built from runtime-gateway/Dockerfile.gvisor (docker:28-dind + runsc).
+  # built from runtime-gateway/Dockerfile.gvisor (docker:29-dind + runsc).
   # CI sets repo/name/tag via EXTRA_VALUES; tag stays CHANGE_ME until then.
   dockerDind:
     repo: prod-nexus.sprinklr.com:8123
