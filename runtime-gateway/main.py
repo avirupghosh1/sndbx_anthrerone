@@ -8,6 +8,7 @@ import os
 import subprocess
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -105,6 +106,12 @@ def _registry_login_loop() -> None:
 
 async def startup() -> None:
     threading.Thread(target=_registry_login_loop, name="template-registry-login", daemon=True).start()
+
+
+@asynccontextmanager
+async def lifespan(_app: Starlette):
+    await startup()
+    yield
 
 
 async def health(_request: Request) -> JSONResponse:
@@ -323,7 +330,7 @@ routes = [
     Route("/internal/templates/build/snapshot", build_template_snapshot, methods=["POST"]),
 ]
 
-app = Starlette(routes=routes, on_startup=[startup])
+app = Starlette(routes=routes, lifespan=lifespan)
 app = SandboxDataPlaneMiddleware(app)
 
 

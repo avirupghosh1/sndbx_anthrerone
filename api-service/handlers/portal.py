@@ -296,14 +296,14 @@ async def portal_root(request: Request):
 async def login_page(request: Request, error: str = ""):
     if _require_client(request):
         return RedirectResponse("/portal/templates", status_code=303)
-    return _TEMPLATES.TemplateResponse("portal_auth.html", {"request": request, "mode": "login", "error": error})
+    return _TEMPLATES.TemplateResponse(request, "portal_auth.html", {"request": request, "mode": "login", "error": error})
 
 
 @router.get("/register", response_class=HTMLResponse)
 async def register_page(request: Request, error: str = ""):
     if _require_client(request):
         return RedirectResponse("/portal/templates", status_code=303)
-    return _TEMPLATES.TemplateResponse("portal_auth.html", {"request": request, "mode": "register", "error": error})
+    return _TEMPLATES.TemplateResponse(request, "portal_auth.html", {"request": request, "mode": "register", "error": error})
 
 
 @router.post("/register")
@@ -312,18 +312,21 @@ async def register(request: Request, email: str = Form(...), password: str = For
     db = _db()
     if not normalized or "@" not in normalized:
         return _TEMPLATES.TemplateResponse(
+            request,
             "portal_auth.html",
             {"request": request, "mode": "register", "error": "Enter a valid email address."},
             status_code=400,
         )
     if len(password) < 8:
         return _TEMPLATES.TemplateResponse(
+            request,
             "portal_auth.html",
             {"request": request, "mode": "register", "error": "Password must be at least 8 characters."},
             status_code=400,
         )
     if db.get_client_by_email(normalized):
         return _TEMPLATES.TemplateResponse(
+            request,
             "portal_auth.html",
             {"request": request, "mode": "register", "error": "That email is already registered."},
             status_code=409,
@@ -344,6 +347,7 @@ async def login(request: Request, email: str = Form(...), password: str = Form(.
     client = _db().get_client_by_email(email.strip().lower())
     if not client or not client.get("password_hash") or not _verify_password(password, client["password_hash"]):
         return _TEMPLATES.TemplateResponse(
+            request,
             "portal_auth.html",
             {"request": request, "mode": "login", "error": "Invalid email or password."},
             status_code=401,
@@ -366,6 +370,7 @@ async def sandboxes_page(request: Request):
     if not client:
         return RedirectResponse("/portal/login", status_code=303)
     return _TEMPLATES.TemplateResponse(
+        request,
         "portal_shell.html",
         _portal_context(request, client, active="sandboxes"),
     )
@@ -377,6 +382,7 @@ async def templates_page(request: Request):
     if not client:
         return RedirectResponse("/portal/login", status_code=303)
     return _TEMPLATES.TemplateResponse(
+        request,
         "portal_shell.html",
         _portal_context(request, client, active="templates", template_tab="list"),
     )
@@ -388,6 +394,7 @@ async def template_builds_page(request: Request):
     if not client:
         return RedirectResponse("/portal/login", status_code=303)
     return _TEMPLATES.TemplateResponse(
+        request,
         "portal_shell.html",
         _portal_context(request, client, active="templates", template_tab="builds"),
     )
@@ -399,6 +406,7 @@ async def api_keys_page(request: Request):
     if not client:
         return RedirectResponse("/portal/login", status_code=303)
     return _TEMPLATES.TemplateResponse(
+        request,
         "portal_shell.html",
         _portal_context(request, client, active="api_keys"),
     )
@@ -418,6 +426,7 @@ async def create_api_key(request: Request, name: str = Form(...)):
         key_hash=_hash_api_key(api_key_value),
     )
     return _TEMPLATES.TemplateResponse(
+        request,
         "portal_shell.html",
         _portal_context(request, client, active="api_keys", new_api_key=api_key_value),
     )

@@ -1402,7 +1402,10 @@ class SandboxManager:
         )
 
     def _resolve_template_start_spec(
-        self, template_id: str
+        self,
+        template_id: str,
+        *,
+        execution: Optional[Any] = None,
     ) -> tuple[str, str, Dict[str, str], int]:
         """Return ``(start_cmd, image_ref, template_env, guest_port)``."""
         tid = (template_id or "").strip()
@@ -1412,7 +1415,7 @@ class SandboxManager:
         img_ref = ""
         if row:
             img_ref = (row.get("warm_snapshot_image") or row.get("base_image") or "").strip()
-        execution = self.execution
+        execution = execution or self.execution
         if not sc and img_ref:
             sc = execution.image_start_cmd_shell(img_ref) or ""
         if not tpl_env and img_ref:
@@ -1452,11 +1455,15 @@ class SandboxManager:
         *,
         start_envd: bool,
         envd_port: int,
+        execution: Optional[Any] = None,
     ) -> Optional[Dict[str, Any]]:
         if not is_container_like_execution(self.execution):
             return None
 
-        sc, _img_ref, tpl_env, guest_port = self._resolve_template_start_spec(template_id)
+        sc, _img_ref, tpl_env, guest_port = self._resolve_template_start_spec(
+            template_id,
+            execution=execution,
+        )
         if not sc and not start_envd:
             return None
         if start_envd and not self._template_declares_envd_baked(template_id):
@@ -1888,12 +1895,14 @@ class SandboxManager:
         publish_envd_legacy = bool(getattr(self._config, "ENVD_PUBLISH_PORT", False))
         start_envd = envd_always or publish_envd_legacy
         auto_start_envd = start_envd and getattr(self._config, "ENVD_AUTO_START", True)
+        execution = self._execution_for_row(self.get_sandbox(sandbox_id) or {})
         startup_boot = None
         if auto_start_envd or template_id:
             startup_boot = self._startup_managed_bootstrap_spec(
                 template_id,
                 start_envd=auto_start_envd,
                 envd_port=envd_port_cfg,
+                execution=execution,
             )
         if startup_boot is not None:
             probes = self._startup_managed_readiness_probes(
@@ -1968,7 +1977,10 @@ class SandboxManager:
                 self.refresh_guest_routing_metadata(sandbox_id)
                 return False
 
-        sc, _img_ref, _tpl_env, _guest_port = self._resolve_template_start_spec(template_id)
+        sc, _img_ref, _tpl_env, _guest_port = self._resolve_template_start_spec(
+            template_id,
+            execution=execution,
+        )
         if sc:
             self._bootstrap_template_start_cmd(sandbox_id, container_id, template_id)
 
@@ -2722,6 +2734,7 @@ class SandboxManager:
                 template_id,
                 start_envd=auto_start_envd,
                 envd_port=envd_port_cfg,
+                execution=execution,
             )
 
         config = ContainerConfig(
