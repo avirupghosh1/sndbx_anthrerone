@@ -4,7 +4,7 @@
 #   cd cont_in_vm
 #   docker build -f runtime-gateway/Dockerfile.gvisor -t dockerd-gvisor:28 runtime-gateway
 
-FROM docker:29.6.1-dind
+FROM docker:28.5.1-dind
 
 RUN apk update \
     && apk upgrade --no-cache \
