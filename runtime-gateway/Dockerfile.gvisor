@@ -3,13 +3,22 @@
 # Build (downloads runsc inside the image; ~171MB):
 #   cd cont_in_vm
 #   docker build -f runtime-gateway/Dockerfile.gvisor -t dockerd-gvisor:29 runtime-gateway
+#
+# Security: base must ship Docker CLI >= 29.2.0 and OpenSSL >= 3.5.6-r0.
+# Jenkins scans fail on CVE-2025-15558 (docker CLI) and OpenSSL CVEs listed in
+# validate-gvisor-image.sh unless apk upgrade runs on a fresh layer.
 
-# docker:29-dind ships Docker CLI >= 29.2.0 (fixes CVE-2025-15558 flagged by Jenkins).
 FROM docker:29-dind
 
-RUN apk update \
-    && apk upgrade --no-cache \
-    && apk add --no-cache curl ca-certificates
+COPY validate-gvisor-image.sh /usr/local/bin/validate-gvisor-image.sh
+
+# Refresh Alpine packages before gVisor install. Explicit OpenSSL upgrade is
+# required because docker:*-dind tags are static and may ship 3.5.4/3.5.5.
+RUN chmod +x /usr/local/bin/validate-gvisor-image.sh \
+    && apk update \
+    && apk upgrade -a -U --no-cache \
+    && apk add --no-cache --upgrade \
+         openssl libssl3 libcrypto3 curl ca-certificates
 
 # gVisor buckets use x86_64 / aarch64. TARGETARCH is set by BuildKit; legacy
 # docker build leaves it empty — we fall back to uname -m.
@@ -38,3 +47,5 @@ RUN set -ex; \
     /usr/local/bin/runsc --version; \
     /usr/local/bin/runsc install; \
     echo "gVisor install complete"
+
+RUN /usr/local/bin/validate-gvisor-image.sh
