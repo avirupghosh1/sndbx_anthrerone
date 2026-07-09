@@ -1,14 +1,8 @@
 #!/bin/sh
 # Fail the image build if security-sensitive packages are below patched versions.
-# Jenkins flags these OpenSSL CVEs when libssl3/libcrypto3/openssl stay < 3.5.6-r0:
-#   CVE-2025-15467, CVE-2025-69419, CVE-2025-69420, CVE-2025-69421
-#   CVE-2026-28387, CVE-2026-28388, CVE-2026-28389, CVE-2026-28390
-#   CVE-2026-31789 (CRITICAL), CVE-2026-31790
-# Docker CLI must match the pinned patched docker:29.6.1-dind-alpine3.24 base.
 set -eu
 
 MIN_OPENSSL="3.5.6-r0"
-MIN_DOCKER_CLI="29.6.1"
 
 fail=0
 
@@ -34,37 +28,36 @@ require_apk_min() {
   echo "VALIDATION OK: $pkg $ver >= $min"
 }
 
-require_docker_cli_min() {
-  min="$1"
-  ver="$(docker version --format '{{.Client.Version}}' 2>/dev/null || true)"
-  ver="${ver%%-*}"
-  if [ -z "$ver" ]; then
-    echo "VALIDATION FAIL: docker client version unavailable"
-    fail=1
-    return
-  fi
-  if [ "$(printf '%s\n' "$min" "$ver" | sort -V | tail -n1)" != "$ver" ]; then
-    echo "VALIDATION FAIL: docker client $ver < required $min"
-    fail=1
-    return
-  fi
-  echo "VALIDATION OK: docker client $ver >= $min"
-}
-
 echo "=== gVisor DinD image security validation ==="
 echo "Alpine release: $(cat /etc/alpine-release 2>/dev/null || echo unknown)"
-echo "OpenSSL runtime: $(openssl version 2>/dev/null || echo unavailable)"
 
 require_apk_min openssl "$MIN_OPENSSL"
 require_apk_min libssl3 "$MIN_OPENSSL"
 require_apk_min libcrypto3 "$MIN_OPENSSL"
-require_docker_cli_min "$MIN_DOCKER_CLI"
+
+if [ -x /usr/local/bin/docker ]; then
+  echo "VALIDATION FAIL: docker CLI should be removed from this image"
+  fail=1
+else
+  echo "VALIDATION OK: docker CLI not present"
+fi
+
+if [ ! -x /usr/local/bin/dockerd ]; then
+  echo "VALIDATION FAIL: dockerd is missing"
+  fail=1
+else
+  echo "VALIDATION OK: dockerd present"
+fi
 
 if [ ! -x /usr/local/bin/runsc ]; then
   echo "VALIDATION FAIL: /usr/local/bin/runsc is missing or not executable"
   fail=1
 else
   echo "VALIDATION OK: runsc present ($(/usr/local/bin/runsc --version 2>&1 | head -n1))"
+fi
+
+if ! curl -fsS http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
+  echo "VALIDATION SKIP: dockerd not running during image build (expected)"
 fi
 
 if [ "$fail" -ne 0 ]; then

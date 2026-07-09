@@ -14,6 +14,7 @@ API_DEPLOY="${API_DEPLOY:-api-service}"
 REGISTRY_DEPLOY="${REGISTRY_DEPLOY:-registry}"
 RUNTIME_STS="${RUNTIME_STS:-runtime-gateway}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-dockerd}"
+GATEWAY_CONTAINER="${GATEWAY_CONTAINER:-runtime-gateway}"
 DOCKER_HOST_IN_POD="${DOCKER_HOST_IN_POD:-tcp://127.0.0.1:2375}"
 
 PRUNE_DOCKER="${PRUNE_DOCKER:-1}"
@@ -169,14 +170,14 @@ if [ "$PRUNE_DOCKER" = "1" ]; then
       continue
     fi
     echo "prune $pod"
-    if ! kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- sh -lc '
-      docker_host="$1"
-      ids="$(docker --host "$docker_host" ps -aq)"
-      if [ -n "$ids" ]; then
-        docker --host "$docker_host" rm -f $ids >/dev/null
-      fi
-      docker --host "$docker_host" system prune -a --volumes -f
-    ' sh "$DOCKER_HOST_IN_POD"; then
+    if ! kubectl -n "$NAMESPACE" exec "$pod" -c "$GATEWAY_CONTAINER" -- env DOCKER_HOST="$DOCKER_HOST_IN_POD" python -c "
+import docker, os
+c = docker.DockerClient(base_url=os.environ['DOCKER_HOST'])
+for cont in c.containers.list(all=True):
+    cont.remove(force=True)
+c.images.prune(filters={'dangling': False})
+c.volumes.prune()
+"; then
       echo "warning: failed to prune $pod; continuing because PVC deletion will clear local Docker graph" >&2
     fi
   done < <(runtime_pods)

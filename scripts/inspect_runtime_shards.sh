@@ -7,6 +7,7 @@ DB_TYPE="${DB_TYPE:-}"
 SHARDS="${SHARDS:-3}"
 IMAGE_FILTER="${IMAGE_FILTER:-mysandbox|custodian|python|agentlib|REPOSITORY}"
 DOCKER_HOST_IN_POD="${DOCKER_HOST_IN_POD:-tcp://127.0.0.1:2375}"
+GATEWAY_CONTAINER="${GATEWAY_CONTAINER:-runtime-gateway}"
 
 section() {
   printf '\n===== %s =====\n' "$1"
@@ -43,7 +44,7 @@ require_tool() {
 
 section "Kubernetes pods"
 kubectl -n "$NAMESPACE" get pods -o wide
-echo "Docker endpoint inside dockerd sidecars: ${DOCKER_HOST_IN_POD}"
+echo "Docker endpoint inside runtime-gateway pods: ${DOCKER_HOST_IN_POD}"
 
 section "Warm-pool segments"
 if is_mongo_url; then
@@ -180,10 +181,25 @@ for i in $(seq 0 "$((SHARDS - 1))"); do
     echo "missing pod: ${pod}"
     continue
   fi
-  kubectl -n "$NAMESPACE" exec "$pod" -c dockerd -- \
-    docker --host "$DOCKER_HOST_IN_POD" ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$GATEWAY_CONTAINER" -- env DOCKER_HOST="$DOCKER_HOST_IN_POD" python -c "
+import docker, os
+c = docker.DockerClient(base_url=os.environ['DOCKER_HOST'])
+print('NAMES\tSTATUS\tIMAGE')
+for cont in c.containers.list(all=True):
+    image = (cont.image.tags[0] if cont.image.tags else cont.image.short_id)
+    print(f\"{cont.name}\t{cont.status}\t{image}\")
+"
 
   section "Shard ${pod}: relevant images"
-  kubectl -n "$NAMESPACE" exec "$pod" -c dockerd -- sh -lc \
-    "docker --host '$DOCKER_HOST_IN_POD' images --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' | grep -E '${IMAGE_FILTER}' || true"
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$GATEWAY_CONTAINER" -- env DOCKER_HOST="$DOCKER_HOST_IN_POD" IMAGE_FILTER="$IMAGE_FILTER" python -c "
+import docker, os, re
+c = docker.DockerClient(base_url=os.environ['DOCKER_HOST'])
+pattern = re.compile(os.environ.get('IMAGE_FILTER', ''), re.I)
+print('REPOSITORY:TAG\tSIZE\tID')
+for image in c.images.list():
+    tags = image.tags or [image.short_id]
+    for tag in tags:
+        if pattern.search(tag):
+            print(f\"{tag}\t{image.attrs.get('Size', 0)}\t{image.short_id}\")
+" | grep -v '^REPOSITORY' || true
 done

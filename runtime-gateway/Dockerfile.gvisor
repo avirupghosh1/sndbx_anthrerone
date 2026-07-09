@@ -37,3 +37,8 @@ RUN set -ex; \
     /usr/local/bin/runsc --version; \
     /usr/local/bin/runsc install; \
     echo "gVisor install complete"
+
+# Runtime uses dockerd + docker-py over TCP (127.0.0.1:2375). The docker CLI and
+# cli-plugins are not used and are removed to avoid docker-cli CVE scanner noise.
+RUN rm -f /usr/local/bin/docker /usr/local/bin/docker-compose \
+    && rm -rf /usr/local/libexec/docker/cli-plugins

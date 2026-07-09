@@ -143,7 +143,7 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - docker --host tcp://127.0.0.1:2375 info >/dev/null 2>&1
+                - curl -fsS http://127.0.0.1:2375/_ping >/dev/null
             initialDelaySeconds: 5
             timeoutSeconds: 3
             periodSeconds: 5
@@ -153,7 +153,7 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - docker --host tcp://127.0.0.1:2375 info >/dev/null 2>&1
+                - curl -fsS http://127.0.0.1:2375/_ping >/dev/null
             initialDelaySeconds: 15
             timeoutSeconds: 3
             periodSeconds: 15

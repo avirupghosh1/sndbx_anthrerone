@@ -10,7 +10,7 @@ set -euo pipefail
 # Env overrides:
 #   NAMESPACE         kube namespace                   (default: sandboxes)
 #   SELECTOR          pod label selector               (default: app=runtime-gateway)
-#   DOCKER_CONTAINER  dockerd container name           (default: dockerd)
+#   GATEWAY_CONTAINER runtime-gateway container name    (default: runtime-gateway)
 #   DOCKER_HOST_IN_POD dockerd endpoint inside pod     (default: tcp://127.0.0.1:2375)
 #   GATEWAY_CONTAINER gateway (app) container name     (default: gateway)
 #   IMAGE_FILTER      optional grep -E filter for images (default: none)
@@ -21,9 +21,8 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-sandboxes}"
 SELECTOR="${SELECTOR:-app=runtime-gateway}"
-DOCKER_CONTAINER="${DOCKER_CONTAINER:-dockerd}"
 DOCKER_HOST_IN_POD="${DOCKER_HOST_IN_POD:-tcp://127.0.0.1:2375}"
-GATEWAY_CONTAINER="${GATEWAY_CONTAINER:-gateway}"
+GATEWAY_CONTAINER="${GATEWAY_CONTAINER:-runtime-gateway}"
 IMAGE_FILTER="${IMAGE_FILTER:-}"
 ALL_CONTAINERS="${ALL_CONTAINERS:-1}"
 LIMIT_RATIO="${LIMIT_RATIO:-}"
@@ -59,8 +58,6 @@ if [ -z "$pods" ]; then
   exit 1
 fi
 
-ps_flag=""
-[ "$ALL_CONTAINERS" = "1" ] && ps_flag="-a"
 
 for pod in $pods; do
   section "POD: ${pod}"
@@ -102,8 +99,14 @@ for pod in $pods; do
 
   echo
   echo "--- Docker usage on this pod (real per-shard consumption) ---"
-  dfp="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- \
-    docker --host "$DOCKER_HOST_IN_POD" system df 2>/dev/null || true)"
+  dfp="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$GATEWAY_CONTAINER" -- python -c "
+import docker, os
+c = docker.DockerClient(base_url=os.environ.get('DOCKER_HOST', 'tcp://127.0.0.1:2375'))
+df = c.df()
+for key in ('Containers', 'Images', 'Volumes', 'BuildCache'):
+    block = df.get(key) or {}
+    print(f\"{key}: count={block.get('Count', 0)} active={block.get('Active', 0)} size={block.get('Size', 0)} reclaimable={block.get('Reclaimable', 0)}\")
+" 2>/dev/null || true)"
   if [ -n "$dfp" ]; then
     printf '%s\n' "$dfp" | sed 's/^/  /'
   else
@@ -112,9 +115,17 @@ for pod in $pods; do
 
   echo
   echo "--- Sandboxes (containers named sandbox-*) ---"
-  sandboxes="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- \
-    docker --host "$DOCKER_HOST_IN_POD" ps $ps_flag --filter 'name=sandbox-' \
-    --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true)"
+  sandboxes="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$GATEWAY_CONTAINER" -- env DOCKER_HOST="$DOCKER_HOST_IN_POD" ALL_CONTAINERS="$ALL_CONTAINERS" python -c "
+import docker, os
+all_flag = os.environ.get('ALL_CONTAINERS', '1') == '1'
+c = docker.DockerClient(base_url=os.environ['DOCKER_HOST'])
+for cont in c.containers.list(all=all_flag):
+    name = (cont.name or '').lstrip('/')
+    if not name.startswith('sandbox-'):
+        continue
+    image = (cont.image.tags[0] if cont.image.tags else cont.image.short_id)
+    print(f\"{name}\t{cont.status}\t{image}\")
+" 2>/dev/null || true)"
   if [ -n "$sandboxes" ]; then
     {
       printf 'SANDBOX\tSTATUS\tTEMPLATE_IMAGE\n'
@@ -127,8 +138,28 @@ for pod in $pods; do
 
   echo
   echo "--- Templates (images on this pod) ---"
-  images="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- \
-    docker --host "$DOCKER_HOST_IN_POD" images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' 2>/dev/null || true)"
+  images="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$GATEWAY_CONTAINER" -- env DOCKER_HOST="$DOCKER_HOST_IN_POD" python -c "
+import datetime as dt
+import docker, os
+c = docker.DockerClient(base_url=os.environ['DOCKER_HOST'])
+now = dt.datetime.now(dt.timezone.utc)
+for image in c.images.list():
+    tags = image.tags or [image.short_id]
+    for tag in tags:
+        created = image.attrs.get('Created', '')
+        try:
+            created_dt = dt.datetime.fromisoformat(created.replace('Z', '+00:00'))
+            age = now - created_dt
+            if age.days:
+                since = f\"{age.days} days ago\"
+            else:
+                hours = int(age.total_seconds() // 3600)
+                since = f\"{hours} hours ago\" if hours else 'just now'
+        except Exception:
+            since = created
+        size = image.attrs.get('Size', 0)
+        print(f\"{tag}\t{size}\t{since}\")
+" 2>/dev/null || true)"
   if [ -n "$IMAGE_FILTER" ] && [ -n "$images" ]; then
     images="$(printf '%s\n' "$images" | grep -E "$IMAGE_FILTER" || true)"
   fi
