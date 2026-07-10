@@ -146,24 +146,6 @@ spec:
             failureThreshold: {{ .Values.runtimeGateway.livenessProbe.failureThreshold }}
           resources:
 {{ toYaml .Values.runtimeGateway.resources | indent 12 }}
-      {{- if not .Values.runtimeGateway.docker.persistence.enabled }}
       volumes:
         - name: docker-graph
           emptyDir: {}
-      {{- end }}
-  {{- if .Values.runtimeGateway.docker.persistence.enabled }}
-  volumeClaimTemplates:
-    - metadata:
-        name: docker-graph
-        labels:
-{{ include "sndbx.labels" . | indent 10 }}
-      spec:
-        accessModes:
-{{ toYaml .Values.runtimeGateway.docker.persistence.accessModes | indent 10 }}
-        resources:
-          requests:
-            storage: {{ .Values.runtimeGateway.docker.persistence.size | quote }}
-        {{- if .Values.runtimeGateway.docker.persistence.storageClassName }}
-        storageClassName: {{ .Values.runtimeGateway.docker.persistence.storageClassName | quote }}
-        {{- end }}
-  {{- end }}

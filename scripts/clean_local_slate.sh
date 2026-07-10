@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Destructive local cleanup for the raw minikube deployment.
-# It removes runtime containers/images, runtime/template DB rows, and local PVCs.
+# It removes runtime containers/images, runtime/template DB rows, and stale
+# legacy local PVCs if they exist.
 
 NAMESPACE="${NAMESPACE:-sandboxes}"
 DB_URL="${DB_URL:-mongodb://127.0.0.1:27017/sandboxes}"
@@ -111,7 +112,7 @@ Defaults:
   EXPECTED_CONTEXT=$EXPECTED_CONTEXT
 
 This will scale local workloads to 0, truncate sandbox/template runtime rows,
-delete runtime Docker graph PVCs, and delete registry/api stale PVCs if present.
+delete stale legacy runtime/registry/api PVCs if present.
 EOF
     exit 2
   fi
@@ -178,7 +179,7 @@ for cont in c.containers.list(all=True):
 c.images.prune(filters={'dangling': False})
 c.volumes.prune()
 "; then
-      echo "warning: failed to prune $pod; continuing because PVC deletion will clear local Docker graph" >&2
+      echo "warning: failed to prune $pod; continuing with remaining cleanup" >&2
     fi
   done < <(runtime_pods)
 fi
@@ -233,7 +234,7 @@ if [ "$TRUNCATE_DB" = "1" ]; then
 fi
 
 if [ "$DELETE_PVCS" = "1" ]; then
-  section "Delete local PVCs"
+  section "Delete stale legacy local PVCs"
   if [ "$runtime_replicas" -gt 0 ] 2>/dev/null; then
     for i in $(seq 0 "$((runtime_replicas - 1))"); do
       delete_pvc_if_exists "docker-graph-${RUNTIME_STS}-${i}"
@@ -277,7 +278,7 @@ section "Next"
 cat <<EOF
 Clean slate complete.
 
-For the raw local manifests, recreate PVCs and restart pods with:
+For the raw local manifests, restart pods with:
   kubectl apply -f deploy/api-service.yaml
   kubectl apply -f deploy/runtime-gateway.yaml
 

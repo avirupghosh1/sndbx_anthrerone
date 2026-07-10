@@ -11,18 +11,6 @@ spec:
       port: 5000
       targetPort: 5000
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: registry-data
-  namespace: sandboxes
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 20Gi
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -72,8 +60,7 @@ spec:
               memory: "512Mi"
       volumes:
         - name: registry-data
-          persistentVolumeClaim:
-            claimName: registry-data
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -216,15 +203,9 @@ spec:
             limits:
               cpu: "1"
               memory: "512Mi"
-  volumeClaimTemplates:
-    - metadata:
-        name: docker-graph
-      spec:
-        accessModes:
-          - ReadWriteOnce
-        resources:
-          requests:
-            storage: 50Gi
+      volumes:
+        - name: docker-graph
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -244,9 +225,8 @@ data:
   PORT: "8080"
   HOST: "0.0.0.0"
   DOCKER_GRAPH_PATH: "/var/lib/docker"
-  # Minikube's default storage provisioner backs every PVC from the same node filesystem,
-  # so statvfs(/var/lib/docker) is identical for all shards. Use the declared local PVC
-  # capacity so scheduling sees per-shard Docker graph usage during local validation.
+  # Docker graph storage is ephemeral because this no-cloud manifest does not
+  # create PersistentVolumeClaims.
   DOCKER_GRAPH_CAPACITY_BYTES: "53687091200"
   TEMPLATE_REGISTRY_PUSH_ENABLED: "true"
   TEMPLATE_REGISTRY_REPO_PREFIX: "registry.sandboxes.svc.cluster.local:5000/templates"

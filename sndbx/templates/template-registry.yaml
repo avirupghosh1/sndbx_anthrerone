@@ -98,30 +98,5 @@ spec:
 {{ toYaml .Values.templateRegistry.internal.resources | indent 12 }}
       volumes:
         - name: registry-data
-          {{- if .Values.templateRegistry.internal.persistence.enabled }}
-          persistentVolumeClaim:
-            claimName: {{ include "sndbx.templateRegistryName" . }}-data
-          {{- else }}
           emptyDir: {}
-          {{- end }}
-{{- if .Values.templateRegistry.internal.persistence.enabled }}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ include "sndbx.templateRegistryName" . }}-data
-  namespace: {{ .Values.namespace }}
-  labels:
-{{ include "sndbx.labels" . | indent 4 }}
-    component: template-registry
-spec:
-  accessModes:
-{{ toYaml .Values.templateRegistry.internal.persistence.accessModes | indent 4 }}
-  resources:
-    requests:
-      storage: {{ .Values.templateRegistry.internal.persistence.size | quote }}
-  {{- if .Values.templateRegistry.internal.persistence.storageClassName }}
-  storageClassName: {{ .Values.templateRegistry.internal.persistence.storageClassName | quote }}
-  {{- end }}
-{{- end }}
 {{- end }}

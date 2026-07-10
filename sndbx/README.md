@@ -40,8 +40,8 @@ Expected image override keys from GitLab/Jenkins:
 The chart deploys:
 
 - `api-service` Deployment + Service
-- `runtime-gateway` StatefulSet + headless/cluster Services + per-shard PVCs
-- optional `template-registry` Deployment + Service + PVC when template push is enabled without an external registry prefix
+- `runtime-gateway` StatefulSet + headless/cluster Services with ephemeral `emptyDir` Docker graph storage
+- optional `template-registry` Deployment + Service with ephemeral `emptyDir` storage when template push is enabled without an external registry prefix
 - one ingress that routes:
   - `api.<domain>` to `api-service`
   - `*.domain` to `runtime-gateway`
@@ -67,8 +67,8 @@ Important production notes:
 - The Jenkins/image pipeline must publish four images for a full release: `api-service`, `runtime-gateway`, `dockerd-gvisor`, and `template-registry`.
 - The internal registry pod uses the CI-built `template-registry` image through `images.templateRegistry.*`. For manual deploys, it can pull `<images.templateRegistry.repo>/registry:3`, or you can set `templateRegistry.internal.image` as a full-image override.
 - Production template builds push to the chart-managed internal registry pod by default. No external template-registry credentials are required.
-- With `templateRegistry.pushEnabled=true` and an empty `templateRegistry.repoPrefix`, `templateRegistry.internal.enabled=auto` creates an in-cluster registry Deployment, Service, and PVC. Runtime-gateway pushes template images to `<release>-template-registry.<namespace>.svc.cluster.local:5000/templates`, and dockerd is configured with that internal registry as insecure HTTP.
-- For a clean registry-pull test, set `runtimeGateway.docker.persistence.enabled=false`; production keeps it `true` by default.
+- With `templateRegistry.pushEnabled=true` and an empty `templateRegistry.repoPrefix`, `templateRegistry.internal.enabled=auto` creates an in-cluster registry Deployment and Service using `emptyDir` storage. Runtime-gateway pushes template images to `<release>-template-registry.<namespace>.svc.cluster.local:5000/templates`, and dockerd is configured with that internal registry as insecure HTTP.
+- The chart does not create PersistentVolumeClaims; restarting runtime-gateway or template-registry pods clears their local image data.
 - When `secrets.create=false`, the secret named by `secrets.name` must already exist in the target namespace before Helm deploy runs.
 
 The chart intentionally fails fast when:
