@@ -78,8 +78,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            {{- $databaseSecretName := .Values.database.existingSecretName | default .Values.secrets.name }}
-            {{- if and (eq (default "" $databaseSecretName) "") .Values.secrets.create }}
+            {{- $databaseSecretName := toString (default "" (.Values.database.existingSecretName | default .Values.secrets.name)) }}
+            {{- if and (eq $databaseSecretName "") .Values.secrets.create }}
             {{- $databaseSecretName = include "sndbx.secretName" . }}
             {{- end }}
             {{- if $databaseSecretName }}
