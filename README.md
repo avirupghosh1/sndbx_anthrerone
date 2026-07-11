@@ -59,6 +59,8 @@ In local mode:
 - control-plane requests go to `http://127.0.0.1:8001`
 - data-plane requests go to `http://127.0.0.1:18080?...`
 - SDK/local clients keep using the same API semantics; only the base URLs differ
+- raw local ingress is HTTP-only; the local manifests do not create a TLS
+  certificate for `sndbx.example.com`
 
 ## Persistence
 

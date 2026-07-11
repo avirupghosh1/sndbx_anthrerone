@@ -266,11 +266,6 @@ spec:
                 name: runtime-gateway
                 port:
                   number: 8080
-  tls:
-    - hosts:
-        - api.sndbx.example.com
-        - "*.sndbx.example.com"
-      secretName: sndbx-example-com-tls
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
