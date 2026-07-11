@@ -55,12 +55,11 @@ In local mode:
 ## Persistence
 
 - API metadata persists via `DATABASE_TYPE` plus `DATABASE_URL`, using PostgreSQL or MongoDB
-- Docker image/container graph persists in per-shard runtime-gateway PVCs at `/var/lib/docker`
-- For clean registry-pull validation, deploy the Helm chart with `runtimeGateway.docker.persistence.enabled=false` so every restarted shard starts with an empty Docker graph.
+- Docker image/container graph is ephemeral per runtime-gateway pod and uses `emptyDir` at `/var/lib/docker`
 
 ## Template Registry
 
-- In Helm and the GitLab deploy job, `templateRegistry.pushEnabled=true` with no template registry repo prefix uses the chart-managed internal registry by default. That path persists template images in the registry PVC and avoids requiring external registry credentials.
+- In Helm and the GitLab deploy job, `templateRegistry.pushEnabled=true` with no template registry repo prefix uses the chart-managed internal registry by default. Registry storage is ephemeral and avoids requiring external registry credentials.
 - Jenkins builds a `template-registry` image from `template-registry/Dockerfile` and passes that image through `images.templateRegistry.*` for the registry pod. Manual deploys can fall back to `<images.templateRegistry.repo>/registry:3`, or set `templateRegistry.internal.image` as a full-image override.
 
 ## Current Supported Flow

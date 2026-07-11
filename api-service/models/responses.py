@@ -88,7 +88,7 @@ class SandboxLifecycleResponse(BaseModel):
 
 
 class SandboxTimeoutRefreshResponse(BaseModel):
-    """Ack after refreshing stored sandbox timeout (E2B ``set_timeout`` parity)."""
+    """Ack after refreshing stored sandbox timeout."""
 
     sandbox_id: str
     timeout_seconds: int
@@ -115,7 +115,7 @@ class TemplateDefinitionResponse(BaseModel):
     settle_seconds: int
     warm_snapshot_image: Optional[str] = None
     build_error: Optional[str] = None
-    ready_cmd: str = Field(default="", description="Readiness probe shell (E2B-style); empty if unused.")
+    ready_cmd: str = Field(default="", description="Readiness probe shell; empty if unused.")
     created_at: str
     updated_at: str
 

@@ -125,9 +125,14 @@ async def validate_api_key(request: Request) -> ApiKeyPrincipal:
     """Extract and validate a client API key from request headers."""
     api_key = (request.headers.get("X-API-Key") or "").strip()
     if not api_key:
+        auth = (request.headers.get("Authorization") or "").strip()
+        scheme, _, token = auth.partition(" ")
+        if scheme.lower() == "bearer" and token.strip():
+            api_key = token.strip()
+    if not api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="X-API-Key header required",
+            detail="X-API-Key or Authorization Bearer token required",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

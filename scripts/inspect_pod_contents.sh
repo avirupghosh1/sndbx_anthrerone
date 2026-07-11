@@ -10,9 +10,8 @@ set -euo pipefail
 # Env overrides:
 #   NAMESPACE         kube namespace                   (default: sandboxes)
 #   SELECTOR          pod label selector               (default: app=runtime-gateway)
-#   DOCKER_CONTAINER  dockerd container name           (default: dockerd)
 #   DOCKER_HOST_IN_POD dockerd endpoint inside pod     (default: tcp://127.0.0.1:2375)
-#   GATEWAY_CONTAINER gateway (app) container name     (default: gateway)
+#   GATEWAY_CONTAINER gateway (app) container name     (default: runtime-gateway; falls back to gateway)
 #   IMAGE_FILTER      optional grep -E filter for images (default: none)
 #   ALL_CONTAINERS    1 = include stopped sandboxes too  (default: 1)
 #   LIMIT_RATIO       disk usage limit ratio; if unset, read from the
@@ -21,9 +20,8 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-sandboxes}"
 SELECTOR="${SELECTOR:-app=runtime-gateway}"
-DOCKER_CONTAINER="${DOCKER_CONTAINER:-dockerd}"
 DOCKER_HOST_IN_POD="${DOCKER_HOST_IN_POD:-tcp://127.0.0.1:2375}"
-GATEWAY_CONTAINER="${GATEWAY_CONTAINER:-gateway}"
+GATEWAY_CONTAINER="${GATEWAY_CONTAINER:-runtime-gateway}"
 IMAGE_FILTER="${IMAGE_FILTER:-}"
 ALL_CONTAINERS="${ALL_CONTAINERS:-1}"
 LIMIT_RATIO="${LIMIT_RATIO:-}"
@@ -51,6 +49,39 @@ fmt() {
   fi
 }
 
+first_line() {
+  printf '%s' "$1" | sed -n '1p'
+}
+
+pod_containers() {
+  kubectl -n "$NAMESPACE" get pod "$1" \
+    -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null || true
+}
+
+resolve_container() {
+  local pod="$1"
+  local requested="$2"
+  local fallback="$3"
+  local role="$4"
+  local containers
+
+  containers="$(pod_containers "$pod")"
+  if printf '%s\n' "$containers" | grep -qx "$requested"; then
+    printf '%s' "$requested"
+    return 0
+  fi
+
+  if printf '%s\n' "$containers" | grep -qx "$fallback"; then
+    echo "  warning: ${role} container '${requested}' is not present in ${pod}; using '${fallback}'." >&2
+    echo "           available containers: $(printf '%s\n' "$containers" | paste -sd ', ' -)" >&2
+    printf '%s' "$fallback"
+    return 0
+  fi
+
+  echo "  warning: ${role} container '${requested}' is not present in ${pod}; available containers: $(printf '%s\n' "$containers" | paste -sd ', ' -)" >&2
+  printf '%s' "$requested"
+}
+
 pods="$(kubectl -n "$NAMESPACE" get pods -l "$SELECTOR" \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
 
@@ -59,23 +90,23 @@ if [ -z "$pods" ]; then
   exit 1
 fi
 
-ps_flag=""
-[ "$ALL_CONTAINERS" = "1" ] && ps_flag="-a"
-
 for pod in $pods; do
   section "POD: ${pod}"
+  gateway_container="$(resolve_container "$pod" "$GATEWAY_CONTAINER" "gateway" "gateway/app")"
+  echo "containers: gateway/app=${gateway_container}"
 
   echo "--- Docker graph usage in this pod ---"
-  graph_meta="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$GATEWAY_CONTAINER" -- \
+  graph_meta_status=0
+  graph_meta="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$gateway_container" -- \
     sh -lc 'printf "%s\t%s\n" "${DOCKER_GRAPH_PATH:-/var/lib/docker}" "${DOCKER_GRAPH_CAPACITY_BYTES:-}"' \
-    2>/dev/null || true)"
+    2>&1)" || graph_meta_status=$?
   if [ -n "$graph_meta" ]; then
     graph="$(printf '%s' "$graph_meta" | cut -f1)"
     capacity="$(printf '%s' "$graph_meta" | cut -f2)"
     # Measure from the gateway container's read-only mount of the Docker graph.
     # Measuring inside dockerd crosses active overlay "merged" mounts and can
     # double-count running container filesystems.
-    used="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$GATEWAY_CONTAINER" -- \
+    used="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$gateway_container" -- \
       sh -lc 'du -sb '"$graph"' 2>/dev/null | awk '"'"'{print $1}'"'"'' 2>/dev/null || true)"
     if [ -n "$capacity" ] && [ "${capacity:-0}" -gt 0 ] 2>/dev/null && [ -n "$used" ]; then
       awk -v total="$capacity" -v used="$used" -v limit="$LIMIT_RATIO" -v graph="$graph" '
@@ -97,24 +128,42 @@ for pod in $pods; do
       echo "  (docker graph capacity unavailable — set DOCKER_GRAPH_CAPACITY_BYTES on this pod)"
     fi
   else
-    echo "  (docker graph metadata unavailable)"
+    echo "  (docker graph metadata unavailable: $(first_line "$graph_meta"))"
+    if [ "$graph_meta_status" -ne 0 ]; then
+      echo "  hint: check GATEWAY_CONTAINER; this pod's gateway container should usually be 'gateway'."
+    fi
   fi
 
   echo
   echo "--- Docker usage on this pod (real per-shard consumption) ---"
-  dfp="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- \
-    docker --host "$DOCKER_HOST_IN_POD" system df 2>/dev/null || true)"
+  dfp="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$gateway_container" -- env DOCKER_HOST="$DOCKER_HOST_IN_POD" python -c "
+import docker, os
+c = docker.DockerClient(base_url=os.environ['DOCKER_HOST'])
+df = c.df()
+for key in ('Containers', 'Images', 'Volumes', 'BuildCache'):
+    block = df.get(key) or {}
+    print(f\"{key}: count={block.get('Count', 0)} active={block.get('Active', 0)} size={block.get('Size', 0)} reclaimable={block.get('Reclaimable', 0)}\")
+" 2>/dev/null || true)"
   if [ -n "$dfp" ]; then
     printf '%s\n' "$dfp" | sed 's/^/  /'
   else
     echo "  (docker usage: unavailable)"
+    echo "  hint: dockerd may still be starting, or DOCKER_HOST_IN_POD/GATEWAY_CONTAINER is wrong."
   fi
 
   echo
   echo "--- Sandboxes (containers named sandbox-*) ---"
-  sandboxes="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- \
-    docker --host "$DOCKER_HOST_IN_POD" ps $ps_flag --filter 'name=sandbox-' \
-    --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true)"
+  sandboxes="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$gateway_container" -- env DOCKER_HOST="$DOCKER_HOST_IN_POD" ALL_CONTAINERS="$ALL_CONTAINERS" python -c "
+import docker, os
+all_flag = os.environ.get('ALL_CONTAINERS', '1') == '1'
+c = docker.DockerClient(base_url=os.environ['DOCKER_HOST'])
+for cont in c.containers.list(all=all_flag):
+    name = (cont.name or '').lstrip('/')
+    if not name.startswith('sandbox-'):
+        continue
+    image = (cont.image.tags[0] if cont.image.tags else cont.image.short_id)
+    print(f\"{name}\t{cont.status}\t{image}\")
+" 2>/dev/null || true)"
   if [ -n "$sandboxes" ]; then
     {
       printf 'SANDBOX\tSTATUS\tTEMPLATE_IMAGE\n'
@@ -127,8 +176,28 @@ for pod in $pods; do
 
   echo
   echo "--- Templates (images on this pod) ---"
-  images="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- \
-    docker --host "$DOCKER_HOST_IN_POD" images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' 2>/dev/null || true)"
+  images="$(kubectl -n "$NAMESPACE" exec "$pod" -c "$gateway_container" -- env DOCKER_HOST="$DOCKER_HOST_IN_POD" python -c "
+import datetime as dt
+import docker, os
+c = docker.DockerClient(base_url=os.environ['DOCKER_HOST'])
+now = dt.datetime.now(dt.timezone.utc)
+for image in c.images.list():
+    tags = image.tags or [image.short_id]
+    for tag in tags:
+        created = image.attrs.get('Created', '')
+        try:
+            created_dt = dt.datetime.fromisoformat(created.replace('Z', '+00:00'))
+            age = now - created_dt
+            if age.days:
+                since = f\"{age.days} days ago\"
+            else:
+                hours = int(age.total_seconds() // 3600)
+                since = f\"{hours} hours ago\" if hours else 'just now'
+        except Exception:
+            since = created
+        size = image.attrs.get('Size', 0)
+        print(f\"{tag}\t{size}\t{since}\")
+" 2>/dev/null || true)"
   if [ -n "$IMAGE_FILTER" ] && [ -n "$images" ]; then
     images="$(printf '%s\n' "$images" | grep -E "$IMAGE_FILTER" || true)"
   fi

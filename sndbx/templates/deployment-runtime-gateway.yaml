@@ -67,7 +67,7 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - docker --host tcp://127.0.0.1:2375 info >/dev/null 2>&1
+                - curl -fsS http://127.0.0.1:2375/_ping >/dev/null
             initialDelaySeconds: {{ .Values.runtimeGateway.docker.readinessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.runtimeGateway.docker.readinessProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.runtimeGateway.docker.readinessProbe.timeoutSeconds }}
@@ -77,7 +77,7 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - docker --host tcp://127.0.0.1:2375 info >/dev/null 2>&1
+                - curl -fsS http://127.0.0.1:2375/_ping >/dev/null
             initialDelaySeconds: {{ .Values.runtimeGateway.docker.livenessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.runtimeGateway.docker.livenessProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.runtimeGateway.docker.livenessProbe.timeoutSeconds }}
@@ -146,24 +146,6 @@ spec:
             failureThreshold: {{ .Values.runtimeGateway.livenessProbe.failureThreshold }}
           resources:
 {{ toYaml .Values.runtimeGateway.resources | indent 12 }}
-      {{- if not .Values.runtimeGateway.docker.persistence.enabled }}
       volumes:
         - name: docker-graph
           emptyDir: {}
-      {{- end }}
-  {{- if .Values.runtimeGateway.docker.persistence.enabled }}
-  volumeClaimTemplates:
-    - metadata:
-        name: docker-graph
-        labels:
-{{ include "sndbx.labels" . | indent 10 }}
-      spec:
-        accessModes:
-{{ toYaml .Values.runtimeGateway.docker.persistence.accessModes | indent 10 }}
-        resources:
-          requests:
-            storage: {{ .Values.runtimeGateway.docker.persistence.size | quote }}
-        {{- if .Values.runtimeGateway.docker.persistence.storageClassName }}
-        storageClassName: {{ .Values.runtimeGateway.docker.persistence.storageClassName | quote }}
-        {{- end }}
-  {{- end }}

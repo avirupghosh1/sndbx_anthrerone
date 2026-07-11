@@ -20,6 +20,7 @@ from .errors import (
     InvalidArgumentException,
     TimeoutException,
     api_exception_handler,
+    http_exception_handler,
     validation_exception_handler,
     general_exception_handler,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "InvalidArgumentException",
     "TimeoutException",
     "api_exception_handler",
+    "http_exception_handler",
     "validation_exception_handler",
     "general_exception_handler",
 ]

@@ -87,6 +87,7 @@ async def _create_build_record(
     principal: ApiKeyPrincipal,
     requested_mode: str,
     effective_mode: str = "",
+    status: str = "running",
 ) -> str:
     build_id = f"tb-{uuid.uuid4().hex[:16]}"
     await run_io(
@@ -98,7 +99,7 @@ async def _create_build_record(
         owner_api_key_id=principal.key_id,
         requested_mode=requested_mode,
         effective_mode=effective_mode,
-        status="running",
+        status=status,
         image_tag=None,
         build_log="",
         error_text=None,

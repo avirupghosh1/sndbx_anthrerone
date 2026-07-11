@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import json
 import os
 import stat
@@ -52,6 +53,18 @@ def _entry_info(p: Path) -> Dict[str, Any]:
         "size": int(st.st_size),
         "mode": int(mode & 0o777),
         "permissions": oct(mode & 0o777),
+    }
+
+
+def _is_e2b_request(request: Request) -> bool:
+    return "e2b" in (request.headers.get("user-agent") or "").lower()
+
+
+def _write_info(p: Path) -> Dict[str, Any]:
+    return {
+        "name": p.name,
+        "type": "dir" if p.is_dir() else "file",
+        "path": str(p),
     }
 
 
@@ -171,19 +184,39 @@ async def files_get(request: Request) -> Response:
 async def files_post(request: Request) -> JSONResponse:
     try:
         ct = (request.headers.get("content-type") or "").lower()
+        wrote: List[Dict[str, Any]] = []
         if "multipart/form-data" in ct:
             form = await request.form()
-            dest = str(form.get("path") or "")
-            up = form.get("file")
-            raw = await up.read() if hasattr(up, "read") else b""
+            uploads = form.getlist("file") if hasattr(form, "getlist") else [form.get("file")]
+            uploads = [up for up in uploads if up is not None]
+            if not uploads:
+                return JSONResponse({"detail": "file required"}, status_code=400)
+            param_dest = request.query_params.get("path") or str(form.get("path") or "")
+            for up in uploads:
+                dest = param_dest if len(uploads) == 1 and param_dest else str(getattr(up, "filename", "") or param_dest)
+                raw = await up.read() if hasattr(up, "read") else b""
+                path = _safe_abs_path(dest)
+                parent = Path(path).parent
+                parent.mkdir(parents=True, exist_ok=True)
+                p = Path(path)
+                p.write_bytes(raw)
+                wrote.append({"path": path, "bytes_written": len(raw), "entry": _write_info(p)})
         else:
             dest = request.query_params.get("path") or "/"
             raw = await request.body()
-        path = _safe_abs_path(dest)
-        parent = Path(path).parent
-        parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_bytes(raw)
-        return JSONResponse({"path": path, "bytes_written": len(raw)})
+            if (request.headers.get("content-encoding") or "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+            path = _safe_abs_path(dest)
+            parent = Path(path).parent
+            parent.mkdir(parents=True, exist_ok=True)
+            p = Path(path)
+            p.write_bytes(raw)
+            wrote.append({"path": path, "bytes_written": len(raw), "entry": _write_info(p)})
+        if _is_e2b_request(request) or "multipart/form-data" in ct:
+            return JSONResponse([item["entry"] for item in wrote])
+        if len(wrote) == 1:
+            return JSONResponse({"path": wrote[0]["path"], "bytes_written": wrote[0]["bytes_written"]})
+        return JSONResponse({"files": [{"path": item["path"], "bytes_written": item["bytes_written"]} for item in wrote]})
     except ValueError as e:
         return JSONResponse({"detail": str(e)}, status_code=400)
     except Exception as e:  # noqa: BLE001
@@ -241,6 +274,40 @@ async def process_start(request: Request) -> Response:
         return JSONResponse({"detail": str(e)}, status_code=500)
 
 
+async def connect_unimplemented(_: Request) -> JSONResponse:
+    return JSONResponse(
+        {
+            "code": "unimplemented",
+            "message": "Connect RPC is not implemented by this HTTP envd guest yet.",
+        },
+        status_code=501,
+    )
+
+
+_PROCESS_RPC_METHODS = (
+    "List",
+    "Connect",
+    "Start",
+    "Update",
+    "StreamInput",
+    "SendInput",
+    "SendSignal",
+    "CloseStdin",
+)
+
+_FILESYSTEM_RPC_METHODS = (
+    "Stat",
+    "MakeDir",
+    "Move",
+    "ListDir",
+    "Remove",
+    "WatchDir",
+    "CreateWatcher",
+    "GetWatcherEvents",
+    "RemoveWatcher",
+)
+
+
 routes = [
     Route("/health", health, methods=["GET"]),
     Route("/v1/fs/stat", fs_stat, methods=["POST"]),
@@ -251,6 +318,14 @@ routes = [
     Route("/files", files_get, methods=["GET"]),
     Route("/files", files_post, methods=["POST"]),
     Route("/v1/process/start", process_start, methods=["POST"]),
+    *[
+        Route(f"/process.Process/{method}", connect_unimplemented, methods=["POST"])
+        for method in _PROCESS_RPC_METHODS
+    ],
+    *[
+        Route(f"/filesystem.Filesystem/{method}", connect_unimplemented, methods=["POST"])
+        for method in _FILESYSTEM_RPC_METHODS
+    ],
 ]
 
 app = Starlette(routes=routes, middleware=[Middleware(_AuthMiddleware)])

@@ -5,6 +5,10 @@ branchName: master
 k8sClusterName: apps-gke
 cloudProvider: gcp
 
+# QA6 CI pushes to Artifact Registry (asia-south1-docker.pkg.dev/gc-qa6/gc-qa6).
+# The chart default spr-nexus credential is for prod-nexus and can break GAR pulls.
+imagePullSecrets: []
+
 replicas:
   apiService: 1
   runtimeGateway: 3

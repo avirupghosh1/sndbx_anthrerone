@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Destructive local cleanup for the raw minikube deployment.
-# It removes runtime containers/images, runtime/template DB rows, and local PVCs.
+# It removes runtime containers/images, runtime/template DB rows, and stale
+# legacy local PVCs if they exist.
 
 NAMESPACE="${NAMESPACE:-sandboxes}"
 DB_URL="${DB_URL:-mongodb://127.0.0.1:27017/sandboxes}"
@@ -13,7 +14,7 @@ CLEAN_SLATE_CONFIRM="${CLEAN_SLATE_CONFIRM:-}"
 API_DEPLOY="${API_DEPLOY:-api-service}"
 REGISTRY_DEPLOY="${REGISTRY_DEPLOY:-registry}"
 RUNTIME_STS="${RUNTIME_STS:-runtime-gateway}"
-DOCKER_CONTAINER="${DOCKER_CONTAINER:-dockerd}"
+GATEWAY_CONTAINER="${GATEWAY_CONTAINER:-runtime-gateway}"
 DOCKER_HOST_IN_POD="${DOCKER_HOST_IN_POD:-tcp://127.0.0.1:2375}"
 
 PRUNE_DOCKER="${PRUNE_DOCKER:-1}"
@@ -52,6 +53,34 @@ require_tool() {
     fi
     exit 2
   fi
+}
+
+pod_containers() {
+  kubectl -n "$NAMESPACE" get pod "$1" \
+    -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null || true
+}
+
+resolve_container() {
+  local pod="$1"
+  local requested="$2"
+  local fallback="$3"
+  local role="$4"
+  local containers
+
+  containers="$(pod_containers "$pod")"
+  if printf '%s\n' "$containers" | grep -qx "$requested"; then
+    printf '%s' "$requested"
+    return 0
+  fi
+
+  if printf '%s\n' "$containers" | grep -qx "$fallback"; then
+    echo "  warning: ${role} container '${requested}' is not present in ${pod}; using '${fallback}'." >&2
+    printf '%s' "$fallback"
+    return 0
+  fi
+
+  echo "  warning: ${role} container '${requested}' is not present in ${pod}; available containers: $(printf '%s\n' "$containers" | paste -sd ', ' -)" >&2
+  printf '%s' "$requested"
 }
 
 exists() {
@@ -110,7 +139,7 @@ Defaults:
   EXPECTED_CONTEXT=$EXPECTED_CONTEXT
 
 This will scale local workloads to 0, truncate sandbox/template runtime rows,
-delete runtime Docker graph PVCs, and delete registry/api stale PVCs if present.
+delete stale legacy runtime/registry/api PVCs if present.
 EOF
     exit 2
   fi
@@ -168,16 +197,17 @@ if [ "$PRUNE_DOCKER" = "1" ]; then
       echo "skip $pod phase=$phase"
       continue
     fi
+    gateway_container="$(resolve_container "$pod" "$GATEWAY_CONTAINER" "gateway" "gateway/app")"
     echo "prune $pod"
-    if ! kubectl -n "$NAMESPACE" exec "$pod" -c "$DOCKER_CONTAINER" -- sh -lc '
-      docker_host="$1"
-      ids="$(docker --host "$docker_host" ps -aq)"
-      if [ -n "$ids" ]; then
-        docker --host "$docker_host" rm -f $ids >/dev/null
-      fi
-      docker --host "$docker_host" system prune -a --volumes -f
-    ' sh "$DOCKER_HOST_IN_POD"; then
-      echo "warning: failed to prune $pod; continuing because PVC deletion will clear local Docker graph" >&2
+    if ! kubectl -n "$NAMESPACE" exec "$pod" -c "$gateway_container" -- env DOCKER_HOST="$DOCKER_HOST_IN_POD" python -c "
+import docker, os
+c = docker.DockerClient(base_url=os.environ['DOCKER_HOST'])
+for cont in c.containers.list(all=True):
+    cont.remove(force=True)
+c.images.prune(filters={'dangling': False})
+c.volumes.prune()
+"; then
+      echo "warning: failed to prune $pod; continuing with remaining cleanup" >&2
     fi
   done < <(runtime_pods)
 fi
@@ -232,7 +262,7 @@ if [ "$TRUNCATE_DB" = "1" ]; then
 fi
 
 if [ "$DELETE_PVCS" = "1" ]; then
-  section "Delete local PVCs"
+  section "Delete stale legacy local PVCs"
   if [ "$runtime_replicas" -gt 0 ] 2>/dev/null; then
     for i in $(seq 0 "$((runtime_replicas - 1))"); do
       delete_pvc_if_exists "docker-graph-${RUNTIME_STS}-${i}"
@@ -276,7 +306,7 @@ section "Next"
 cat <<EOF
 Clean slate complete.
 
-For the raw local manifests, recreate PVCs and restart pods with:
+For the raw local manifests, restart pods with:
   kubectl apply -f deploy/api-service.yaml
   kubectl apply -f deploy/runtime-gateway.yaml
 

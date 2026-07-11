@@ -92,7 +92,7 @@ class SandboxDataPlaneMiddleware:
             await response(scope, receive, send)
             return
 
-        deny = _layer3_deny(route, headers)
+        deny = _layer3_deny(route, headers, guest_port=guest_port, cfg=cfg, scope=scope)
         if deny:
             await _send_error(scope, receive, send, deny[0], deny[1])
             return
@@ -308,9 +308,25 @@ def _parse_forwarded_route(headers: Dict[str, str]) -> Optional[Tuple[int, str]]
     return guest_port, sid
 
 
-def _layer3_deny(route: SandboxRoute, headers: Dict[str, str]) -> Optional[Tuple[int, str]]:
+def _layer3_deny(
+    route: SandboxRoute,
+    headers: Dict[str, str],
+    *,
+    guest_port: int,
+    cfg,
+    scope: Scope,
+) -> Optional[Tuple[int, str]]:
     """``e2b-traffic-access-token`` when sandbox is not public."""
     if route.allow_public_traffic:
+        return None
+    envd_port = max(1, min(65535, int(getattr(cfg, "ENVD_PORT", 49983))))
+    raw_qs = (scope.get("query_string") or b"").decode("latin-1")
+    has_envd_signature = bool((parse_qs(raw_qs).get("signature") or [""])[0].strip())
+    if int(guest_port) == envd_port and (
+        (headers.get("x-access-token") or "").strip() or has_envd_signature
+    ):
+        # envd authenticates this token itself. The traffic token protects user
+        # service ports; requiring it here breaks E2B SDK command/file RPCs.
         return None
     expected = (route.traffic_access_token or "").strip()
     if not expected:

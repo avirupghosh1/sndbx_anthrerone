@@ -5,6 +5,8 @@ from . import commands
 from . import files
 from . import agents
 from . import templates
+from . import e2b_compat
+from . import daytona_compat
 from . import guest_connection
 from . import sandbox_envd
 from . import internal_routing
@@ -16,6 +18,8 @@ __all__ = [
     "files",
     "agents",
     "templates",
+    "e2b_compat",
+    "daytona_compat",
     "guest_connection",
     "sandbox_envd",
     "internal_routing",

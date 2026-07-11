@@ -56,7 +56,7 @@ images:
     tag: CHANGE_ME
     pullPolicy: IfNotPresent
   # dockerd sidecar for runtime-gateway. This is the gVisor-enabled DinD image
-  # built from runtime-gateway/Dockerfile.gvisor (docker:28-dind + runsc).
+  # built from runtime-gateway/Dockerfile.gvisor (docker:29-dind + runsc).
   # CI sets repo/name/tag via EXTRA_VALUES; tag stays CHANGE_ME until then.
   dockerDind:
     repo: prod-nexus.sprinklr.com:8123
@@ -134,13 +134,7 @@ runtimeGateway:
       periodSeconds: 15
       timeoutSeconds: 3
       failureThreshold: 5
-    persistence:
-      enabled: true
-      size: 50Gi
-      capacityBytes: "53687091200"
-      accessModes:
-        - ReadWriteOnce
-      storageClassName: ""
+    graphCapacityBytes: "53687091200"
 
 config:
   apiService:
@@ -201,7 +195,7 @@ config:
     PORT: "8080"
     HOST: "0.0.0.0"
     DOCKER_GRAPH_PATH: "/var/lib/docker"
-    DOCKER_GRAPH_CAPACITY_BYTES: "{{ .Values.runtimeGateway.docker.persistence.capacityBytes }}"
+    DOCKER_GRAPH_CAPACITY_BYTES: "{{ .Values.runtimeGateway.docker.graphCapacityBytes }}"
     TEMPLATE_REGISTRY_PUSH_ENABLED: "{{ .Values.templateRegistry.pushEnabled }}"
     TEMPLATE_REGISTRY_REPO_PREFIX: "{{ include \"sndbx.templateRegistryRepoPrefix\" . }}"
     TEMPLATE_REGISTRY_AUTH_REQUIRED: "{{ include \"sndbx.templateRegistryAuthRequired\" . }}"
@@ -238,12 +232,6 @@ templateRegistry:
       enabled: false
       remoteUrl: ""
       remoteServer: ""
-    persistence:
-      enabled: true
-      size: 20Gi
-      accessModes:
-        - ReadWriteOnce
-      storageClassName: ""
     resources:
       requests:
         cpu: "100m"

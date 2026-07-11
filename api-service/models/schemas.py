@@ -1,6 +1,6 @@
 """Request schemas (Pydantic models)."""
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import AliasChoices, BaseModel, Field, ConfigDict, model_validator
 from typing import Optional, Dict, Any, List
 from enum import Enum
 
@@ -25,6 +25,7 @@ class CreateSandboxRequest(BaseModel):
     # Must be a pull-able Docker image ref unless the orchestrator maps it (see SandboxManager).
     template_id: Optional[str] = Field(
         default="python:3.11",
+        validation_alias=AliasChoices("template_id", "templateID"),
         description="Container image (e.g. python:3.11) or a known template alias",
     )
     metadata: Optional[Dict[str, Any]] = Field(
@@ -34,18 +35,24 @@ class CreateSandboxRequest(BaseModel):
             "(e.g. ``[8080, 49983]``) for Pod/Service and data-plane routing."
         ),
     )
+    env_vars: Optional[Dict[str, Any]] = Field(
+        default=None,
+        validation_alias=AliasChoices("env_vars", "envVars"),
+        description="Environment variables injected into the guest container.",
+    )
     cpu_limit: Optional[str] = Field(default="1", description="CPU limit (e.g., '1', '0.5')")
     memory_limit: Optional[str] = Field(default="512m", description="Memory limit (e.g., '512m', '1g')")
     timeout: Optional[int] = Field(default=3600, description="Sandbox timeout in seconds")
     from_snapshot_image: Optional[str] = Field(
         default=None,
+        validation_alias=AliasChoices("from_snapshot_image", "fromSnapshotImage"),
         description=(
             "Docker image ref returned by POST /sandboxes/{id}/snapshot (filesystem capture). "
             "When set, ``template_id`` is ignored for image selection; warm pool is skipped."
         ),
     )
 
-    model_config = ConfigDict(json_schema_extra={
+    model_config = ConfigDict(populate_by_name=True, json_schema_extra={
             "example": {
                 "template_id": "python:3.11",
                 "metadata": {"purpose": "testing"},
@@ -63,14 +70,23 @@ class CreateSnapshotRequest(BaseModel):
 
 
 class RefreshSandboxTimeoutRequest(BaseModel):
-    """E2B-style ``set_timeout`` / lease refresh: updates the stored sandbox timeout."""
+    """Lease refresh: updates the stored sandbox timeout."""
 
-    timeout_seconds: int = Field(
-        ...,
+    timeout_seconds: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices("timeout_seconds", "timeout"),
         ge=60,
         le=604800,
         description="New lease length in seconds (clamped server-side for Docker sandboxes).",
     )
+
+    @model_validator(mode="after")
+    def _require_timeout(self) -> "RefreshSandboxTimeoutRequest":
+        if self.timeout_seconds is None:
+            raise ValueError("timeout_seconds or timeout is required")
+        return self
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class RegisterTemplateRequest(BaseModel):
@@ -105,7 +121,7 @@ class RegisterTemplateRequest(BaseModel):
         default="",
         max_length=8000,
         description=(
-            "Optional shell probe (E2B-style ``readyCmd``): after ``settle_seconds``, run repeatedly "
+            "Optional shell probe: after ``settle_seconds``, run repeatedly "
             "until exit code 0 or ``TEMPLATE_READY_TIMEOUT_SEC``. Empty = skip."
         ),
     )

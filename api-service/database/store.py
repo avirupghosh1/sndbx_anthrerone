@@ -90,13 +90,10 @@ def _replace_credential_placeholders(database_url: str, username: str, password:
     return url
 
 
-def _inject_url_credentials(database_url: str, username: str, password: str, *, allow_empty_username: bool) -> str:
+def _inject_url_credentials(database_url: str, username: str, password: str) -> str:
     url = _replace_credential_placeholders(database_url, username, password)
-    if not username and allow_empty_username:
-        return url
-
     parts = urlsplit(url)
-    if not parts.netloc:
+    if not parts.netloc: 
         return url
     if "@" not in parts.netloc:
         if not username:
@@ -104,6 +101,7 @@ def _inject_url_credentials(database_url: str, username: str, password: str, *, 
         userinfo = quote(username, safe="")
         if password:
             userinfo = f"{userinfo}:{quote(password, safe='')}"
+        
         return urlunsplit((parts.scheme, f"{userinfo}@{parts.netloc}", parts.path, parts.query, parts.fragment)) #should go to this case
 
     userinfo, hosts = parts.netloc.rsplit("@", 1)
@@ -124,7 +122,7 @@ def _resolve_postgres_url(
     url = _with_scheme(database_url, "postgres")
     username = (database_username if database_username is not None else os.getenv("DATABASE_USERNAME") or "").strip()
     password = (database_password if database_password is not None else os.getenv("DATABASE_PASSWORD") or "").strip()
-    return _inject_url_credentials(url, username, password, allow_empty_username=False)
+    return _inject_url_credentials(url, username, password)
 
 
 def _resolve_mongodb_url(
@@ -145,7 +143,7 @@ def _resolve_mongodb_url(
         or os.getenv("MONGODB_PASSWORD")
         or ""
     ).strip()
-    return _inject_url_credentials(url, username, password, allow_empty_username=True)
+    return _inject_url_credentials(url, username, password)
 
 
 def _mongodb_database_name(database_url: str) -> str:
@@ -1849,6 +1847,86 @@ class _PostgresDatabase:
             for r in rows
         ]
 
+    def get_sandbox_snapshot(
+        self,
+        snapshot_id: str,
+        owner_client_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            if owner_client_id:
+                cursor.execute(
+                    """
+                    SELECT snapshot_id, source_sandbox_id, image_ref, label, created_at
+                    FROM sandbox_snapshots
+                    WHERE snapshot_id = ? AND owner_client_id = ?
+                    """,
+                    (snapshot_id, owner_client_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT snapshot_id, source_sandbox_id, image_ref, label, created_at
+                    FROM sandbox_snapshots
+                    WHERE snapshot_id = ?
+                    """,
+                    (snapshot_id,),
+                )
+            row = cursor.fetchone()
+            conn.close()
+        if not row:
+            return None
+        return {
+            "snapshot_id": row[0],
+            "source_sandbox_id": row[1],
+            "image_ref": row[2],
+            "label": row[3],
+            "created_at": row[4],
+        }
+
+    def list_all_sandbox_snapshots(
+        self,
+        limit: int = 100,
+        owner_client_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            if owner_client_id:
+                cursor.execute(
+                    """
+                    SELECT snapshot_id, source_sandbox_id, image_ref, label, created_at
+                    FROM sandbox_snapshots
+                    WHERE owner_client_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (owner_client_id, limit),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT snapshot_id, source_sandbox_id, image_ref, label, created_at
+                    FROM sandbox_snapshots
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            rows = cursor.fetchall()
+            conn.close()
+        return [
+            {
+                "snapshot_id": r[0],
+                "source_sandbox_id": r[1],
+                "image_ref": r[2],
+                "label": r[3],
+                "created_at": r[4],
+            }
+            for r in rows
+        ]
+
     @staticmethod
     def _template_dict_from_row(cursor, row: tuple) -> Dict[str, Any]:
         names = [d[0] for d in cursor.description]
@@ -3522,6 +3600,44 @@ class _MongoDatabase:
         owner_client_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         query: Dict[str, Any] = {"source_sandbox_id": sandbox_id}
+        if owner_client_id:
+            query["owner_client_id"] = owner_client_id
+        return [
+            {
+                "snapshot_id": doc.get("snapshot_id"),
+                "source_sandbox_id": doc.get("source_sandbox_id"),
+                "image_ref": doc.get("image_ref"),
+                "label": doc.get("label"),
+                "created_at": doc.get("created_at"),
+            }
+            for doc in self.db.sandbox_snapshots.find(query).sort("created_at", -1).limit(int(limit))
+        ]
+
+    def get_sandbox_snapshot(
+        self,
+        snapshot_id: str,
+        owner_client_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        query: Dict[str, Any] = {"_id": snapshot_id}
+        if owner_client_id:
+            query["owner_client_id"] = owner_client_id
+        doc = self.db.sandbox_snapshots.find_one(query)
+        if not doc:
+            return None
+        return {
+            "snapshot_id": doc.get("snapshot_id"),
+            "source_sandbox_id": doc.get("source_sandbox_id"),
+            "image_ref": doc.get("image_ref"),
+            "label": doc.get("label"),
+            "created_at": doc.get("created_at"),
+        }
+
+    def list_all_sandbox_snapshots(
+        self,
+        limit: int = 100,
+        owner_client_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        query: Dict[str, Any] = {}
         if owner_client_id:
             query["owner_client_id"] = owner_client_id
         return [

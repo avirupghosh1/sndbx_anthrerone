@@ -13,8 +13,8 @@ Not every value is created in Helm.
 - GitLab CI variables are pipeline inputs. The deploy job converts them into
   Helm `--set` overrides.
 - Helm values decide which Kubernetes objects are rendered: Deployments,
-  StatefulSets, Services, PVCs, Ingress, RBAC, and optionally the internal
-  template registry.
+  StatefulSets, Services, Ingress, RBAC, and optionally the internal template
+  registry. The chart uses `emptyDir` storage and does not create PVCs.
 
 Helm can create the app Secret only if you set `secrets.create=true` and provide
 all secret values in Helm values. That is not the current QA6 production mode.
@@ -192,7 +192,6 @@ With `templateRegistry.pushEnabled=true`, Helm creates:
 
 - `sndbx-qa6-tier1-template-registry` Deployment
 - `sndbx-qa6-tier1-template-registry` Service
-- `sndbx-qa6-tier1-template-registry-data` PVC
 
 The registry pod image is built by the Jenkins pipeline from
 `template-registry/Dockerfile`, which wraps the standard Docker distribution
@@ -235,7 +234,8 @@ templateRegistry.internal.proxy.remoteServer=registry.example.com
 In this mode runtime-gateway can pull a fully-qualified upstream image through
 the internal registry cache, tag it back to the original ref locally, and then
 create the sandbox using the original image ref. This cache is shared across
-runtime-gateway shards; Docker's normal layer cache is still per-shard/PVC.
+runtime-gateway shards while the registry pod is running; Docker's normal layer
+cache is still per-shard and ephemeral.
 
 ## External Registry Mode
 

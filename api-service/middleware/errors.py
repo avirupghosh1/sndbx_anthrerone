@@ -1,6 +1,6 @@
 """Error handling middleware."""
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 import logging
@@ -94,6 +94,7 @@ async def api_exception_handler(request: Request, exc: APIException):
         status_code=exc.status_code,
         content={
             "error": exc.__class__.__name__,
+            "code": exc.status_code,
             "message": exc.message,
             "status_code": exc.status_code,
             "details": exc.details,
@@ -109,10 +110,27 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         status_code=422,
         content={
             "error": "ValidationError",
+            "code": 422,
             "message": "Request validation failed",
             "status_code": 422,
             "details": {"errors": exc.errors()},
         },
+    )
+
+
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle FastAPI HTTPException with the E2B-compatible error shape too."""
+    message = str(exc.detail) if exc.detail is not None else "HTTP error"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": "HTTPException",
+            "code": exc.status_code,
+            "message": message,
+            "status_code": exc.status_code,
+            "details": {"detail": exc.detail},
+        },
+        headers=getattr(exc, "headers", None),
     )
 
 
@@ -124,6 +142,7 @@ async def general_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={
             "error": "InternalServerError",
+            "code": 500,
             "message": "An unexpected error occurred",
             "status_code": 500,
             "details": {"error": str(exc)},

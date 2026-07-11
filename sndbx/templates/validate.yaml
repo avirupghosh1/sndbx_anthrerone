@@ -1,13 +1,21 @@
-{{- if or (eq (default "" .Values.images.apiService.tag) "") (eq .Values.images.apiService.tag "CHANGE_ME") -}}
+{{- $apiServiceTag := toString (default "" .Values.images.apiService.tag) -}}
+{{- if or (eq $apiServiceTag "") (eq $apiServiceTag "CHANGE_ME") -}}
 {{- fail "images.apiService.tag must be set by Jenkins EXTRA_VALUES or release values" -}}
 {{- end -}}
-{{- if or (eq (default "" .Values.images.runtimeGateway.tag) "") (eq .Values.images.runtimeGateway.tag "CHANGE_ME") -}}
+{{- $runtimeGatewayTag := toString (default "" .Values.images.runtimeGateway.tag) -}}
+{{- if or (eq $runtimeGatewayTag "") (eq $runtimeGatewayTag "CHANGE_ME") -}}
 {{- fail "images.runtimeGateway.tag must be set by Jenkins EXTRA_VALUES or release values" -}}
 {{- end -}}
-{{- if or (eq (default "" .Values.images.dockerDind.tag) "") (eq .Values.images.dockerDind.tag "CHANGE_ME") -}}
+{{- $dockerDindTag := toString (default "" .Values.images.dockerDind.tag) -}}
+{{- if or (eq $dockerDindTag "") (eq $dockerDindTag "CHANGE_ME") -}}
 {{- fail "images.dockerDind.tag must be set (gVisor DinD image) by Jenkins EXTRA_VALUES or release values" -}}
 {{- end -}}
-{{- if and (not .Values.secrets.create) (eq (default "" .Values.secrets.name) "") -}}
+{{- $templateRegistryTag := toString (default "" .Values.images.templateRegistry.tag) -}}
+{{- if or (eq $templateRegistryTag "") (eq $templateRegistryTag "CHANGE_ME") -}}
+{{- fail "images.templateRegistry.tag must be set by Jenkins EXTRA_VALUES or release values" -}}
+{{- end -}}
+{{- $secretName := toString (default "" .Values.secrets.name) -}}
+{{- if and (not .Values.secrets.create) (eq $secretName "") -}}
 {{- fail "set secrets.name to an existing Kubernetes Secret or enable secrets.create" -}}
 {{- end -}}
 {{- if and .Values.secrets.create (or (eq (default "" .Values.secrets.data.apiKey) "") (eq (default "" .Values.secrets.data.internalApiKey) "") (eq (default "" .Values.secrets.data.portalSessionSecret) "") (eq (default "" .Values.secrets.data.databaseUrl) "") (eq (default "" .Values.secrets.data.databaseType) "") (eq (default "" .Values.secrets.data.databasePassword) "")) -}}
@@ -19,11 +27,11 @@
 {{- if eq (len .Values.ingress.sandboxHosts) 0 -}}
 {{- fail "ingress.sandboxHosts must contain at least one host" -}}
 {{- end -}}
-{{- $databaseSecretName := .Values.database.existingSecretName | default .Values.secrets.name -}}
-{{- if and (eq (default "" $databaseSecretName) "") .Values.secrets.create -}}
+{{- $databaseSecretName := toString (default "" (.Values.database.existingSecretName | default .Values.secrets.name)) -}}
+{{- if and (eq $databaseSecretName "") .Values.secrets.create -}}
 {{- $databaseSecretName = include "sndbx.secretName" . -}}
 {{- end -}}
-{{- if and (eq (default "" .Values.database.url) "") (eq (default "" $databaseSecretName) "") -}}
+{{- if and (eq (default "" .Values.database.url) "") (eq $databaseSecretName "") -}}
 {{- fail "database is required: provide DATABASE_URL in secrets.name or set database.url" -}}
 {{- end -}}
 {{- $databaseType := lower (default "" .Values.database.type) -}}
@@ -54,8 +62,8 @@
 {{- if and .Values.templateRegistry.internal.proxy.enabled (or (eq (default "" .Values.templateRegistry.internal.proxy.remoteUrl) "") (eq (default "" .Values.templateRegistry.internal.proxy.remoteServer) "")) -}}
 {{- fail "templateRegistry.internal.proxy.enabled=true requires templateRegistry.internal.proxy.remoteUrl and remoteServer" -}}
 {{- end -}}
-{{- $registrySecretName := .Values.templateRegistry.existingSecretName | default .Values.secrets.name -}}
-{{- if and (eq (include "sndbx.templateRegistryAuthRequired" .) "true") (not .Values.secrets.create) (eq (default "" $registrySecretName) "") -}}
+{{- $registrySecretName := toString (default "" (.Values.templateRegistry.existingSecretName | default .Values.secrets.name)) -}}
+{{- if and (eq (include "sndbx.templateRegistryAuthRequired" .) "true") (not .Values.secrets.create) (eq $registrySecretName "") -}}
 {{- fail "templateRegistry.authRequired=true requires either secrets.create=true with registryUsername/registryPassword or templateRegistry.existingSecretName/secrets.name" -}}
 {{- end -}}
 {{- if and (eq (include "sndbx.templateRegistryAuthRequired" .) "true") .Values.secrets.create (eq (default "" .Values.templateRegistry.existingSecretName) "") (or (eq (default "" .Values.secrets.data.registryUsername) "") (eq (default "" .Values.secrets.data.registryPassword) "")) -}}

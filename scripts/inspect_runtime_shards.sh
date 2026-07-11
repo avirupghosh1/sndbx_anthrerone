@@ -7,6 +7,7 @@ DB_TYPE="${DB_TYPE:-}"
 SHARDS="${SHARDS:-3}"
 IMAGE_FILTER="${IMAGE_FILTER:-mysandbox|custodian|python|agentlib|REPOSITORY}"
 DOCKER_HOST_IN_POD="${DOCKER_HOST_IN_POD:-tcp://127.0.0.1:2375}"
+GATEWAY_CONTAINER="${GATEWAY_CONTAINER:-runtime-gateway}"
 
 section() {
   printf '\n===== %s =====\n' "$1"
@@ -41,9 +42,34 @@ require_tool() {
   fi
 }
 
+pod_containers() {
+  kubectl -n "$NAMESPACE" get pod "$1" \
+    -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null || true
+}
+
+resolve_container() {
+  local pod="$1"
+  local requested="$2"
+  local fallback="$3"
+  local containers
+
+  containers="$(pod_containers "$pod")"
+  if printf '%s\n' "$containers" | grep -qx "$requested"; then
+    printf '%s' "$requested"
+    return 0
+  fi
+  if printf '%s\n' "$containers" | grep -qx "$fallback"; then
+    echo "  warning: gateway container '${requested}' is not present in ${pod}; using '${fallback}'." >&2
+    printf '%s' "$fallback"
+    return 0
+  fi
+  echo "  warning: gateway container '${requested}' is not present in ${pod}; available containers: $(printf '%s\n' "$containers" | paste -sd ', ' -)" >&2
+  printf '%s' "$requested"
+}
+
 section "Kubernetes pods"
 kubectl -n "$NAMESPACE" get pods -o wide
-echo "Docker endpoint inside dockerd sidecars: ${DOCKER_HOST_IN_POD}"
+echo "Docker endpoint inside runtime-gateway pods: ${DOCKER_HOST_IN_POD}"
 
 section "Warm-pool segments"
 if is_mongo_url; then
@@ -180,10 +206,26 @@ for i in $(seq 0 "$((SHARDS - 1))"); do
     echo "missing pod: ${pod}"
     continue
   fi
-  kubectl -n "$NAMESPACE" exec "$pod" -c dockerd -- \
-    docker --host "$DOCKER_HOST_IN_POD" ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+  gateway_container="$(resolve_container "$pod" "$GATEWAY_CONTAINER" "gateway")"
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$gateway_container" -- env DOCKER_HOST="$DOCKER_HOST_IN_POD" python -c "
+import docker, os
+c = docker.DockerClient(base_url=os.environ['DOCKER_HOST'])
+print('NAMES\tSTATUS\tIMAGE')
+for cont in c.containers.list(all=True):
+    image = (cont.image.tags[0] if cont.image.tags else cont.image.short_id)
+    print(f\"{cont.name}\t{cont.status}\t{image}\")
+"
 
   section "Shard ${pod}: relevant images"
-  kubectl -n "$NAMESPACE" exec "$pod" -c dockerd -- sh -lc \
-    "docker --host '$DOCKER_HOST_IN_POD' images --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' | grep -E '${IMAGE_FILTER}' || true"
+  kubectl -n "$NAMESPACE" exec "$pod" -c "$gateway_container" -- env DOCKER_HOST="$DOCKER_HOST_IN_POD" IMAGE_FILTER="$IMAGE_FILTER" python -c "
+import docker, os, re
+c = docker.DockerClient(base_url=os.environ['DOCKER_HOST'])
+pattern = re.compile(os.environ.get('IMAGE_FILTER', ''), re.I)
+print('REPOSITORY:TAG\tSIZE\tID')
+for image in c.images.list():
+    tags = image.tags or [image.short_id]
+    for tag in tags:
+        if pattern.search(tag):
+            print(f\"{tag}\t{image.attrs.get('Size', 0)}\t{image.short_id}\")
+" | grep -v '^REPOSITORY' || true
 done

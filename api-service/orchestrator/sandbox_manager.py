@@ -1161,13 +1161,7 @@ class SandboxManager:
             if row_state != "running":
                 if row_state == "starting" and cid:
                     try:
-                        execution = self._execution_for_row(row)
-                        state_fn = getattr(execution, "get_container_state", None)
-                        state = (
-                            str(state_fn(cid) or "unknown").strip().lower()
-                            if callable(state_fn)
-                            else ("running" if execution.is_container_running(cid) else "stopped")
-                        )
+                        state = self._container_runtime_state_for_row(row, cid)
                         if state == "running":
                             self.refresh_guest_routing_metadata(sid)
                             if self.db.update_sandbox_state(sid, "running"):
@@ -1187,13 +1181,7 @@ class SandboxManager:
                     if gateway_id and current_gateways and gateway_id not in current_gateways:
                         continue
                     try:
-                        execution = self._execution_for_row(row)
-                        state_fn = getattr(execution, "get_container_state", None)
-                        state = (
-                            str(state_fn(cid) or "unknown").strip().lower()
-                            if callable(state_fn)
-                            else ("running" if execution.is_container_running(cid) else "stopped")
-                        )
+                        state = self._container_runtime_state_for_row(row, cid)
                         if state == "running" and self.db.update_sandbox_state(sid, "running"):
                             stats["warm_pool_revived"] += 1
                             logger.warning(
@@ -1210,14 +1198,8 @@ class SandboxManager:
             state = "missing" if cid else "missing"
             if cid:
                 try:
-                    execution = self._execution_for_row(row)
-                    state_fn = getattr(execution, "get_container_state", None)
-                    if callable(state_fn):
-                        state = str(state_fn(cid) or "unknown").strip().lower()
-                        alive = state == "running"
-                    else:
-                        alive = bool(execution.is_container_running(cid))
-                        state = "running" if alive else "stopped"
+                    state = self._container_runtime_state_for_row(row, cid)
+                    alive = self._runtime_state_matches_db_state(row_state, state)
                 except Exception as ex:  # noqa: BLE001
                     logger.warning(
                         "Sandbox reconcile: liveness check failed sandbox=%s container=%s detail=%s",
@@ -2915,7 +2897,12 @@ class SandboxManager:
         sandbox = self.get_sandbox(sandbox_id)
         if not sandbox:
             return False
-        return self.get_sandbox_runtime_failure(sandbox_id) is None
+        if str(sandbox.get("state") or "").strip().lower() != "running":
+            return False
+        if self.get_sandbox_runtime_failure(sandbox_id) is not None:
+            return False
+        cid = str(sandbox.get("container_id") or "").strip()
+        return self._container_runtime_state_for_row(sandbox, cid) == "running"
 
     def create_filesystem_snapshot(
         self,
@@ -3199,6 +3186,50 @@ class SandboxManager:
         self.db.merge_sandbox_metadata(sid, meta)
         return True
 
+    def _clear_sandbox_runtime_error(self, sandbox_id: str) -> None:
+        sid = (sandbox_id or "").strip()
+        if not sid:
+            return
+        row = self.db.get_sandbox(sid)
+        if not row:
+            return
+        meta = dict(row.get("metadata") or {})
+        changed = False
+        for key in ("runtime_error", "runtime_error_code", "runtime_error_at"):
+            if key in meta:
+                meta.pop(key, None)
+                changed = True
+        if changed:
+            self.db.merge_sandbox_metadata(sid, meta)
+
+    def _container_runtime_state_for_row(self, row: dict, container_id: str) -> str:
+        cid = str(container_id or "").strip()
+        if not cid:
+            return "missing"
+        execution = self._execution_for_row(row)
+        state_fn = getattr(execution, "get_container_state", None)
+        if callable(state_fn):
+            return str(state_fn(cid) or "unknown").strip().lower()
+        try:
+            return "running" if execution.is_container_running(cid) else "stopped"
+        except Exception:
+            return "unknown"
+
+    @staticmethod
+    def _runtime_state_matches_db_state(db_state: str, runtime_state: str) -> bool:
+        row_state = str(db_state or "").strip().lower()
+        state = str(runtime_state or "").strip().lower()
+        if state == "running":
+            return row_state in {"running", "starting", "resuming", "pausing"}
+        if state == "paused":
+            return row_state in {"paused", "pausing"}
+        if state == "stopped":
+            # Older runtime-gateway images collapsed Docker's "paused" status to
+            # "stopped". Keep paused rows readable during rolling/local upgrades;
+            # resume/kill still verifies the workload by acting on the container.
+            return row_state in {"paused", "pausing"}
+        return False
+
     def get_sandbox_runtime_failure(self, sandbox_id: str) -> Optional[str]:
         sid = (sandbox_id or "").strip()
         if not sid:
@@ -3217,8 +3248,12 @@ class SandboxManager:
         if not cid:
             self._mark_sandbox_lost(sid, detail=msg)
             return msg
+        row_state = str(row.get("state") or "").strip().lower()
         try:
-            if self._execution_for_row(row).is_container_running(cid):
+            runtime_state = self._container_runtime_state_for_row(row, cid)
+            if runtime_state == "unknown":
+                return None
+            if self._runtime_state_matches_db_state(row_state, runtime_state):
                 return None
         except Exception:
             return None
@@ -3285,11 +3320,24 @@ class SandboxManager:
         sandbox = self.get_sandbox(sandbox_id)
         if not sandbox:
             return False
+        previous_state = str(sandbox.get("state") or "running").strip().lower() or "running"
+        container_id = str(sandbox.get("container_id") or "").strip()
+        if not container_id:
+            return False
 
-        if self._execution_for_row(sandbox).pause_instance(sandbox["container_id"]):
+        self.db.update_sandbox_state(sandbox_id, "pausing")
+        if self._execution_for_row(sandbox).pause_instance(container_id):
             self.db.update_sandbox_state(sandbox_id, "paused")
+            self._clear_sandbox_runtime_error(sandbox_id)
             logger.info("Sandbox paused: %s", sandbox_id)
             return True
+        runtime_state = self._container_runtime_state_for_row(sandbox, container_id)
+        if runtime_state == "paused":
+            self.db.update_sandbox_state(sandbox_id, "paused")
+            self._clear_sandbox_runtime_error(sandbox_id)
+            logger.info("Sandbox paused: %s", sandbox_id)
+            return True
+        self.db.update_sandbox_state(sandbox_id, previous_state)
         logger.warning("Pause not applied for sandbox %s (unsupported or failed)", sandbox_id)
         return False
 
@@ -3298,11 +3346,25 @@ class SandboxManager:
         sandbox = self.get_sandbox(sandbox_id)
         if not sandbox:
             return False
+        previous_state = str(sandbox.get("state") or "paused").strip().lower() or "paused"
+        container_id = str(sandbox.get("container_id") or "").strip()
+        if not container_id:
+            return False
 
-        if self._execution_for_row(sandbox).resume_instance(sandbox["container_id"]):
+        self.db.update_sandbox_state(sandbox_id, "resuming")
+        if self._execution_for_row(sandbox).resume_instance(container_id):
             self.db.update_sandbox_state(sandbox_id, "running")
+            self._clear_sandbox_runtime_error(sandbox_id)
             self.refresh_guest_routing_metadata(sandbox_id)
             logger.info("Sandbox resumed: %s", sandbox_id)
             return True
+        runtime_state = self._container_runtime_state_for_row(sandbox, container_id)
+        if runtime_state == "running":
+            self.db.update_sandbox_state(sandbox_id, "running")
+            self._clear_sandbox_runtime_error(sandbox_id)
+            self.refresh_guest_routing_metadata(sandbox_id)
+            logger.info("Sandbox resumed: %s", sandbox_id)
+            return True
+        self.db.update_sandbox_state(sandbox_id, previous_state)
         logger.warning("Resume not applied for sandbox %s (unsupported or failed)", sandbox_id)
         return False

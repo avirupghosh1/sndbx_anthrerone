@@ -1,18 +1,11 @@
-"""Sandbox endpoints."""
+"""Generic sandbox endpoints used by the local SDK."""
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import Optional, List
+from typing import Any, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 
 from async_runner import run_io
-from models import (
-    CreateSandboxRequest,
-    CreateSnapshotRequest,
-    RefreshSandboxTimeoutRequest,
-    SandboxResponse,
-    SandboxLifecycleResponse,
-    SandboxTimeoutRefreshResponse,
-    SnapshotRecordResponse,
-)
 from middleware import (
     ApiKeyPrincipal,
     SandboxNotFoundException,
@@ -20,13 +13,68 @@ from middleware import (
     ensure_sandbox_access,
     validate_api_key,
 )
+from models import (
+    CreateSandboxRequest,
+    CreateSnapshotRequest,
+    RefreshSandboxTimeoutRequest,
+    SandboxLifecycleResponse,
+    SandboxResponse,
+    SandboxTimeoutRefreshResponse,
+    SnapshotRecordResponse,
+)
 from orchestrator import SandboxManager
 from orchestrator.sandbox_connections import enrich_sandbox_response
 
 router = APIRouter(prefix="/sandboxes", tags=["sandboxes"])
 
 
-def _resolve_template_id_for_principal(sandbox_manager: SandboxManager, principal: ApiKeyPrincipal, template_id: str | None) -> str:
+def strip_secret_metadata(metadata: Any) -> dict:
+    md = dict(metadata or {}) if isinstance(metadata, dict) else {}
+    md.pop("envd_access_token", None)
+    md.pop("traffic_access_token", None)
+    return md
+
+
+def sandbox_response_payload(
+    sandbox: Optional[dict],
+    sandbox_manager: SandboxManager,
+    *,
+    include_secrets: bool,
+) -> dict:
+    raw = dict(
+        enrich_sandbox_response(
+            sandbox or {},
+            sandbox_manager._config,
+            include_secrets=include_secrets,
+        )
+    )
+    raw["metadata"] = strip_secret_metadata(raw.get("metadata"))
+    return raw
+
+
+def resolve_snapshot_image(
+    sandbox_manager: SandboxManager,
+    principal: ApiKeyPrincipal,
+    snapshot_id: str,
+) -> Optional[str]:
+    sid = (snapshot_id or "").strip()
+    if not sid:
+        return None
+    get_snapshot = getattr(sandbox_manager.db, "get_sandbox_snapshot", None)
+    if not callable(get_snapshot):
+        return None
+    row = get_snapshot(sid, owner_client_id=principal.client_id)
+    if not row and principal.client_id == "bootstrap-local-client":
+        row = get_snapshot(sid)
+    image_ref = str((row or {}).get("image_ref") or "").strip()
+    return image_ref or None
+
+
+def resolve_template_id_for_principal(
+    sandbox_manager: SandboxManager,
+    principal: ApiKeyPrincipal,
+    template_id: str | None,
+) -> str:
     requested = (template_id or "").strip() or "python:3.11"
     owned = sandbox_manager.db.get_sandbox_template_by_alias(principal.client_id, requested)
     if owned:
@@ -50,35 +98,57 @@ def _resolve_template_id_for_principal(sandbox_manager: SandboxManager, principa
     return requested
 
 
-def _owned_sandbox_or_404(sandbox_manager: SandboxManager, principal: ApiKeyPrincipal, sandbox_id: str) -> dict:
+def owned_sandbox_or_404(
+    sandbox_manager: SandboxManager,
+    principal: ApiKeyPrincipal,
+    sandbox_id: str,
+) -> dict:
     sandbox = sandbox_manager.get_sandbox(sandbox_id)
     if not sandbox:
         raise SandboxNotFoundException(sandbox_id)
     return ensure_sandbox_access(principal, sandbox, sandbox_id)
 
 
-def _ensure_live_sandbox(sandbox_manager: SandboxManager, sandbox_id: str) -> None:
+def ensure_live_sandbox(sandbox_manager: SandboxManager, sandbox_id: str) -> None:
     reason = sandbox_manager.get_sandbox_runtime_failure(sandbox_id)
     if reason:
         raise SandboxRuntimeLostException(sandbox_id, reason)
 
 
-@router.post("", response_model=SandboxResponse)
-async def create_sandbox(
+async def create_sandbox_row(
     request: CreateSandboxRequest,
-    principal: ApiKeyPrincipal = Depends(validate_api_key),
-    sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
-):
-    """Create new sandbox."""
-    resolved_template_id = _resolve_template_id_for_principal(sandbox_manager, principal, request.template_id)
+    principal: ApiKeyPrincipal,
+    sandbox_manager: SandboxManager,
+    *,
+    allow_public_traffic: Optional[bool] = None,
+) -> dict:
+    metadata = dict(request.metadata or {})
+    if allow_public_traffic is not None:
+        metadata["allow_public_traffic"] = bool(allow_public_traffic)
+    if isinstance(request.env_vars, dict) and request.env_vars:
+        shim_env = metadata.get("env")
+        merged_env = dict(shim_env) if isinstance(shim_env, dict) else {}
+        merged_env.update({str(k): str(v) for k, v in request.env_vars.items() if v is not None})
+        metadata["env"] = merged_env
+
+    from_snapshot_image = request.from_snapshot_image or resolve_snapshot_image(
+        sandbox_manager,
+        principal,
+        request.template_id or "",
+    )
+    resolved_template_id = resolve_template_id_for_principal(
+        sandbox_manager,
+        principal,
+        request.template_id,
+    )
     sandbox_id = await run_io(
         sandbox_manager.create_sandbox,
         resolved_template_id,
-        request.metadata,
+        metadata,
         request.cpu_limit,
         request.memory_limit,
         request.timeout,
-        request.from_snapshot_image,
+        from_snapshot_image,
         principal.client_id,
         principal.key_id,
     )
@@ -94,8 +164,42 @@ async def create_sandbox(
         raise HTTPException(status_code=503, detail=detail)
 
     sandbox = sandbox_manager.get_sandbox_for_create_response(sandbox_id)
+    if not sandbox:
+        raise HTTPException(status_code=500, detail="Sandbox was created but no DB row was returned")
+    return sandbox
 
-    return SandboxResponse(**enrich_sandbox_response(sandbox, sandbox_manager._config, include_secrets=True))
+
+async def create_filesystem_snapshot_row(
+    sandbox_id: str,
+    label: Optional[str],
+    principal: ApiKeyPrincipal,
+    sandbox_manager: SandboxManager,
+) -> dict:
+    owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
+    ensure_live_sandbox(sandbox_manager, sandbox_id)
+    out = await run_io(sandbox_manager.create_filesystem_snapshot, sandbox_id, label)
+    if not out:
+        if not sandbox_manager.get_sandbox(sandbox_id):
+            raise SandboxNotFoundException(sandbox_id)
+        raise HTTPException(
+            status_code=501,
+            detail="Filesystem snapshot unavailable: requires Docker Engine and successful `docker commit`.",
+        )
+    return out
+
+
+@router.post("", response_model=SandboxResponse)
+async def create_sandbox(
+    request: CreateSandboxRequest,
+    principal: ApiKeyPrincipal = Depends(validate_api_key),
+    sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
+):
+    """Create a sandbox using the generic local SDK response shape."""
+    sandbox = await create_sandbox_row(request, principal, sandbox_manager)
+    return JSONResponse(
+        status_code=201,
+        content=sandbox_response_payload(sandbox, sandbox_manager, include_secrets=True),
+    )
 
 
 @router.post("/{sandbox_id}/snapshot", response_model=SnapshotRecordResponse)
@@ -106,18 +210,7 @@ async def create_sandbox_snapshot(
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
     """Persist the sandbox writable layer with Docker commit."""
-    _owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
-    _ensure_live_sandbox(sandbox_manager, sandbox_id)
-    out = await run_io(sandbox_manager.create_filesystem_snapshot, sandbox_id, request.label)
-    if not out:
-        if not sandbox_manager.get_sandbox(sandbox_id):
-            raise SandboxNotFoundException(sandbox_id)
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "Filesystem snapshot unavailable: requires Docker Engine and successful `docker commit`."
-            ),
-        )
+    out = await create_filesystem_snapshot_row(sandbox_id, request.label, principal, sandbox_manager)
     return SnapshotRecordResponse(**out)
 
 
@@ -129,8 +222,8 @@ async def list_sandbox_snapshots(
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
     """List filesystem snapshots recorded for this sandbox."""
-    _owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
-    _ensure_live_sandbox(sandbox_manager, sandbox_id)
+    owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
+    ensure_live_sandbox(sandbox_manager, sandbox_id)
     rows = await run_io(sandbox_manager.list_filesystem_snapshots, sandbox_id, limit)
     return [SnapshotRecordResponse(**r) for r in rows]
 
@@ -141,9 +234,9 @@ async def get_sandbox_status(
     principal: ApiKeyPrincipal = Depends(validate_api_key),
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
-    """Return DB state and whether the workload is still running (cheap poll vs full ``GET``)."""
-    _owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
-    _ensure_live_sandbox(sandbox_manager, sandbox_id)
+    """Return DB state and whether the workload is still running."""
+    owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
+    ensure_live_sandbox(sandbox_manager, sandbox_id)
     data = await run_io(sandbox_manager.get_sandbox_lifecycle, sandbox_id)
     if not data:
         raise SandboxNotFoundException(sandbox_id)
@@ -157,9 +250,9 @@ async def refresh_sandbox_timeout(
     principal: ApiKeyPrincipal = Depends(validate_api_key),
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
-    """Refresh stored sandbox lease (E2B ``set_timeout`` / Custodian heartbeat)."""
-    _owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
-    _ensure_live_sandbox(sandbox_manager, sandbox_id)
+    """Refresh the stored sandbox lease."""
+    owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
+    ensure_live_sandbox(sandbox_manager, sandbox_id)
     ok = await run_io(
         sandbox_manager.refresh_sandbox_timeout,
         sandbox_id,
@@ -167,7 +260,7 @@ async def refresh_sandbox_timeout(
     )
     return SandboxTimeoutRefreshResponse(
         sandbox_id=sandbox_id.strip(),
-        timeout_seconds=int(request.timeout_seconds),
+        timeout_seconds=int(request.timeout_seconds or 0),
         refreshed=bool(ok),
     )
 
@@ -179,10 +272,9 @@ async def get_sandbox(
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
     """Get sandbox info."""
-    sandbox = _owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
-    _ensure_live_sandbox(sandbox_manager, sandbox_id)
-
-    return SandboxResponse(**enrich_sandbox_response(sandbox, sandbox_manager._config, include_secrets=False))
+    sandbox = owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
+    ensure_live_sandbox(sandbox_manager, sandbox_id)
+    return sandbox_response_payload(sandbox, sandbox_manager, include_secrets=False)
 
 
 @router.get("", response_model=list)
@@ -192,12 +284,15 @@ async def list_sandboxes(
     principal: ApiKeyPrincipal = Depends(validate_api_key),
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
-    """List all sandboxes."""
-    sandboxes = sandbox_manager.db.list_sandboxes(limit=limit, offset=offset, owner_client_id=principal.client_id)
-
+    """List sandboxes for the authenticated client."""
+    rows = sandbox_manager.db.list_sandboxes(
+        limit=limit,
+        offset=offset,
+        owner_client_id=principal.client_id,
+    )
     return [
-        SandboxResponse(**enrich_sandbox_response(s, sandbox_manager._config, include_secrets=False))
-        for s in sandboxes
+        sandbox_response_payload(row, sandbox_manager, include_secrets=False)
+        for row in rows
     ]
 
 
@@ -207,13 +302,11 @@ async def kill_sandbox(
     principal: ApiKeyPrincipal = Depends(validate_api_key),
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
-    """Kill sandbox."""
-    _owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
+    """Kill a sandbox."""
+    owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
     success = await run_io(sandbox_manager.kill_sandbox, sandbox_id)
-
     if not success:
         raise SandboxNotFoundException(sandbox_id)
-
     return {"success": True, "sandbox_id": sandbox_id}
 
 
@@ -223,14 +316,12 @@ async def pause_sandbox(
     principal: ApiKeyPrincipal = Depends(validate_api_key),
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
-    """Pause sandbox."""
-    _owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
-    _ensure_live_sandbox(sandbox_manager, sandbox_id)
+    """Pause a sandbox."""
+    owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
+    ensure_live_sandbox(sandbox_manager, sandbox_id)
     success = await run_io(sandbox_manager.pause_sandbox, sandbox_id)
-
     if not success:
         raise SandboxNotFoundException(sandbox_id)
-
     return {"success": True, "sandbox_id": sandbox_id}
 
 
@@ -240,14 +331,12 @@ async def resume_sandbox(
     principal: ApiKeyPrincipal = Depends(validate_api_key),
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
-    """Resume sandbox."""
-    _owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
-    _ensure_live_sandbox(sandbox_manager, sandbox_id)
+    """Resume a sandbox."""
+    owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
+    ensure_live_sandbox(sandbox_manager, sandbox_id)
     success = await run_io(sandbox_manager.resume_sandbox, sandbox_id)
-
     if not success:
         raise SandboxNotFoundException(sandbox_id)
-
     return {"success": True, "sandbox_id": sandbox_id}
 
 
@@ -258,11 +347,9 @@ async def get_sandbox_metrics(
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
     """Get sandbox metrics."""
-    _owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
-    _ensure_live_sandbox(sandbox_manager, sandbox_id)
+    owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
+    ensure_live_sandbox(sandbox_manager, sandbox_id)
     metrics = await run_io(sandbox_manager.get_metrics, sandbox_id)
-
     if not metrics:
         raise SandboxNotFoundException(sandbox_id)
-
     return metrics

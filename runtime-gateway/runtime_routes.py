@@ -12,7 +12,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from config import get_config
 from internal_auth import internal_api_key_valid, unauthorized_response
 from runtime_container_manager import ContainerConfig, ContainerManager
-from template_builder import LocalDockerExecution
+from template_builder import LocalDockerExecution, push_image_to_registry
 
 logger = logging.getLogger(__name__)
 _manager: ContainerManager | None = None
@@ -293,6 +293,7 @@ async def container_commit(request: Request) -> JSONResponse:
     if denied:
         return denied
     payload = await _json_payload(request)
+    cfg = get_config()
     image_ref = await run_in_threadpool(
         _runtime_manager().commit_filesystem_snapshot,
         request.path_params["container_id"],
@@ -300,7 +301,37 @@ async def container_commit(request: Request) -> JSONResponse:
         str(payload.get("tag") or ""),
         pause_during_commit=bool(payload.get("pause_during_commit", True)),
     )
-    return JSONResponse({"ok": bool(image_ref), "image_ref": image_ref or ""}, status_code=200 if image_ref else 502)
+    registry_image_ref = ""
+    if image_ref and bool(getattr(cfg, "TEMPLATE_REGISTRY_PUSH_ENABLED", False)):
+        try:
+            registry_image_ref = await run_in_threadpool(
+                push_image_to_registry,
+                local_ref=image_ref,
+                template_id=str(payload.get("template_id") or payload.get("tag") or "snapshot"),
+                repo_prefix=str(getattr(cfg, "TEMPLATE_REGISTRY_REPO_PREFIX", "") or ""),
+                timeout=600,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Snapshot registry push failed image=%s: %s", image_ref, exc)
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "image_ref": image_ref,
+                    "registry_image_ref": "",
+                    "detail": f"snapshot registry push failed: {exc}",
+                },
+                status_code=502,
+            )
+    effective_ref = registry_image_ref or image_ref or ""
+    return JSONResponse(
+        {
+            "ok": bool(effective_ref),
+            "image_ref": effective_ref,
+            "local_image_ref": image_ref or "",
+            "registry_image_ref": registry_image_ref,
+        },
+        status_code=200 if effective_ref else 502,
+    )
 
 
 async def container_kill(request: Request) -> JSONResponse:

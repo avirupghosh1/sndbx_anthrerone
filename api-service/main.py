@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 # Load ``api_server/.env`` before ``Config`` so ``DOCKER_HOST``, ``SANDBOX_ISOLATION``, etc. apply.
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
@@ -19,12 +19,13 @@ from orchestrator import SandboxManager
 from agents import AgentRuntime
 from middleware import (
     api_exception_handler,
+    http_exception_handler,
     validation_exception_handler,
     general_exception_handler,
     APIException,
     ensure_bootstrap_client_and_key,
 )
-from handlers import sandboxes, commands, files, agents, templates, guest_connection, sandbox_envd, internal_routing, portal
+from handlers import sandboxes, commands, files, agents, templates, e2b_compat, daytona_compat, guest_connection, sandbox_envd, internal_routing, portal
 
 # Configure logging
 logging.basicConfig(
@@ -77,10 +78,13 @@ agents.set_agent_runtime(agent_runtime)
 
 # Add exception handlers
 app.add_exception_handler(APIException, api_exception_handler)
+app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
 # Include routers
+app.include_router(e2b_compat.router)
+app.include_router(daytona_compat.router)
 app.include_router(sandboxes.router)
 app.include_router(commands.router)
 app.include_router(files.router)

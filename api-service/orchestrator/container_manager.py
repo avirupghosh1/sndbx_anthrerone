@@ -1464,14 +1464,16 @@ class ContainerManager:
         return self.get_container_state(container_id) == "running"
 
     def get_container_state(self, container_id: str) -> str:
-        """Return running/stopped/missing/unknown for scheduler-safe liveness checks."""
+        """Return running/paused/stopped/missing/unknown for scheduler-safe liveness checks."""
         for attempt in range(3):
             if not self._ensure_docker_client():
                 self._retry_delay(attempt)
                 continue
             try:
                 container = self.client.containers.get(container_id)
-                return "running" if container.status == "running" else "stopped"
+                if container.status in {"running", "paused"}:
+                    return str(container.status)
+                return "stopped"
             except docker.errors.NotFound:
                 return "missing"
             except Exception as e:  # noqa: BLE001
