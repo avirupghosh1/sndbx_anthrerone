@@ -1,9 +1,9 @@
 """Format and parse E2B-style sandbox host authorities for data-plane URLs."""
 
 from __future__ import annotations
-
+import logging
 from typing import Optional, Tuple
-
+logger=logging.getLogger(__name__)
 
 def format_sandbox_host(
     *,
@@ -17,6 +17,7 @@ def format_sandbox_host(
     if debug:
         return f"localhost:{p}"
     domain = (sandbox_domain or "").strip().lstrip(".")
+    logger.debug("the given url to the host is %s", f"{p}-{sid}.{domain}")
     return f"{p}-{sid}.{domain}"
 
 

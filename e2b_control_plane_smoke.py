@@ -37,16 +37,27 @@ def main():
     sandbox_from_snapshot = None
 
     try:
-        print(f"build template: {TEMPLATE_NAME}")
-        template = Template().from_python_image(PYTHON_VERSION)
-        template = template.set_start_cmd("python3 -m http.server 49983", wait_for_port(49983))
-        Template.build(template, alias=TEMPLATE_NAME, **E2B_OPTS)
+        # print(f"build template: {TEMPLATE_NAME}")
+        # template = Template().from_python_image(PYTHON_VERSION)
+        # template = template.set_start_cmd("python3 -m http.server 49983", wait_for_port(49983))
+        # Template.build(template, alias=TEMPLATE_NAME, **E2B_OPTS)
 
         print(f"create sandbox from template: {TEMPLATE_NAME}")
         sandbox = Sandbox.create(TEMPLATE_NAME, timeout=SANDBOX_TIMEOUT, **E2B_OPTS)
         print(f"created sandbox: {sandbox.sandbox_id}")
         print(f"sandbox domain: {getattr(sandbox, 'sandbox_domain', '')}")
+        content = "Hello from E2B!\nThis is a test file."
+        path = "/tmp/test_file.txt"
 
+        # Write the file
+        sandbox.files.write(path, content)
+
+        # Read it back
+        read_content = sandbox.files.read(path)
+        print(read_content)
+        # Verify
+        if read_content == content:
+            print("✅ Content matches!")
         print("snapshot sandbox")
         snapshot = sandbox.create_snapshot(**E2B_OPTS)
         print(f"snapshot id: {snapshot.snapshot_id}")

@@ -243,6 +243,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false" 
 spec:
   ingressClassName: nginx
   rules:
@@ -266,11 +267,6 @@ spec:
                 name: runtime-gateway
                 port:
                   number: 8080
-  tls:
-    - hosts:
-        - api.sndbx.example.com
-        - "*.sndbx.example.com"
-      secretName: sndbx-example-com-tls
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
