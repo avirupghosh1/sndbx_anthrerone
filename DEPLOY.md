@@ -273,8 +273,9 @@ Before deploy, confirm:
 
 - `api.sndbx.sprinklr.com` DNS points to the ingress controller/load balancer.
 - `*.sndbx.sprinklr.com` DNS points to the same ingress controller/load balancer.
-- `sndbx-sprinklr-com-tls` exists in `spr-apps` and covers both the API host and
-  wildcard sandbox host.
+- `sndbx-sprinklr-com-tls` exists in `spr-apps`, is issued by a CA trusted by
+  SDK clients, and covers both the API host and wildcard sandbox host. The Helm
+  chart references this Secret but does not create it.
 - The ingress controller named `ingress-nginx-office` exists in the cluster.
 
 ## Direct Helm Validation

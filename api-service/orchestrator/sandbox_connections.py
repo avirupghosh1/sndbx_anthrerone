@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import logging
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from routing.host_parse import format_sandbox_base_url, format_sandbox_host
@@ -11,6 +12,8 @@ from orchestrator.guest_ports import ports_from_metadata
 
 if TYPE_CHECKING:
     from orchestrator.sandbox_manager import SandboxManager
+
+logger = logging.getLogger(__name__)
 
 
 def sandbox_domain_for_config(config: Any) -> str:
@@ -97,7 +100,7 @@ def data_plane_base_url(
         use_scheme = "wss" if base_scheme == "https" else "ws"
     else:
         use_scheme = base_scheme.rstrip(":/")
-    return format_sandbox_base_url(
+    url = format_sandbox_base_url(
         port=int(port),
         sandbox_id=sandbox_id,
         sandbox_domain=sandbox_domain_for_config(config),
@@ -105,6 +108,15 @@ def data_plane_base_url(
         scheme=use_scheme,
         listen_port=listen_port,
     )
+    logger.info(
+        "SDK data-plane URL generated sandbox_id=%s guest_port=%s scheme=%s listen_port=%s url=%s",
+        sandbox_id,
+        int(port),
+        use_scheme,
+        listen_port,
+        url,
+    )
+    return url
 
 
 def get_host_for_sandbox(config: Any, *, sandbox_id: str, port: int) -> str:

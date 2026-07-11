@@ -54,6 +54,14 @@ class SandboxDataPlaneMiddleware:
             return
 
         guest_port, sandbox_id = parsed
+        logger.info(
+            "SDK data-plane host parsed host=%s path=%s sandbox_id=%s guest_port=%s scope_type=%s",
+            host,
+            scope.get("path") or "/",
+            sandbox_id,
+            guest_port,
+            scope["type"],
+        )
 
         layer2 = _layer2_deny(cfg, headers, host, parsed_from_local=host_is_local_route(host, scope))
         if layer2:
