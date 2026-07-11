@@ -5,8 +5,9 @@ This repo deploys two services:
 - `api-service`: control plane, metadata, auth, templates, warm pool, TTL reaper
 - `runtime-gateway`: data plane, Docker runtime host, ingress bridge, template builds
 
-Only two Kubernetes manifests are kept in this repo:
+The local/manual Kubernetes manifests are:
 
+- [deploy/local-secrets.yaml](/Users/avirup.ghosh/Desktop/cont_in_vm/deploy/local-secrets.yaml)
 - [deploy/api-service.yaml](/Users/avirup.ghosh/Desktop/cont_in_vm/deploy/api-service.yaml)
 - [deploy/runtime-gateway.yaml](/Users/avirup.ghosh/Desktop/cont_in_vm/deploy/runtime-gateway.yaml)
 
@@ -17,18 +18,25 @@ For the Helm/Jenkins production path, use [DEPLOY.md](/Users/avirup.ghosh/Deskto
 Build and load images however your cluster expects, then apply:
 
 ```sh
+kubectl apply -f deploy/local-secrets.yaml
 kubectl apply -f deploy/api-service.yaml
 kubectl apply -f deploy/runtime-gateway.yaml
 ```
 
-Both manifests expect a `sandbox-secrets` secret in namespace `sandboxes` with:
+For local/manual validation, `deploy/local-secrets.yaml` creates a non-production
+`sandbox-secrets` Secret in namespace `sandboxes` with:
 
 - `API_KEY`
 - `INTERNAL_API_KEY`
 - `PORTAL_SESSION_SECRET`
 - `DATABASE_TYPE`
+- `DATABASE_URL`
 - `DATABASE_USERNAME`
 - `DATABASE_PASSWORD`
+
+The default local database is MongoDB at
+`mongodb://host.minikube.internal:27017/sandboxes`. If your local database is
+different, edit or replace `deploy/local-secrets.yaml` before applying it.
 
 ## Access Modes
 

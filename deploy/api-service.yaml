@@ -79,6 +79,12 @@ spec:
                   name: sandbox-secrets
                   key: DATABASE_TYPE
                   optional: true
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: DATABASE_URL
+                  optional: true
             - name: DATABASE_USERNAME
               valueFrom:
                 secretKeyRef:
