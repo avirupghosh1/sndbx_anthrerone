@@ -23,6 +23,7 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 ENVD_BAKE_MARKER = "/opt/envd_guest/.mysandbox_envd_baked"
+ENVD_BAKE_VERSION = "connect-v1"
 
 # Ubuntu 22.04+ blocks system-wide pip (PEP 668); try --break-system-packages, then plain pip.
 ENVD_PIP_INSTALL_SHELL = (
@@ -173,7 +174,7 @@ def dockerfile_append_envd_layer(*, restore_user: str = "none") -> str:
         "COPY envd_guest /opt/envd_guest\n"
         "RUN set -eux; "
         f"{ENVD_ENSURE_PYTHON_PIP_ONELINER}; "
-        f"{ENVD_PIP_INSTALL_SHELL} && touch {ENVD_BAKE_MARKER}\n"
+        f"{ENVD_PIP_INSTALL_SHELL} && printf '%s\\n' '{ENVD_BAKE_VERSION}' > {ENVD_BAKE_MARKER}\n"
     )
     if _skip_envd_restore_user(restore_user):
         return run_block
@@ -209,11 +210,45 @@ def uvicorn_envd_start_background_script(port: int) -> str:
     """Shell snippet: spawn uvicorn on ``port`` in the background (no listen wait)."""
     p = max(1, min(65535, int(port)))
     return f""": > /tmp/envd.log
+for pid in /proc/[0-9]*; do
+  cmd="$(tr '\\000' ' ' < "$pid/cmdline" 2>/dev/null || true)"
+  case "$cmd" in
+    *"envd_guest.server:app"*"--port {p}"*) kill "${{pid##*/}}" 2>/dev/null || true ;;
+  esac
+done
+sleep 0.1
 if command -v setsid >/dev/null 2>&1; then
   setsid -f env PYTHONPATH=/opt python3 -m uvicorn envd_guest.server:app --host 0.0.0.0 --port {p} >>/tmp/envd.log 2>&1 &
 else
   nohup env PYTHONPATH=/opt python3 -m uvicorn envd_guest.server:app --host 0.0.0.0 --port {p} >>/tmp/envd.log 2>&1 &
 fi"""
+
+
+def envd_health_wait_loop_script(
+    port: int,
+    *,
+    max_seconds: float = 15.0,
+    poll_seconds: float = 0.25,
+    log_path: str = "",
+) -> str:
+    """Poll envd ``/health`` until the running guest reports the expected Connect phase."""
+    import shlex
+
+    p = max(1, min(65535, int(port)))
+    poll = max(0.05, min(1.0, float(poll_seconds)))
+    max_iters = max(1, int(float(max_seconds) / poll))
+    log_tail = ""
+    if log_path:
+        log_tail = (
+            f"\necho '--- {log_path} ---'\n"
+            f"cat {shlex.quote(log_path)} 2>/dev/null || true\n"
+        )
+    return f"""for i in $(seq 1 {max_iters}); do
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import json,sys,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:{p}/health', timeout=1)); sys.exit(0 if data.get('phase') == '{ENVD_BAKE_VERSION}' else 1)" 2>/dev/null && exit 0
+  fi
+  sleep {poll}
+done{log_tail}exit 1"""
 
 
 def guest_tcp_wait_loop_script(
@@ -245,11 +280,11 @@ done{log_tail}exit 1"""
 
 
 def uvicorn_envd_start_script(port: int) -> str:
-    """Shell snippet: background uvicorn on ``port`` and wait until localhost accepts TCP."""
+    """Shell snippet: background uvicorn on ``port`` and wait until Connect envd is healthy."""
     p = max(1, min(65535, int(port)))
     return (
         f"set -eu\n{uvicorn_envd_start_background_script(p)}\n"
-        + guest_tcp_wait_loop_script(p, max_seconds=15.0, poll_seconds=0.25, log_path="/tmp/envd.log")
+        + envd_health_wait_loop_script(p, max_seconds=15.0, poll_seconds=0.25, log_path="/tmp/envd.log")
     )
 
 
@@ -264,7 +299,8 @@ def container_has_baked_envd(
     r = run_command(
         container_id,
         (
-            f"if test -f {ENVD_BAKE_MARKER} && test -f /opt/envd_guest/server.py; "
+            f"if test -f {ENVD_BAKE_MARKER} && test -f /opt/envd_guest/server.py "
+            f"&& test \"$(cat {ENVD_BAKE_MARKER} 2>/dev/null || true)\" = {ENVD_BAKE_VERSION!r}; "
             f"then echo __ENVD_BAKED__; else echo __ENVD_NOT_BAKED__; fi"
         ),
         timeout=timeout,
@@ -308,7 +344,12 @@ def bake_envd_guest_into_container(
             detail[:2500],
         )
         return False
-    mk = run_command(container_id, f"touch {ENVD_BAKE_MARKER}", timeout=30.0, user="root")
+    mk = run_command(
+        container_id,
+        f"printf '%s\\n' '{ENVD_BAKE_VERSION}' > {ENVD_BAKE_MARKER}",
+        timeout=30.0,
+        user="root",
+    )
     if int(mk.get("exit_code") or 0) != 0:
         logger.warning("envd template bake: could not write marker container=%s", container_id[:12])
         return False

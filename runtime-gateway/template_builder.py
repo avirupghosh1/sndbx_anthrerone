@@ -18,6 +18,7 @@ import docker
 logger = logging.getLogger(__name__)
 
 ENVD_BAKE_MARKER = "/opt/envd_guest/.mysandbox_envd_baked"
+ENVD_BAKE_VERSION = "connect-v1"
 ENVD_PIP_INSTALL_SHELL = (
     "python3 -m pip install --no-cache-dir -q --break-system-packages "
     "-r /opt/envd_guest/requirements.txt 2>/dev/null "
@@ -134,7 +135,7 @@ def dockerfile_append_envd_layer(*, restore_user: str = "none") -> str:
         "COPY envd_guest /opt/envd_guest\n"
         "RUN set -eux; "
         f"{ENVD_ENSURE_PYTHON_PIP_ONELINER}; "
-        f"{ENVD_PIP_INSTALL_SHELL} && touch {ENVD_BAKE_MARKER}\n"
+        f"{ENVD_PIP_INSTALL_SHELL} && printf '%s\\n' '{ENVD_BAKE_VERSION}' > {ENVD_BAKE_MARKER}\n"
     )
     if _skip_envd_restore_user(restore_user):
         return run_block
@@ -644,7 +645,12 @@ def bake_envd_guest_into_container(
     )
     if int(pip.get("exit_code") or 0) != 0:
         return False
-    mk = plane.run_command(container_id, f"touch {ENVD_BAKE_MARKER}", timeout=30.0, user="root")
+    mk = plane.run_command(
+        container_id,
+        f"printf '%s\\n' '{ENVD_BAKE_VERSION}' > {ENVD_BAKE_MARKER}",
+        timeout=30.0,
+        user="root",
+    )
     return int(mk.get("exit_code") or 0) == 0
 
 

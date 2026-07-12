@@ -40,6 +40,7 @@ from .envd_template_bake import (
     ENVD_BAKE_MARKER,
     bake_envd_guest_into_container,
     container_has_baked_envd,
+    envd_health_wait_loop_script,
     guest_tcp_wait_loop_script,
     should_embed_envd_at_template_build,
     uvicorn_envd_start_background_script,
@@ -1496,9 +1497,14 @@ class SandboxManager:
         if not (1 <= p <= 65535):
             return True
         execution = self._execution_for_row(self.get_sandbox(sandbox_id) or {})
+        wait_script = (
+            envd_health_wait_loop_script
+            if str(label or "").strip().lower() == "envd"
+            else guest_tcp_wait_loop_script
+        )
         wt = execution.run_command(
             container_id,
-            guest_tcp_wait_loop_script(
+            wait_script(
                 p,
                 max_seconds=timeout_seconds,
                 poll_seconds=self._guest_bootstrap_poll_seconds(),
@@ -1902,18 +1908,42 @@ class SandboxManager:
             )
             if gateway_ready is not None:
                 if not gateway_ready:
-                    return False
-                if startup_boot.get("start_cmd"):
-                    logger.info(
-                        "template start_cmd bootstrapped at startup sandbox=%s template=%r cmd=%r port=%s",
+                    if not auto_start_envd:
+                        return False
+                    logger.warning(
+                        "startup-managed bootstrap: gateway saw incompatible envd, refreshing sandbox=%s template=%s",
                         sandbox_id,
                         template_id,
-                        str(startup_boot.get("start_cmd"))[:120],
-                        startup_boot.get("guest_port") or "?",
                     )
-                if auto_start_envd:
-                    logger.info("envd auto-start: sandbox %s guest tcp/%s ready (gateway)", sandbox_id, envd_port_cfg)
-                return True
+                    if not self._bootstrap_envd_daemon(
+                        sandbox_id,
+                        container_id,
+                        envd_port_cfg,
+                        template_id=template_id,
+                        wait_for_listen=True,
+                    ):
+                        return False
+                    gateway_ready = self._wait_for_gateway_guest_readiness(
+                        sandbox_id,
+                        container_id,
+                        probes,
+                        timeout_seconds=max(self._guest_bootstrap_agent_wait_seconds(), 15.0),
+                        update_routing_on_success=True,
+                    )
+                    if gateway_ready is False:
+                        return False
+                if gateway_ready is not None:
+                    if startup_boot.get("start_cmd"):
+                        logger.info(
+                            "template start_cmd bootstrapped at startup sandbox=%s template=%r cmd=%r port=%s",
+                            sandbox_id,
+                            template_id,
+                            str(startup_boot.get("start_cmd"))[:120],
+                            startup_boot.get("guest_port") or "?",
+                        )
+                    if auto_start_envd:
+                        logger.info("envd auto-start: sandbox %s guest tcp/%s ready (gateway)", sandbox_id, envd_port_cfg)
+                    return True
             if auto_start_envd:
                 envd_wait = min(self._guest_bootstrap_agent_wait_seconds(), 15.0)
                 if not self._wait_for_startup_managed_service(
@@ -1925,7 +1955,14 @@ class SandboxManager:
                     log_path="/tmp/envd.log",
                     timeout_seconds=envd_wait,
                 ):
-                    return False
+                    if not self._bootstrap_envd_daemon(
+                        sandbox_id,
+                        container_id,
+                        envd_port_cfg,
+                        template_id=template_id,
+                        wait_for_listen=True,
+                    ):
+                        return False
             if guest_port > 0 and not self._wait_for_startup_managed_service(
                 sandbox_id,
                 container_id,

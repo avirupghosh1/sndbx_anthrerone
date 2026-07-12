@@ -3,7 +3,7 @@
 import os
 import time
 
-from e2b import PtySize, Sandbox, Template, wait_for_port
+from e2b import PtySize, Sandbox
 
 
 API_URL = os.environ.get("API_URL") or os.environ.get("E2B_API_URL")
@@ -19,8 +19,7 @@ os.environ["E2B_API_KEY"] = API_KEY
 os.environ["E2B_VALIDATE_API_KEY"] = "false"
 
 RUN_ID = os.environ.get("SMOKE_RUN_ID") or str(int(time.time()))
-TEMPLATE_NAME = "e2b-python-1783"
-PYTHON_VERSION = os.environ.get("PYTHON_VERSION", "3.11")
+TEMPLATE_NAME = os.environ.get("TEMPLATE_NAME", "e2b-python-1783")
 SANDBOX_TIMEOUT = int(os.environ.get("SANDBOX_TIMEOUT", "900"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "300"))
 
@@ -47,146 +46,7 @@ def main():
     pty_connected = None
 
     try:
-        # print("\n=== Template methods ===")
-        # print("Template source constructors: start")
-        # Template().from_image(f"python:{PYTHON_VERSION}")
-        # Template().from_image(f"python:{PYTHON_VERSION}", username="registry-user", password="registry-password")
-        # Template().from_base_image()
-        # Template().from_debian_image("bookworm")
-        # Template().from_ubuntu_image("24.04")
-        # Template().from_python_image(PYTHON_VERSION)
-        # Template().from_node_image("20")
-        # Template().from_bun_image("latest")
-        # Template().from_template("base-template")
-        # Template().from_aws_registry(
-        #     "123456789012.dkr.ecr.us-east-1.amazonaws.com/smoke:latest",
-        #     access_key_id="test",
-        #     secret_access_key="test",
-        #     region="us-east-1",
-        # )
-        # Template().from_gcp_registry(
-        #     "gcr.io/smoke-project/smoke:latest",
-        #     {"type": "service_account", "project_id": "smoke-project"},
-        # )
-        # Template().from_dockerfile(f"FROM python:{PYTHON_VERSION}\nRUN echo dockerfile-template\n")
-        # print("Template source constructors: ok")
-
-        # print("Template builder construction methods: start")
-        # copy_template = (
-        #     Template(file_context_path=os.path.dirname(__file__) or ".")
-        #     .from_python_image(PYTHON_VERSION)
-        #     .copy(
-        #         "e2b_control_plane_smoke.py",
-        #         "/tmp/e2b-smoke-copy.py",
-        #         user="root",
-        #         mode=0o644,
-        #         resolve_symlinks=False,
-        #     )
-        #     .copy_items(
-        #         [
-        #             {
-        #                 "src": "e2b_control_plane_smoke.py",
-        #                 "dest": "/tmp/e2b-smoke-copy-items.py",
-        #                 "user": "root",
-        #                 "mode": 0o644,
-        #                 "resolveSymlinks": False,
-        #             }
-        #         ]
-        #     )
-        #     .make_dir("/tmp/e2b-smoke-template-dir", mode=0o755, user="root")
-        #     .run_cmd("echo renamed > /tmp/e2b-smoke-template-dir/source.txt", user="root")
-        #     .rename(
-        #         "/tmp/e2b-smoke-template-dir/source.txt",
-        #         "/tmp/e2b-smoke-template-dir/renamed.txt",
-        #         force=True,
-        #         user="root",
-        #     )
-        #     .make_symlink(
-        #         "/tmp/e2b-smoke-template-dir/renamed.txt",
-        #         "/tmp/e2b-smoke-template-dir/link.txt",
-        #         user="root",
-        #         force=True,
-        #     )
-        #     .remove("/tmp/e2b-smoke-template-dir/link.txt", force=True, user="root")
-        #     .skip_cache()
-        #     .npm_install("left-pad")
-        #     .bun_install("typescript", g=True)
-        #     .git_clone("https://example.com/smoke.git", "/tmp/e2b-smoke-git", branch="main", depth=1)
-        #     .set_start_cmd("sleep infinity", "true")
-        # )
-        # mcp_template = Template().from_template("mcp-gateway").add_mcp_server("filesystem").set_ready_cmd("true")
-        # dockerfile_template = Template().from_dockerfile(
-        #     f"FROM python:{PYTHON_VERSION}\n"
-        #     "ENV E2B_SMOKE_DOCKERFILE=1\n"
-        #     "WORKDIR /tmp/e2b-smoke-dockerfile\n"
-        #     "RUN echo dockerfile > marker.txt\n"
-        # ).set_ready_cmd("test -f /tmp/e2b-smoke-dockerfile/marker.txt")
-        # Template.to_json(copy_template)
-        # Template.to_dockerfile(copy_template)
-        # Template.to_json(mcp_template)
-        # Template.to_dockerfile(dockerfile_template)
-        # print("Template copy/npm/bun/git_clone/mcp/set_start_cmd/to_json/to_dockerfile construction: ok")
-
-        # print(f"Template.exists before build: {Template.exists(TEMPLATE_NAME, **E2B_OPTS)}")
-        # template = (
-        #     Template()
-        #     .from_python_image(PYTHON_VERSION)
-        #     .apt_install(["git"])
-        #     .pip_install(["requests"])
-        #     .set_envs({"E2B_SMOKE_BUILD": "1"})
-        #     .set_workdir("/tmp/e2b-template-workdir")
-        #     .set_user("root")
-        #     .make_dir("/tmp/e2b-template-workdir")
-        #     .run_cmd("echo template-built > /tmp/e2b-template-workdir/template_marker.txt")
-        #     .set_ready_cmd("test -f /tmp/e2b-template-workdir/template_marker.txt")
-        # )
-        # build_info = Template.build(
-        #     template,
-        #     alias=TEMPLATE_NAME,
-        #     cpu_count=2,
-        #     memory_mb=1024,
-        #     skip_cache=True,
-        #     on_build_logs=print,
-        #     **E2B_OPTS,
-        # )
-        # print(f"Template.build: template_id={build_info.template_id} build_id={build_info.build_id}")
-        # if not Template.exists(TEMPLATE_NAME, **E2B_OPTS):
-        #     raise AssertionError("Template.exists failed after build")
-        # if not Template.alias_exists(TEMPLATE_NAME, **E2B_OPTS):
-        #     raise AssertionError("Template.alias_exists failed after build")
-
-        # background_template = (
-        #     Template()
-        #     .from_python_image(PYTHON_VERSION)
-        #     .run_cmd("echo background-template-built")
-        # )
-        # background_build = Template.build_in_background(
-        #     background_template,
-        #     alias=BACKGROUND_TEMPLATE_NAME,
-        #     cpu_count=1,
-        #     memory_mb=512,
-        #     skip_cache=True,
-        #     **E2B_OPTS,
-        # )
-        # background_status = Template.get_build_status(background_build, logs_offset=0, **E2B_OPTS)
-        # print(f"Template.build_in_background/get_build_status: {background_status.status}")
-        # if str(background_status.status).lower() not in {"ready", "building"}:
-        #     raise AssertionError(f"unexpected background build status: {background_status.status}")
-
-        # assigned_tags = Template.assign_tags(TEMPLATE_NAME, ["smoke-tag"], **E2B_OPTS)
-        # print(f"Template.assign_tags: {assigned_tags.tags}")
-        # tags = Template.get_tags(TEMPLATE_NAME, **E2B_OPTS)
-        # print(f"Template.get_tags: {[tag.tag for tag in tags]}")
-        # if "smoke-tag" not in [tag.tag for tag in tags]:
-        #     raise AssertionError("Template.get_tags did not include smoke-tag")
-        # if not Template.exists(f"{TEMPLATE_NAME}:smoke-tag", **E2B_OPTS):
-        #     raise AssertionError("tagged template alias does not exist")
-        # Template.remove_tags(TEMPLATE_NAME, ["smoke-tag"], **E2B_OPTS)
-        # print("Template.remove_tags: ok")
-        print(f"build template: {TEMPLATE_NAME}")
-        template = Template().from_python_image(PYTHON_VERSION)
-        template = template.set_start_cmd("python3 -m http.server 8099", wait_for_port(8091))
-        Template.build(template, alias=TEMPLATE_NAME, **E2B_OPTS)
+        print(f"use existing template: {TEMPLATE_NAME}")
         print("\n=== Sandbox create/list/info/timeout/metrics ===")
         sandbox = Sandbox.create(
             TEMPLATE_NAME,

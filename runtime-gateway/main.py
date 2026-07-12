@@ -243,6 +243,17 @@ async def runtime_probe(request: Request) -> JSONResponse:
                         url = f"http://{host}:{port}{path if path.startswith('/') else '/' + path}"
                         resp = await client.get(url)
                         if 200 <= resp.status_code < 500:
+                            if label.lower() == "envd" and (path or "/").rstrip("/") == "/health":
+                                try:
+                                    body = resp.json()
+                                except Exception:  # noqa: BLE001
+                                    body = {}
+                                phase = str(body.get("phase") or "").strip() if isinstance(body, dict) else ""
+                                if phase != "connect-v1":
+                                    last_error = f"envd health phase {phase or '<missing>'}"
+                                    await asyncio.sleep(poll_seconds)
+                                    continue
+                                result["phase"] = phase
                             result["ok"] = True
                             result["status_code"] = resp.status_code
                             break
