@@ -1,3 +1,8 @@
+
+(base) avirup@avirup-Victus-by-HP-Gaming-Laptop-15-fa0xxx:~/final_check/sndbx_anthrerone$ python -c "import os, ssl; print('SSL_CERT_FILE =', os.environ.get('SSL_CERT_FILE')); print('default verify paths =', ssl.get_default_verify_paths())"
+SSL_CERT_FILE = /home/avirup/.local/share/mkcert/rootCA.pem
+default verify paths = DefaultVerifyPaths(cafile='/home/avirup/.local/share/mkcert/rootCA.pem', capath=None, openssl_cafile_env='SSL_CERT_FILE', openssl_cafile='/home/avirup/miniconda3/ssl/cert.pem', openssl_capath_env='SSL_CERT_DIR', openssl_capath='/home/avirup/miniconda3/ssl/certs')
+
 (base) avirup@avirup-Victus-by-HP-Gaming-Laptop-15-fa0xxx:~/final_check/sndbx_anthrerone$ 
   openssl s_client \
     -connect api.sndbx.example.com:443 \
