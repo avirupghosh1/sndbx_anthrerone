@@ -19,3 +19,56 @@
   SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem" API_URL=http://127.0.0.1:8001 API_KEY=... ./e2b_control_plane_smoke.py
 
   Validation done: deploy/create-local-tls.sh passes bash -n. I did not execute the script because mkcert -install modifies your local trust store and the script applies a Kubernetes TLS secret.
+
+
+
+
+
+
+• On your machine, the first thing to validate is this:
+
+  kubectl -n sandboxes get secret sndbx-example-com-tls
+
+  In my cluster that secret was missing, even though ingress referenced it. If it is missing on your other machine too, nginx serves its default/self-signed cert, and E2B keeps failing with the
+  exact same SSL error.
+
+  Run this from repo root:
+
+  bash deploy/create-local-tls.sh
+  kubectl apply -f deploy/runtime-gateway.yaml
+
+  Then validate the pieces:
+
+  kubectl -n sandboxes get secret sndbx-example-com-tls
+  kubectl -n sandboxes get ingress sandbox-ingress -o yaml | grep -A6 tls
+
+  Check the actual cert served by ingress:
+
+  INGRESS_IP=$(minikube ip)
+
+  openssl s_client \
+    -connect "${INGRESS_IP}:443" \
+    -servername "49983-test.sndbx.example.com" \
+    -showcerts </dev/null 2>/dev/null | openssl x509 -noout -subject -issuer -ext subjectAltName
+
+  You should see SANs containing:
+
+  DNS:api.sndbx.example.com
+  DNS:*.sndbx.example.com
+
+  Then validate Python/httpx trust specifically:
+
+  SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem" python - <<'PY'
+  import httpx
+  print(httpx.get("https://api.sndbx.example.com/health", timeout=10).status_code)
+  PY
+
+  If that works, run smoke the same way:
+
+  SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem" \
+  API_URL=http://127.0.0.1:8001 \
+  API_KEY=... \
+  ./e2b_control_plane_smoke.py
+
+  Important: mkcert -install trusting the cert in the OS is not always enough for Python, because httpx may use certifi. That is why SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem" is the decisive
+  validation.
