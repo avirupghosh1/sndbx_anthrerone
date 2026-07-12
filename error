@@ -1,49 +1,27 @@
-
-(base) avirup@avirup-Victus-by-HP-Gaming-Laptop-15-fa0xxx:~/final_check/sndbx_anthrerone$ python -c "import os, ssl; print('SSL_CERT_FILE =', os.environ.get('SSL_CERT_FILE')); print('default verify paths =', ssl.get_default_verify_paths())"
-SSL_CERT_FILE = /home/avirup/.local/share/mkcert/rootCA.pem
-default verify paths = DefaultVerifyPaths(cafile='/home/avirup/.local/share/mkcert/rootCA.pem', capath=None, openssl_cafile_env='SSL_CERT_FILE', openssl_cafile='/home/avirup/miniconda3/ssl/cert.pem', openssl_capath_env='SSL_CERT_DIR', openssl_capath='/home/avirup/miniconda3/ssl/certs')
-
-(base) avirup@avirup-Victus-by-HP-Gaming-Laptop-15-fa0xxx:~/final_check/sndbx_anthrerone$ 
-  openssl s_client \
-    -connect api.sndbx.example.com:443 \
-    -servername api.sndbx.example.com \
-    -showcerts </dev/null 2>/dev/null \
-    | openssl x509 -noout -subject -issuer -ext subjectAltName
-subject=CN = *.sndbx.example.com
-issuer=CN = *.sndbx.example.com
-X509v3 Subject Alternative Name: 
-    DNS:api.sndbx.example.com, DNS:*.sndbx.example.com
-
-(base) avirup@avirup-Victus-by-HP-Gaming-Laptop-15-fa0xxx:~/final_check/sndbx_anthrerone$ 
-  openssl s_client \
-    -CAfile "$(mkcert -CAROOT)/rootCA.pem" \
-    -verify_return_error \
-    -connect api.sndbx.example.com:443 \
-    -servername api.sndbx.example.com </dev/null
-CONNECTED(00000003)
-depth=0 CN = *.sndbx.example.com
-verify error:num=18:self-signed certificate
-4067271D90740000:error:0A000086:SSL routines:tls_post_process_server_certificate:certificate verify failed:ssl/statem/statem_clnt.c:1889:
----
-Certificate chain
- 0 s:CN = *.sndbx.example.com
-   i:CN = *.sndbx.example.com
-   a:PKEY: rsaEncryption, 2048 (bit); sigalg: RSA-SHA256
-   v:NotBefore: Jul 12 09:46:51 2026 GMT; NotAfter: Jul 12 09:46:51 2027 GMT
----
-no peer certificate available
----
-No client certificate CA names sent
-Server Temp Key: X25519, 253 bits
----
-SSL handshake has read 1080 bytes and written 334 bytes
-Verification error: self-signed certificate
----
-New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384
-Secure Renegotiation IS NOT supported
-Compression: NONE
-Expansion: NONE
-No ALPN negotiated
-Early data was not sent
-Verify return code: 18 (self-signed certificate)
----
+create sandbox from template: e2b-python-1783617758
+created sandbox: sb-7c4a032f139d4b53
+sandbox domain: sndbx.example.com
+cleanup original sandbox
+Traceback (most recent call last):
+  File "/home/avirup/final_check/sndbx_anthrerone/./e2b_control_plane_smoke.py", line 105, in <module>
+    main()
+  File "/home/avirup/final_check/sndbx_anthrerone/./e2b_control_plane_smoke.py", line 53, in main
+    sandbox.files.write(path, content)
+  File "/home/avirup/miniconda3/lib/python3.12/site-packages/e2b/sandbox_sync/filesystem/filesystem.py", line 304, in write
+    result = self.write_files(
+             ^^^^^^^^^^^^^^^^^
+  File "/home/avirup/miniconda3/lib/python3.12/site-packages/e2b/sandbox_sync/filesystem/filesystem.py", line 446, in write_files
+    raise err
+e2b.exceptions.SandboxException: 501: <!DOCTYPE HTML>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <title>Error response</title>
+    </head>
+    <body>
+        <h1>Error response</h1>
+        <p>Error code: 501</p>
+        <p>Message: Unsupported method ('POST').</p>
+        <p>Error code explanation: 501 - Server does not support this operation.</p>
+    </body>
+</html>
