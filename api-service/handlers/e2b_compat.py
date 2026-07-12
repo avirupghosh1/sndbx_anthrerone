@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from typing import Any, Optional
 from urllib.parse import parse_qsl, unquote
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -21,7 +22,7 @@ from orchestrator import SandboxManager
 
 router = APIRouter(tags=["e2b-compat"])
 
-_E2B_ENVD_VERSION = "0.5.6"
+_E2B_ENVD_VERSION = "0.6.7"
 
 
 def _error_response(status_code: int, message: str, *, error: str = "HTTPException") -> JSONResponse:
@@ -277,6 +278,36 @@ def _e2b_build_status_payload(row: dict, *, logs_offset: int = 0) -> dict[str, A
     if e2b_status == "error":
         out["reason"] = {"message": str(row.get("error_text") or "Build failed"), "logEntries": entries}
     return out
+
+
+def _uuid_for_e2b(value: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, value or "sndbx"))
+
+
+def _split_e2b_template_ref(name: str) -> tuple[str, Optional[str]]:
+    raw = (name or "").strip()
+    base, sep, tag = raw.partition(":")
+    return base.strip(), tag.strip() if sep and tag.strip() else None
+
+
+def _tagged_alias(base_alias: str, tag: str) -> str:
+    return f"{base_alias}:{tag.strip()}"
+
+
+async def _latest_build_for_template(
+    sandbox_manager: SandboxManager,
+    principal: ApiKeyPrincipal,
+    template_id: str,
+) -> Optional[dict[str, Any]]:
+    builds = await run_io(
+        sandbox_manager.db.list_template_builds_for_client,
+        principal.client_id,
+        limit=200,
+    )
+    for build in builds:
+        if str(build.get("template_id") or "") == template_id:
+            return build
+    return None
 
 
 @router.post("/sandboxes")
@@ -666,6 +697,107 @@ async def get_template_alias(
     return JSONResponse(content={"public": False, "templateID": str(row.get("template_id") or "")})
 
 
+@router.post("/templates/tags")
+async def assign_template_tags(
+    request: Request,
+    principal: ApiKeyPrincipal = Depends(validate_api_key),
+    sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
+):
+    body = await _json_body(request)
+    target = str(body.get("target") or "").strip()
+    tags = [str(t).strip() for t in (body.get("tags") or []) if str(t).strip()]
+    if not target or not tags:
+        raise HTTPException(status_code=400, detail="target and tags are required")
+    source = await run_io(template_handlers._resolve_template_row_for_principal, sandbox_manager, principal, target)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Unknown template: {target}")
+    target_base, _ = _split_e2b_template_ref(target)
+    base_alias = target_base or str(source.get("template_alias") or source.get("template_id") or "")
+    build = await _latest_build_for_template(sandbox_manager, principal, str(source.get("template_id") or ""))
+    build_id = str((build or {}).get("build_id") or source.get("template_id") or base_alias)
+    image_ref = str(source.get("warm_snapshot_image") or source.get("registry_image_ref") or "")
+    for tag in tags:
+        alias = _tagged_alias(base_alias, tag)
+        tagged_template_id = template_handlers._storage_template_id(principal, alias)
+        await run_io(
+            sandbox_manager.db.upsert_sandbox_template,
+            tagged_template_id,
+            str(source.get("base_image") or image_ref or "python:3.11"),
+            source.get("env") if isinstance(source.get("env"), dict) else {},
+            str(source.get("start_cmd") or ""),
+            int(source.get("settle_seconds") or 20),
+            str(source.get("ready_cmd") or ""),
+            owner_client_id=principal.client_id,
+            owner_api_key_id=principal.key_id,
+            template_alias=alias,
+        )
+        if image_ref:
+            await run_io(
+                sandbox_manager.db.set_template_warm_snapshot,
+                tagged_template_id,
+                image_ref,
+                registry_image_ref=str(source.get("registry_image_ref") or "") or None,
+                materialized_gateway_instance_id=str(source.get("materialized_gateway_instance_id") or "") or None,
+            )
+    return JSONResponse(status_code=201, content={"buildID": _uuid_for_e2b(build_id), "tags": tags})
+
+
+@router.delete("/templates/tags")
+async def remove_template_tags(
+    request: Request,
+    principal: ApiKeyPrincipal = Depends(validate_api_key),
+    sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
+):
+    body = await _json_body(request)
+    name = str(body.get("name") or "").strip()
+    tags = [str(t).strip() for t in (body.get("tags") or []) if str(t).strip()]
+    if not name or not tags:
+        raise HTTPException(status_code=400, detail="name and tags are required")
+    base_alias, _ = _split_e2b_template_ref(name)
+    for tag in tags:
+        alias = _tagged_alias(base_alias, tag)
+        row = await run_io(sandbox_manager.db.get_sandbox_template_by_alias, principal.client_id, alias)
+        if row:
+            await run_io(
+                sandbox_manager.db.delete_sandbox_template,
+                str(row.get("template_id") or ""),
+                principal.client_id,
+            )
+    return Response(status_code=204)
+
+
+@router.get("/templates/{template_id}/tags")
+async def get_template_tags(
+    template_id: str,
+    principal: ApiKeyPrincipal = Depends(validate_api_key),
+    sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
+):
+    source = await run_io(template_handlers._resolve_template_row_for_principal, sandbox_manager, principal, template_id)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Unknown template: {template_id}")
+    base_alias, _ = _split_e2b_template_ref(str(source.get("template_alias") or template_id))
+    rows = await run_io(sandbox_manager.db.list_sandbox_templates, principal.client_id)
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        alias = str(row.get("template_alias") or "")
+        prefix = f"{base_alias}:"
+        if not alias.startswith(prefix):
+            continue
+        tag = alias[len(prefix) :]
+        if not tag:
+            continue
+        build = await _latest_build_for_template(sandbox_manager, principal, str(row.get("template_id") or ""))
+        build_id = str((build or {}).get("build_id") or row.get("template_id") or alias)
+        out.append(
+            {
+                "buildID": _uuid_for_e2b(build_id),
+                "createdAt": _coerce_iso(row.get("created_at")),
+                "tag": tag,
+            }
+        )
+    return JSONResponse(content=out)
+
+
 @router.get("/templates/{template_id}/files/{hash_}")
 async def get_template_file_upload_link(
     template_id: str,
@@ -680,10 +812,20 @@ async def get_template_file_upload_link(
 async def delete_template_or_snapshot(
     template_id: str,
     principal: ApiKeyPrincipal = Depends(validate_api_key),
+    sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
-    _ = (template_id, principal)
-    return _error_response(
-        501,
-        "Template and snapshot deletion is not implemented yet.",
-        error="NotImplemented",
+    row = await run_io(
+        sandbox_manager.db.get_sandbox_snapshot,
+        template_id,
+        principal.client_id,
     )
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Unknown snapshot: {template_id}")
+    ok = await run_io(
+        sandbox_manager.db.delete_sandbox_snapshot,
+        template_id,
+        principal.client_id,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Unknown snapshot: {template_id}")
+    return Response(status_code=204)

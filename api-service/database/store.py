@@ -1885,6 +1885,26 @@ class _PostgresDatabase:
             "created_at": row[4],
         }
 
+    def delete_sandbox_snapshot(
+        self,
+        snapshot_id: str,
+        owner_client_id: Optional[str] = None,
+    ) -> bool:
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            if owner_client_id:
+                cursor.execute(
+                    "DELETE FROM sandbox_snapshots WHERE snapshot_id = ? AND owner_client_id = ?",
+                    (snapshot_id, owner_client_id),
+                )
+            else:
+                cursor.execute("DELETE FROM sandbox_snapshots WHERE snapshot_id = ?", (snapshot_id,))
+            n = cursor.rowcount
+            conn.commit()
+            conn.close()
+        return n > 0
+
     def list_all_sandbox_snapshots(
         self,
         limit: int = 100,
@@ -2083,6 +2103,26 @@ class _PostgresDatabase:
             result = self._template_dict_from_row(cursor, row) if row else None
             conn.close()
         return result
+
+    def delete_sandbox_template(
+        self,
+        template_id: str,
+        owner_client_id: Optional[str] = None,
+    ) -> bool:
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            if owner_client_id:
+                cursor.execute(
+                    "DELETE FROM sandbox_templates WHERE template_id = ? AND owner_client_id = ?",
+                    (template_id, owner_client_id),
+                )
+            else:
+                cursor.execute("DELETE FROM sandbox_templates WHERE template_id = ?", (template_id,))
+            n = cursor.rowcount
+            conn.commit()
+            conn.close()
+        return n > 0
 
     def get_best_sandbox_template_by_alias(
         self,
@@ -3632,6 +3672,17 @@ class _MongoDatabase:
             "created_at": doc.get("created_at"),
         }
 
+    def delete_sandbox_snapshot(
+        self,
+        snapshot_id: str,
+        owner_client_id: Optional[str] = None,
+    ) -> bool:
+        query: Dict[str, Any] = {"_id": snapshot_id}
+        if owner_client_id:
+            query["owner_client_id"] = owner_client_id
+        res = self.db.sandbox_snapshots.delete_one(query)
+        return int(getattr(res, "deleted_count", 0) or 0) > 0
+
     def list_all_sandbox_snapshots(
         self,
         limit: int = 100,
@@ -3704,6 +3755,17 @@ class _MongoDatabase:
         alias = (template_alias or "").strip()
         doc = self.db.sandbox_templates.find_one({"owner_client_id": client_id, "template_alias": alias})
         return self._template_dict_from_doc(doc) if doc else None
+
+    def delete_sandbox_template(
+        self,
+        template_id: str,
+        owner_client_id: Optional[str] = None,
+    ) -> bool:
+        query: Dict[str, Any] = {"_id": template_id}
+        if owner_client_id:
+            query["owner_client_id"] = owner_client_id
+        res = self.db.sandbox_templates.delete_one(query)
+        return int(getattr(res, "deleted_count", 0) or 0) > 0
 
     def get_best_sandbox_template_by_alias(
         self,
