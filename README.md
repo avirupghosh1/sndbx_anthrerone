@@ -19,6 +19,7 @@ Build and load images however your cluster expects, then apply:
 
 ```sh
 kubectl apply -f deploy/local-secrets.yaml
+bash deploy/create-local-tls.sh
 kubectl apply -f deploy/api-service.yaml
 kubectl apply -f deploy/runtime-gateway.yaml
 ```
@@ -57,10 +58,14 @@ kubectl -n sandboxes port-forward svc/runtime-gateway 18080:8080
 In local mode:
 
 - control-plane requests go to `http://127.0.0.1:8001`
-- data-plane requests go to `http://127.0.0.1:18080?...`
+- local SDK data-plane requests can still go directly to a forwarded runtime-gateway
+- E2B SDK data-plane requests go through `https://*.sndbx.example.com`
 - SDK/local clients keep using the same API semantics; only the base URLs differ
-- raw local ingress is HTTP-only; the local manifests do not create a TLS
-  certificate for `sndbx.example.com`
+- E2B SDK file/process operations use HTTPS for sandbox domains; run
+  `bash deploy/create-local-tls.sh` with `mkcert` installed so
+  `sndbx-example-com-tls` is trusted locally. If Python/httpx still uses
+  `certifi` instead of system trust, run the smoke test with
+  `SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem"`
 
 ## Persistence
 
