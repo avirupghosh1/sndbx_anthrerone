@@ -213,7 +213,7 @@ def uvicorn_envd_start_background_script(port: int) -> str:
 for pid in /proc/[0-9]*; do
   cmd="$(tr '\\000' ' ' < "$pid/cmdline" 2>/dev/null || true)"
   case "$cmd" in
-    *"envd_guest.server:app"*"--port {p}"*) kill "${{pid##*/}}" 2>/dev/null || true ;;
+    *"envd_guest.server:app"*) kill "${{pid##*/}}" 2>/dev/null || true ;;
   esac
 done
 sleep 0.1
@@ -280,11 +280,11 @@ done{log_tail}exit 1"""
 
 
 def uvicorn_envd_start_script(port: int) -> str:
-    """Shell snippet: background uvicorn on ``port`` and wait until Connect envd is healthy."""
+    """Shell snippet: background uvicorn on ``port`` and wait until localhost accepts TCP."""
     p = max(1, min(65535, int(port)))
     return (
         f"set -eu\n{uvicorn_envd_start_background_script(p)}\n"
-        + envd_health_wait_loop_script(p, max_seconds=15.0, poll_seconds=0.25, log_path="/tmp/envd.log")
+        + guest_tcp_wait_loop_script(p, max_seconds=20.0, poll_seconds=0.25, log_path="/tmp/envd.log")
     )
 
 

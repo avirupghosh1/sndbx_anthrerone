@@ -1750,10 +1750,10 @@ class SandboxManager:
 
         if declared_baked:
             logger.warning(
-                "envd auto-start: declared baked template failed first start sandbox=%s template=%s stderr=%s; retrying after bake probe",
+                "envd auto-start: declared baked template failed first start sandbox=%s template=%s output=%s; retrying after bake probe",
                 sandbox_id,
                 template_id,
-                (st.get("stderr") or "")[:1200],
+                (st.get("stderr") or st.get("stdout") or "")[:1200],
             )
             if not self._ensure_envd_baked(sandbox_id, container_id, pip_timeout=pip_to):
                 logger.warning("envd auto-start: fallback bake failed sandbox=%s", sandbox_id)
@@ -1767,11 +1767,27 @@ class SandboxManager:
                 )
                 return True
 
+        diag = execution.run_command(
+            container_id,
+            (
+                "printf '%s\\n' '--- envd marker ---'; "
+                f"cat {shlex.quote(ENVD_BAKE_MARKER)} 2>&1 || true; "
+                "printf '%s\\n' '--- envd health ---'; "
+                "python3 - <<'PY' 2>&1 || true\n"
+                "import urllib.request\n"
+                f"print(urllib.request.urlopen('http://127.0.0.1:{p}/health', timeout=2).read().decode())\n"
+                "PY\n"
+                "printf '%s\\n' '--- envd log ---'; "
+                "cat /tmp/envd.log 2>&1 || true"
+            ),
+            timeout=10.0,
+        )
         logger.warning(
-            "envd auto-start: daemon did not listen on :%s sandbox=%s stderr=%s",
+            "envd auto-start: daemon did not listen on :%s sandbox=%s output=%s diagnostic=%s",
             p,
             sandbox_id,
-            (st.get("stderr") or "")[:2500],
+            (st.get("stderr") or st.get("stdout") or "")[:2500],
+            (diag.get("stderr") or diag.get("stdout") or "")[:2500],
         )
         return False
 
