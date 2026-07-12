@@ -72,3 +72,84 @@
 
   Important: mkcert -install trusting the cert in the OS is not always enough for Python, because httpx may use certifi. That is why SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem" is the decisive
   validation.
+
+
+  If https://api.sndbx.example.com/health still fails with SSL_CERT_FILE, then the smoke test is irrelevant for now. The cert being served is not trusted by that CA, or you are not hitting the
+  ingress you think you are.
+
+  Run these exact checks on that machine.
+
+  1. Confirm Python sees the CA
+
+  echo "$(mkcert -CAROOT)/rootCA.pem"
+  test -f "$(mkcert -CAROOT)/rootCA.pem" && echo OK
+
+  SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem" python - <<'PY'
+  import os, ssl
+  print("SSL_CERT_FILE =", os.environ.get("SSL_CERT_FILE"))
+  print("default verify paths =", ssl.get_default_verify_paths())
+  PY
+
+  2. Check what cert ingress is actually serving
+
+  openssl s_client \
+    -connect api.sndbx.example.com:443 \
+    -servername api.sndbx.example.com \
+    -showcerts </dev/null 2>/dev/null \
+    | openssl x509 -noout -subject -issuer -ext subjectAltName
+
+  If issuer says something like Kubernetes Ingress Controller Fake Certificate, then your TLS secret is missing/wrong/not loaded by ingress.
+
+  3. Verify with openssl using mkcert CA
+
+  openssl s_client \
+    -CAfile "$(mkcert -CAROOT)/rootCA.pem" \
+    -verify_return_error \
+    -connect api.sndbx.example.com:443 \
+    -servername api.sndbx.example.com </dev/null
+
+  This must say:
+
+  Verify return code: 0 (ok)
+
+  If this does not pass, Python will not pass either.
+
+  4. Check Kubernetes secret and ingress match
+
+  kubectl -n sandboxes get secret sndbx-example-com-tls
+
+  kubectl -n sandboxes get ingress sandbox-ingress -o jsonpath='{.spec.tls[*].secretName}{"\n"}'
+  kubectl -n sandboxes get ingress sandbox-ingress -o jsonpath='{.spec.tls[*].hosts}{"\n"}'
+
+  Expected for local raw deploy:
+
+  sndbx-example-com-tls
+  api.sndbx.example.com *.sndbx.example.com
+
+  If you deployed through Helm with another namespace/domain, the secret name may be different, for example sndbx-sprinklr-com-tls. Then run:
+
+  NAMESPACE=<your-namespace> \
+  SANDBOX_DOMAIN=<your-domain> \
+  TLS_SECRET_NAME=<secret-name-from-ingress> \
+  bash deploy/create-local-tls.sh
+
+  Example:
+
+  NAMESPACE=sandboxes \
+  SANDBOX_DOMAIN=sndbx.example.com \
+  TLS_SECRET_NAME=sndbx-example-com-tls \
+  bash deploy/create-local-tls.sh
+
+  5. Force curl/Python through the exact CA
+
+  curl --cacert "$(mkcert -CAROOT)/rootCA.pem" https://api.sndbx.example.com/health
+
+  Then:
+
+  SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem" python - <<'PY'
+  import httpx
+  print(httpx.get("https://api.sndbx.example.com/health", timeout=10).text)
+  PY
+
+  Do not run the E2B smoke until these pass. If they fail, paste outputs from steps 2, 3, and 4. That will tell us exactly whether it is wrong cert, wrong ingress, wrong namespace, wrong secret
+  name, or DNS pointing somewhere else.
