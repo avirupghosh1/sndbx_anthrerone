@@ -1,5 +1,6 @@
-create sandbox from template: e2b-python-1783617758
-created sandbox: sb-7c4a032f139d4b53
+build template: e2b-python-1783617759
+create sandbox from template: e2b-python-1783617759
+created sandbox: sb-850b71941e3b433a
 sandbox domain: sndbx.example.com
 cleanup original sandbox
 Traceback (most recent call last):
@@ -12,16 +13,4 @@ Traceback (most recent call last):
              ^^^^^^^^^^^^^^^^^
   File "/home/avirup/miniconda3/lib/python3.12/site-packages/e2b/sandbox_sync/filesystem/filesystem.py", line 446, in write_files
     raise err
-e2b.exceptions.SandboxException: 501: <!DOCTYPE HTML>
-<html lang="en">
-    <head>
-        <meta charset="utf-8">
-        <title>Error response</title>
-    </head>
-    <body>
-        <h1>Error response</h1>
-        <p>Error code: 501</p>
-        <p>Message: Unsupported method ('POST').</p>
-        <p>Error code explanation: 501 - Server does not support this operation.</p>
-    </body>
-</html>
+e2b.exceptions.SandboxException: 500: {"detail":"The `python-multipart` library must be installed to use form parsing."}

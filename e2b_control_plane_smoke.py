@@ -19,7 +19,7 @@ os.environ["E2B_API_URL"] = API_URL
 os.environ["E2B_API_KEY"] = API_KEY
 os.environ["E2B_VALIDATE_API_KEY"] = "false"
 
-TEMPLATE_NAME = "e2b-python-1783617758"
+TEMPLATE_NAME = "e2b-python-1783617759"
 PYTHON_VERSION = os.environ.get("PYTHON_VERSION", "3.11")
 SANDBOX_TIMEOUT = int(os.environ.get("SANDBOX_TIMEOUT", "600"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "300"))
@@ -37,10 +37,10 @@ def main():
     sandbox_from_snapshot = None
 
     try:
-        # print(f"build template: {TEMPLATE_NAME}")
-        # template = Template().from_python_image(PYTHON_VERSION)
-        # template = template.set_start_cmd("python3 -m http.server 49983", wait_for_port(49983))
-        # Template.build(template, alias=TEMPLATE_NAME, **E2B_OPTS)
+        print(f"build template: {TEMPLATE_NAME}")
+        template = Template().from_python_image(PYTHON_VERSION)
+        template = template.set_start_cmd("python3 -m http.server 8099", wait_for_port(8091))
+        Template.build(template, alias=TEMPLATE_NAME, **E2B_OPTS)
 
         print(f"create sandbox from template: {TEMPLATE_NAME}")
         sandbox = Sandbox.create(TEMPLATE_NAME, timeout=SANDBOX_TIMEOUT, **E2B_OPTS)
