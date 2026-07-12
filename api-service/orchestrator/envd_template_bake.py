@@ -211,9 +211,11 @@ def uvicorn_envd_start_background_script(port: int) -> str:
     p = max(1, min(65535, int(port)))
     return f""": > /tmp/envd.log
 for pid in /proc/[0-9]*; do
+  test "${{pid##*/}}" = "$$" && continue
   cmd="$(tr '\\000' ' ' < "$pid/cmdline" 2>/dev/null || true)"
   case "$cmd" in
-    *"envd_guest.server:app"*) kill "${{pid##*/}}" 2>/dev/null || true ;;
+    *"python3 -m uvicorn envd_guest.server:app"*) kill "${{pid##*/}}" 2>/dev/null || true ;;
+    *"python -m uvicorn envd_guest.server:app"*) kill "${{pid##*/}}" 2>/dev/null || true ;;
   esac
 done
 sleep 0.1
