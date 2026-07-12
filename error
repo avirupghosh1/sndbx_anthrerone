@@ -1,51 +1,5 @@
-build template: e2b-python-1783
-
-=== Sandbox create/list/info/timeout/metrics ===
-Sandbox.create: sb-f565cf3f03094682
-sandbox domain: sndbx.example.com
-sandbox.connect instance: sb-f565cf3f03094682
-Sandbox.list: count=1 has_next=False
-sandbox.get_info: sb-f565cf3f03094682
-Sandbox.get_info: sb-f565cf3f03094682
-
-=== Sandbox URL and network methods ===
-sandbox.get_host: 8080-sb-f565cf3f03094682.sndbx.example.com
-sandbox.get_mcp_url: https://50005-sb-f565cf3f03094682.sndbx.example.com/mcp
-sandbox.download_url: https://49983-sb-f565cf3f03094682.sndbx.example.com/files?path=%2Ftmp%2Fe2b-smoke%2Ffs%2Fhello.txt&signature=v1_yIQhFRbktalUK01qG9I1AxnzmhWXfUtNj1HQwL0CG0g
-sandbox.upload_url: https://49983-sb-f565cf3f03094682.sndbx.example.com/files?path=%2Ftmp%2Fe2b-smoke%2Ffs%2Fuploaded.txt&signature=v1_xbhs7wYeccHxOHfN2IzBaUUa0KapYRor6c5xkv%2Fizf0
-sandbox.update_network instance: not implemented as expected
-Sandbox.update_network class: not implemented as expected
-
-=== Sandbox timeout/metrics methods ===
-sandbox.set_timeout / Sandbox.set_timeout: ok
-sandbox.get_metrics: 1
-Sandbox.get_metrics: 1
-Sandbox.beta_create: not present in this SDK version
-
-
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/e2b/sandbox_sync/filesystem/filesystem.py", line 630, in make_dir
-    self._rpc.make_dir(
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/e2b/envd/filesystem/filesystem_connect.py", line 118, in make_dir
-    return self._make_dir.call_unary(req, **opts)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/e2b_connect/client.py", line 115, in retry
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/e2b_connect/client.py", line 329, in call_unary
-    return self._process_unary_response(res)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/e2b_connect/client.py", line 275, in _process_unary_response
-    raise error_for_response(http_resp)
-e2b_connect.client.ConnectException: (<Code.unimplemented: 'unimplemented'>, 'Connect RPC is not implemented by this HTTP envd guest yet.')
-
-During handling of the above exception, another exception occurred:
-
-Traceback (most recent call last):
-  File "/home/avirup/final_check_1/sndbx_anthrerone/./e2b_control_plane_smoke.py", line 575, in <module>
-    main()
-  File "/home/avirup/final_check_1/sndbx_anthrerone/./e2b_control_plane_smoke.py", line 284, in main
-    if not sandbox.files.make_dir("/tmp/e2b-smoke/fs"):
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/e2b/sandbox_sync/filesystem/filesystem.py", line 643, in make_dir
-    raise _handle_filesystem_rpc_exception(e, self._envd_api)
-e2b.exceptions.SandboxException: Code.unimplemented: Connect RPC is not implemented by this HTTP envd guest yet.
+rchestrator.envd_template_bake - INFO - envd template bake: embedded into container d6a8bc15579c
+2026-07-12 18:07:04,033 - httpx - INFO - HTTP Request: POST http://runtime-gateway-0.runtime-gateway-headless.sandboxes.svc.cluster.local:8080/internal/runtime/containers/d6a8bc15579c5d39dc01e8763620ce1e0b31a03b99d7dbb4cb868f35100f5f52/exec "HTTP/1.1 200 OK"
+2026-07-12 18:07:04,033 - orchestrator.sandbox_manager - WARNING - envd auto-start: daemon did not listen on :49983 sandbox=sb-eebae697dd214b77 stderr=
+2026-07-12 18:07:04,034 - orchestrator.sandbox_manager - ERROR - Sandbox sb-eebae697dd214b77 bootstrap failed; tearing down workload
+2026-07-12 18:07:04,619

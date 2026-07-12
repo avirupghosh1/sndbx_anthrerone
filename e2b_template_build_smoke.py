@@ -20,7 +20,7 @@ os.environ["E2B_VALIDATE_API_KEY"] = "false"
 
 TEMPLATE_NAME = os.environ.get("TEMPLATE_NAME", "e2b-python-1783")
 PYTHON_VERSION = os.environ.get("PYTHON_VERSION", "3.11")
-REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "300"))
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "1000"))
 
 E2B_OPTS = {
     "api_url": API_URL,
