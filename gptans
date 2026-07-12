@@ -152,3 +152,43 @@
 
   Do not run the E2B smoke until these pass. If they fail, paste outputs from steps 2, 3, and 4. That will tell us exactly whether it is wrong cert, wrong ingress, wrong namespace, wrong secret
   name, or DNS pointing somewhere else.
+
+
+
+  which mkcert
+  mkcert -install
+
+  bash deploy/create-local-tls.sh
+  kubectl -n sandboxes rollout restart deploy/ingress-nginx-controller 2>/dev/null || true
+
+  If your ingress controller is not in sandboxes, use its real namespace/name, or just wait a few seconds. Nginx normally reloads secrets automatically.
+
+  Then validate the secret itself:
+
+  kubectl -n sandboxes get secret sndbx-example-com-tls \
+    -o jsonpath='{.data.tls\.crt}' \
+    | base64 -d \
+    | openssl x509 -noout -subject -issuer -ext subjectAltName
+
+  Expected issuer must be mkcert, not itself.
+
+  Then validate what ingress serves:
+
+  openssl s_client \
+    -CAfile "$(mkcert -CAROOT)/rootCA.pem" \
+    -verify_return_error \
+    -connect api.sndbx.example.com:443 \
+    -servername api.sndbx.example.com </dev/null
+
+  You need:
+
+  Verify return code: 0 (ok)
+
+  Only after that run:
+
+  SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem" \
+  API_URL=http://127.0.0.1:8001 \
+  API_KEY=... \
+  ./e2b_control_plane_smoke.py
+
+  Right now the issue is not E2B, API, or image rebuild. It is definitely the TLS secret content being self-signed instead of mkcert-signed.
