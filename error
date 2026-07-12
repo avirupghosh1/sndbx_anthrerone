@@ -1,70 +1,44 @@
-create sandbox from template: e2b-python-1783617758
-created sandbox: sb-426261e1f2694877
-sandbox domain: sndbx.example.com
-cleanup original sandbox
-Traceback (most recent call last):
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpx/_transports/default.py", line 101, in map_httpcore_exceptions
-    yield
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpx/_transports/default.py", line 250, in handle_request
-    resp = self._pool.handle_request(req)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpcore/_sync/connection_pool.py", line 256, in handle_request
-    raise exc from None
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpcore/_sync/connection_pool.py", line 236, in handle_request
-    response = connection.handle_request(
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpcore/_sync/connection.py", line 101, in handle_request
-    raise exc
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpcore/_sync/connection.py", line 78, in handle_request
-    stream = self._connect(request)
-             ^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpcore/_sync/connection.py", line 156, in _connect
-    stream = stream.start_tls(**kwargs)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpcore/_backends/sync.py", line 154, in start_tls
-    with map_exceptions(exc_map):
-         ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/contextlib.py", line 158, in __exit__
-    self.gen.throw(value)
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpcore/_exceptions.py", line 14, in map_exceptions
-    raise to_exc(exc) from exc
-httpcore.ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate (_ssl.c:1000)
+(base) avirup@avirup-Victus-by-HP-Gaming-Laptop-15-fa0xxx:~/final_check/sndbx_anthrerone$ 
+  openssl s_client \
+    -connect api.sndbx.example.com:443 \
+    -servername api.sndbx.example.com \
+    -showcerts </dev/null 2>/dev/null \
+    | openssl x509 -noout -subject -issuer -ext subjectAltName
+subject=CN = *.sndbx.example.com
+issuer=CN = *.sndbx.example.com
+X509v3 Subject Alternative Name: 
+    DNS:api.sndbx.example.com, DNS:*.sndbx.example.com
 
-The above exception was the direct cause of the following exception:
-
-Traceback (most recent call last):
-  File "/home/avirup/final_check/sndbx_anthrerone/./e2b_control_plane_smoke.py", line 105, in <module>
-    main()
-  File "/home/avirup/final_check/sndbx_anthrerone/./e2b_control_plane_smoke.py", line 53, in main
-    sandbox.files.write(path, content)
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/e2b/sandbox_sync/filesystem/filesystem.py", line 304, in write
-    result = self.write_files(
-             ^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/e2b/sandbox_sync/filesystem/filesystem.py", line 434, in write_files
-    r = self._envd_api.post(
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpx/_client.py", line 1144, in post
-    return self.request(
-           ^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpx/_client.py", line 825, in request
-    return self.send(request, auth=auth, follow_redirects=follow_redirects)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpx/_client.py", line 914, in send
-    response = self._send_handling_auth(
-               ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpx/_client.py", line 942, in _send_handling_auth
-    response = self._send_handling_redirects(
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpx/_client.py", line 979, in _send_handling_redirects
-    response = self._send_single_request(request)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpx/_client.py", line 1014, in _send_single_request
-    response = transport.handle_request(request)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpx/_transports/default.py", line 249, in handle_request
-    with map_httpcore_exceptions():
-         ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/avirup/miniconda3/lib/python3.12/contextlib.py", line 158, in __exit__
-    self.gen.throw(value)
-  File "/home/avirup/miniconda3/lib/python3.12/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions
-    raise mapped_exc(message) from exc
-httpx.ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate (_ssl.c:1000)
+(base) avirup@avirup-Victus-by-HP-Gaming-Laptop-15-fa0xxx:~/final_check/sndbx_anthrerone$ 
+  openssl s_client \
+    -CAfile "$(mkcert -CAROOT)/rootCA.pem" \
+    -verify_return_error \
+    -connect api.sndbx.example.com:443 \
+    -servername api.sndbx.example.com </dev/null
+CONNECTED(00000003)
+depth=0 CN = *.sndbx.example.com
+verify error:num=18:self-signed certificate
+4067271D90740000:error:0A000086:SSL routines:tls_post_process_server_certificate:certificate verify failed:ssl/statem/statem_clnt.c:1889:
+---
+Certificate chain
+ 0 s:CN = *.sndbx.example.com
+   i:CN = *.sndbx.example.com
+   a:PKEY: rsaEncryption, 2048 (bit); sigalg: RSA-SHA256
+   v:NotBefore: Jul 12 09:46:51 2026 GMT; NotAfter: Jul 12 09:46:51 2027 GMT
+---
+no peer certificate available
+---
+No client certificate CA names sent
+Server Temp Key: X25519, 253 bits
+---
+SSL handshake has read 1080 bytes and written 334 bytes
+Verification error: self-signed certificate
+---
+New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384
+Secure Renegotiation IS NOT supported
+Compression: NONE
+Expansion: NONE
+No ALPN negotiated
+Early data was not sent
+Verify return code: 18 (self-signed certificate)
+---
