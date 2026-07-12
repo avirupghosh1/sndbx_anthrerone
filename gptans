@@ -1,0 +1,21 @@
+
+  - Added sndbx_anthrerone/deploy/create-local-tls.sh to create/update sndbx-example-com-tls for:
+      - api.sndbx.example.com
+      - *.sndbx.example.com
+
+  - Restored local API data-plane scheme to https in sndbx_anthrerone/deploy/api-service.yaml:138
+  - Added TLS config back to ingress in sndbx_anthrerone/deploy/runtime-gateway.yaml:270
+  - Updated README with the local TLS step and Python/httpx CA note.
+
+  Run this from sndbx_anthrerone:
+
+  bash deploy/create-local-tls.sh
+  kubectl apply -f deploy/api-service.yaml
+  kubectl apply -f deploy/runtime-gateway.yaml
+  kubectl -n sandboxes rollout restart deploy/api-service statefulset/runtime-gateway
+
+  Then run the E2B smoke test like this if Python still uses certifi instead of system trust:
+
+  SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem" API_URL=http://127.0.0.1:8001 API_KEY=... ./e2b_control_plane_smoke.py
+
+  Validation done: deploy/create-local-tls.sh passes bash -n. I did not execute the script because mkcert -install modifies your local trust store and the script applies a Kubernetes TLS secret.
