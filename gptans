@@ -58,10 +58,9 @@
 
   Then validate Python/httpx trust specifically:
 
-  SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem" python - <<'PY'
-  import httpx
-  print(httpx.get("https://api.sndbx.example.com/health", timeout=10).status_code)
-  PY
+  SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem" python 
+  "import httpx
+  print(httpx.get("https://api.sndbx.example.com/health", timeout=10).status_code)"
 
   If that works, run smoke the same way:
 
