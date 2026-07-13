@@ -81,17 +81,17 @@ imageBuilding:
 
 config:
   apiService:
-    SANDBOX_DATA_PLANE_DOMAIN: "sndbx.sprinklr.com"
+    SANDBOX_DATA_PLANE_DOMAIN: "agent-sandbox.sprinklr.com"
     SANDBOX_DATA_PLANE_SCHEME: "https"
     SANDBOX_WARM_POOL_SIZE: "2"
   runtimeGateway:
-    SANDBOX_DOMAIN: "sndbx.sprinklr.com"
+    SANDBOX_DOMAIN: "agent-sandbox.sprinklr.com"
 
 ingress:
   apiHosts:
-    - api.sndbx.sprinklr.com
+    - api.agent-sandbox.sprinklr.com
   sandboxHosts:
-    - "*.sndbx.sprinklr.com"
+    - "*.agent-sandbox.sprinklr.com"
 
 secrets:
   create: false

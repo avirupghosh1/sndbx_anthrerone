@@ -295,8 +295,8 @@ For QA6 it renders:
 
 The ingress routes are:
 
-- `https://api.sndbx.sprinklr.com/` -> `sndbx-qa6-tier1-api-service:8000`
-- `https://*.sndbx.sprinklr.com/` -> `sndbx-qa6-tier1-runtime-gateway:8080`
+- `https://api.agent-sandbox.sprinklr.com/` -> `sndbx-qa6-tier1-api-service:8000`
+- `https://*.agent-sandbox.sprinklr.com/` -> `sndbx-qa6-tier1-runtime-gateway:8080`
 
 Daytona SSH compatibility is a separate TCP path, not an HTTP ingress route.
 The chart exposes `sndbx-qa6-tier1-api-service:2222` as the SSH gateway port.
@@ -317,7 +317,7 @@ Raise it in release values if template contexts can exceed that.
 Sandbox data-plane requests use hostnames like:
 
 ```text
-https://<guest-port>-<sandbox-id>.sndbx.sprinklr.com/
+https://<guest-port>-<sandbox-id>.agent-sandbox.sprinklr.com/
 ```
 
 Runtime-gateway parses the host, asks api-service for the sandbox route, and
@@ -325,8 +325,8 @@ then proxies traffic to the correct running sandbox.
 
 Before deploy, confirm:
 
-- `api.sndbx.sprinklr.com` DNS points to the ingress controller/load balancer.
-- `*.sndbx.sprinklr.com` DNS points to the same ingress controller/load balancer.
+- `api.agent-sandbox.sprinklr.com` DNS points to the ingress controller/load balancer.
+- `*.agent-sandbox.sprinklr.com` DNS points to the same ingress controller/load balancer.
 - The `ingress-nginx-office` / platform ACME flow issues a certificate trusted
   by SDK clients for both the API host and wildcard sandbox host. This mirrors
   the Prism chart, which does not render an explicit `spec.tls.secretName`.
