@@ -27,6 +27,14 @@
 {{- if eq (len .Values.ingress.sandboxHosts) 0 -}}
 {{- fail "ingress.sandboxHosts must contain at least one host" -}}
 {{- end -}}
+{{- if .Values.ingress.tls.enabled -}}
+{{- if eq (default "" .Values.ingress.tls.secretName) "" -}}
+{{- fail "ingress.tls.secretName is required when ingress.tls.enabled=true" -}}
+{{- end -}}
+{{- if eq (len .Values.ingress.tls.hosts) 0 -}}
+{{- fail "ingress.tls.hosts must contain at least one host when ingress.tls.enabled=true" -}}
+{{- end -}}
+{{- end -}}
 {{- $databaseSecretName := toString (default "" (.Values.database.existingSecretName | default .Values.secrets.name)) -}}
 {{- if and (eq $databaseSecretName "") .Values.secrets.create -}}
 {{- $databaseSecretName = include "sndbx.secretName" . -}}
@@ -68,4 +76,11 @@
 {{- end -}}
 {{- if and (eq (include "sndbx.templateRegistryAuthRequired" .) "true") .Values.secrets.create (eq (default "" .Values.templateRegistry.existingSecretName) "") (or (eq (default "" .Values.secrets.data.registryUsername) "") (eq (default "" .Values.secrets.data.registryPassword) "")) -}}
 {{- fail "templateRegistry.authRequired=true with secrets.create=true requires secrets.data.registryUsername and secrets.data.registryPassword" -}}
+{{- end -}}
+{{- $imageBuildingSecretName := toString (default "" (.Values.imageBuilding.existingSecretName | default .Values.secrets.name)) -}}
+{{- if and (eq (include "sndbx.imageBuildingAuthRequired" .) "true") (not .Values.secrets.create) (eq $imageBuildingSecretName "") -}}
+{{- fail "imageBuilding.authRequired=true requires either secrets.create=true with imageBuilding S3 secret values or imageBuilding.existingSecretName/secrets.name" -}}
+{{- end -}}
+{{- if and (eq (include "sndbx.imageBuildingAuthRequired" .) "true") .Values.secrets.create (eq (default "" .Values.imageBuilding.existingSecretName) "") (or (eq (default "" .Values.secrets.data.imageBuildingS3Bucket) "") (eq (default "" .Values.secrets.data.imageBuildingS3Region) "") (eq (default "" .Values.secrets.data.imageBuildingS3AccessKeyId) "") (eq (default "" .Values.secrets.data.imageBuildingS3SecretAccessKey) "")) -}}
+{{- fail "imageBuilding.authRequired=true with secrets.create=true requires secrets.data.imageBuildingS3Bucket, imageBuildingS3Region, imageBuildingS3AccessKeyId, and imageBuildingS3SecretAccessKey" -}}
 {{- end -}}

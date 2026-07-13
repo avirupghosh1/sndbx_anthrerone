@@ -114,6 +114,7 @@ class TemplateDefinitionResponse(BaseModel):
     start_cmd: str
     settle_seconds: int
     warm_snapshot_image: Optional[str] = None
+    registry_image_ref: Optional[str] = None
     build_error: Optional[str] = None
     ready_cmd: str = Field(default="", description="Readiness probe shell; empty if unused.")
     created_at: str

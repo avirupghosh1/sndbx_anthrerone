@@ -102,3 +102,7 @@ false
 {{- .Values.templateRegistry.authRequired | toString -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "sndbx.imageBuildingAuthRequired" -}}
+{{- .Values.imageBuilding.authRequired | toString -}}
+{{- end -}}

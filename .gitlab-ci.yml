@@ -47,6 +47,10 @@ variables:
   TEMPLATE_REGISTRY_AUTH_REQUIRED: "false"
   TEMPLATE_REGISTRY_LAYOUT: "auto"
   TEMPLATE_REGISTRY_INTERNAL_ENABLED: "auto"
+  IMAGE_BUILDING_AUTH_REQUIRED: "false"
+  IMAGE_BUILDING_S3_SECRET_NAME: "sndbx-qa6-tier1-secret"
+  IMAGE_BUILDING_S3_PREFIX: "template-build-contexts"
+  IMAGE_BUILDING_S3_ENDPOINT_URL: ""
   DATABASE_SECRET_NAME: "sndbx-qa6-tier1-secret"
   DATABASE_SECRET_KEY: "DATABASE_URL"
   API_SERVICE_IMAGE_NAME: "api-service"
@@ -234,6 +238,8 @@ deploy-qa6:
       IMAGE_SET_STRING="--set-string images.apiService.repo=${DOCKER_REPO},images.apiService.name=${API_SERVICE_BUILT_IMAGE_NAME},images.apiService.tag=${API_SERVICE_BUILT_IMAGE_TAG},images.runtimeGateway.repo=${DOCKER_REPO},images.runtimeGateway.name=${RUNTIME_GATEWAY_BUILT_IMAGE_NAME},images.runtimeGateway.tag=${RUNTIME_GATEWAY_BUILT_IMAGE_TAG},images.dockerDind.repo=${DOCKER_REPO},images.dockerDind.name=${GVISOR_BUILT_IMAGE_NAME},images.dockerDind.tag=${GVISOR_BUILT_IMAGE_TAG},images.templateRegistry.repo=${DOCKER_REPO},images.templateRegistry.name=${TEMPLATE_REGISTRY_BUILT_IMAGE_NAME},images.templateRegistry.tag=${TEMPLATE_REGISTRY_BUILT_IMAGE_TAG}"
       EXTRA_VALUES="${IMAGE_SET_STRING} --set database.existingSecretName=${DATABASE_SECRET_NAME},database.existingSecretKey=${DATABASE_SECRET_KEY}"
       EXTRA_VALUES="${EXTRA_VALUES} --set templateRegistry.pushEnabled=true,templateRegistry.authRequired=${TEMPLATE_REGISTRY_AUTH_REQUIRED},templateRegistry.repoPrefix=${TEMPLATE_REGISTRY_REPO_PREFIX},templateRegistry.server=${TEMPLATE_REGISTRY_SERVER},templateRegistry.existingSecretName=${TEMPLATE_REGISTRY_SECRET_NAME},templateRegistry.layout=${TEMPLATE_REGISTRY_LAYOUT},templateRegistry.internal.enabled=${TEMPLATE_REGISTRY_INTERNAL_ENABLED}"
+      EXTRA_VALUES="${EXTRA_VALUES} --set imageBuilding.authRequired=${IMAGE_BUILDING_AUTH_REQUIRED},imageBuilding.existingSecretName=${IMAGE_BUILDING_S3_SECRET_NAME}"
+      EXTRA_VALUES="${EXTRA_VALUES} --set-string imageBuilding.s3.prefix=${IMAGE_BUILDING_S3_PREFIX},imageBuilding.s3.endpointUrl=${IMAGE_BUILDING_S3_ENDPOINT_URL}"
 
       RESPONSE=$(curl -X POST "$JENKINS_URL/$JENKINS_DEPLOY_JOB_PATH/buildWithParameters" \
         --user "$QA6_JENKINS_USER:$QA6_JENKINS_TOKEN" \

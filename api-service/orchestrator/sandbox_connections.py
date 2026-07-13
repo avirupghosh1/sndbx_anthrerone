@@ -140,7 +140,11 @@ def _guest_port_upstream_target_docker(
     if not callable(ip_fn):
         return None
     p = max(1, min(65535, int(guest_port)))
-    ip = ip_fn(container_id)
+    try:
+        ip = ip_fn(container_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("guest upstream docker inspect failed container=%s port=%s: %s", container_id[:12], p, exc)
+        return None
     if not ip:
         return None
     return {
@@ -151,6 +155,29 @@ def _guest_port_upstream_target_docker(
         "kind": "bridge",
         "upstream_http": f"http://{ip}:{p}",
     }
+
+
+def _metadata_guest_upstream_http(row: Dict[str, Any], guest_port: int) -> Optional[str]:
+    md = row.get("metadata") or {}
+    routing = md.get("guest_routing")
+    if not isinstance(routing, dict):
+        return None
+    p = str(max(1, min(65535, int(guest_port))))
+    target = routing.get(p)
+    if not isinstance(target, dict):
+        return None
+    upstream = str(target.get("upstream_http") or "").strip().rstrip("/")
+    if upstream.startswith(("http://", "https://")):
+        return upstream
+    host = str(target.get("host") or "").strip()
+    try:
+        port = max(1, min(65535, int(target.get("port") or p)))
+    except (TypeError, ValueError):
+        port = int(p)
+    if host:
+        scheme = str(target.get("scheme") or "http").strip() or "http"
+        return f"{scheme}://{host}:{port}"
+    return None
 
 
 def build_guest_routing_record(
@@ -212,4 +239,4 @@ def resolve_guest_upstream_http(manager: "SandboxManager", sandbox_id: str, gues
     )
     if target:
         return str(target["upstream_http"])
-    return None
+    return _metadata_guest_upstream_http(row, p)

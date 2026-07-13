@@ -38,7 +38,7 @@ async def get_envd_connection(
     if reason:
         raise SandboxRuntimeLostException(sid, reason)
 
-    info, deny = await run_io(sandbox_manager.get_envd_connection_ex, sid)
+    info, deny = await run_io(lambda: sandbox_manager.get_envd_connection_ex(sid, internal=False))
     if not info:
         raise HTTPException(
             status_code=503,

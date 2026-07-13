@@ -5,6 +5,7 @@ import os
 import socket
 import time
 import uuid
+import hashlib
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Dict, List, Optional
@@ -34,6 +35,8 @@ DATABASE_TYPES = {
     "mongo": "mongo",
     "mongodb": "mongo",
 }
+
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 def _utc_now_iso() -> str:
@@ -154,6 +157,11 @@ def _mongodb_database_name(database_url: str) -> str:
     if path:
         return unquote(path.split("/", 1)[0])
     raise ValueError("MongoDB DATABASE_URL must include a database name or set MONGODB_DATABASE")
+
+
+def _template_build_upload_id(owner_client_id: str, namespace: str, object_key: str) -> str:
+    raw = "\0".join((owner_client_id or "", namespace or "", object_key or ""))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 class _PostgresDatabase:
@@ -518,6 +526,21 @@ class _PostgresDatabase:
             """)
 
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS template_build_uploads (
+                    upload_id TEXT PRIMARY KEY,
+                    owner_client_id TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    object_key TEXT NOT NULL,
+                    content_type TEXT NOT NULL DEFAULT '',
+                    payload BYTEA NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(owner_client_id, namespace, object_key)
+                )
+            """)
+
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS service_leases (
                     lease_name TEXT PRIMARY KEY,
                     owner_id TEXT NOT NULL,
@@ -574,6 +597,12 @@ class _PostgresDatabase:
                 """
                 CREATE INDEX IF NOT EXISTS idx_template_builds_owner_created
                 ON template_builds(owner_client_id, created_at DESC)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_template_build_uploads_owner_object
+                ON template_build_uploads(owner_client_id, namespace, object_key)
                 """
             )
             cursor.execute(
@@ -2441,6 +2470,104 @@ class _PostgresDatabase:
             conn.close()
         return out
 
+    def put_template_build_upload(
+        self,
+        owner_client_id: str,
+        namespace: str,
+        object_key: str,
+        payload: bytes,
+        *,
+        content_type: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        now = _utc_now_iso()
+        owner = str(owner_client_id or "")
+        ns = str(namespace or "")
+        key = str(object_key or "")
+        upload_id = _template_build_upload_id(owner, ns, key)
+        meta_json = json.dumps(metadata or {})
+        data = bytes(payload or b"")
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO template_build_uploads
+                (upload_id, owner_client_id, namespace, object_key, content_type, payload,
+                 metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_client_id, namespace, object_key) DO UPDATE SET
+                    content_type = EXCLUDED.content_type,
+                    payload = EXCLUDED.payload,
+                    metadata_json = EXCLUDED.metadata_json,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (upload_id, owner, ns, key, content_type or "", data, meta_json, now, now),
+            )
+            conn.commit()
+            conn.close()
+        return self.get_template_build_upload(owner, ns, key) or {}
+
+    def get_template_build_upload(
+        self,
+        owner_client_id: str,
+        namespace: str,
+        object_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT upload_id, owner_client_id, namespace, object_key, content_type,
+                       payload, metadata_json, created_at, updated_at
+                FROM template_build_uploads
+                WHERE owner_client_id = ? AND namespace = ? AND object_key = ?
+                """,
+                (str(owner_client_id or ""), str(namespace or ""), str(object_key or "")),
+            )
+            row = cursor.fetchone()
+            conn.close()
+        if not row:
+            return None
+        meta = {}
+        try:
+            meta = json.loads(row[6] or "{}")
+        except Exception:
+            meta = {}
+        return {
+            "upload_id": row[0],
+            "owner_client_id": row[1],
+            "namespace": row[2],
+            "object_key": row[3],
+            "content_type": row[4] or "",
+            "payload": bytes(row[5] or b""),
+            "metadata": meta if isinstance(meta, dict) else {},
+            "created_at": row[7],
+            "updated_at": row[8],
+        }
+
+    def template_build_upload_exists(
+        self,
+        owner_client_id: str,
+        namespace: str,
+        object_key: str,
+    ) -> bool:
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT 1 FROM template_build_uploads
+                WHERE owner_client_id = ? AND namespace = ? AND object_key = ?
+                LIMIT 1
+                """,
+                (str(owner_client_id or ""), str(namespace or ""), str(object_key or "")),
+            )
+            row = cursor.fetchone()
+            conn.close()
+        return bool(row)
+
     def create_agent(
         self,
         agent_id: str,
@@ -2762,6 +2889,11 @@ class _MongoDatabase:
         self.db.sandbox_templates.create_index([("owner_client_id", 1), ("template_alias", 1)])
         self.db.sandbox_templates.create_index("template_alias")
         self.db.template_builds.create_index([("owner_client_id", 1), ("created_at", -1)])
+        self.db.template_build_uploads.create_index(
+            [("owner_client_id", 1), ("namespace", 1), ("object_key", 1)],
+            unique=True,
+        )
+        self.db.template_build_upload_chunks.create_index([("upload_id", 1), ("idx", 1)])
         self.db.warm_pool_segments.create_index([("desired_size", 1), ("updated_at", -1)])
         self.db.service_leases.create_index("expires_at")
         self.db.distributed_locks.create_index("expires_at")
@@ -3961,6 +4093,105 @@ class _MongoDatabase:
             self._template_build_dict_from_doc(doc)
             for doc in self.db.template_builds.find({"owner_client_id": client_id}).sort("created_at", -1).limit(int(limit))
         ]
+
+    def put_template_build_upload(
+        self,
+        owner_client_id: str,
+        namespace: str,
+        object_key: str,
+        payload: bytes,
+        *,
+        content_type: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        now = _utc_now_iso()
+        owner = str(owner_client_id or "")
+        ns = str(namespace or "")
+        key = str(object_key or "")
+        upload_id = _template_build_upload_id(owner, ns, key)
+        data = bytes(payload or b"")
+        chunks = [
+            data[i : i + _UPLOAD_CHUNK_BYTES]
+            for i in range(0, len(data), _UPLOAD_CHUNK_BYTES)
+        ] or [b""]
+        self.db.template_build_upload_chunks.delete_many({"upload_id": upload_id})
+        if chunks:
+            self.db.template_build_upload_chunks.insert_many(
+                [
+                    {
+                        "_id": f"{upload_id}:{idx}",
+                        "upload_id": upload_id,
+                        "idx": idx,
+                        "data": chunk,
+                    }
+                    for idx, chunk in enumerate(chunks)
+                ]
+            )
+        self.db.template_build_uploads.update_one(
+            {"owner_client_id": owner, "namespace": ns, "object_key": key},
+            {
+                "$set": {
+                    "upload_id": upload_id,
+                    "owner_client_id": owner,
+                    "namespace": ns,
+                    "object_key": key,
+                    "content_type": content_type or "",
+                    "metadata": dict(metadata or {}),
+                    "size": len(data),
+                    "chunk_count": len(chunks),
+                    "updated_at": now,
+                },
+                "$setOnInsert": {"created_at": now},
+            },
+            upsert=True,
+        )
+        return self.get_template_build_upload(owner, ns, key) or {}
+
+    def get_template_build_upload(
+        self,
+        owner_client_id: str,
+        namespace: str,
+        object_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        owner = str(owner_client_id or "")
+        ns = str(namespace or "")
+        key = str(object_key or "")
+        doc = self.db.template_build_uploads.find_one(
+            {"owner_client_id": owner, "namespace": ns, "object_key": key}
+        )
+        if not doc:
+            return None
+        upload_id = str(doc.get("upload_id") or _template_build_upload_id(owner, ns, key))
+        chunks = self.db.template_build_upload_chunks.find({"upload_id": upload_id}).sort("idx", 1)
+        payload = b"".join(bytes(chunk.get("data") or b"") for chunk in chunks)
+        return {
+            "upload_id": upload_id,
+            "owner_client_id": owner,
+            "namespace": ns,
+            "object_key": key,
+            "content_type": str(doc.get("content_type") or ""),
+            "payload": payload,
+            "metadata": dict(doc.get("metadata") or {}),
+            "created_at": doc.get("created_at"),
+            "updated_at": doc.get("updated_at"),
+        }
+
+    def template_build_upload_exists(
+        self,
+        owner_client_id: str,
+        namespace: str,
+        object_key: str,
+    ) -> bool:
+        return bool(
+            self.db.template_build_uploads.find_one(
+                {
+                    "owner_client_id": str(owner_client_id or ""),
+                    "namespace": str(namespace or ""),
+                    "object_key": str(object_key or ""),
+                },
+                {"_id": 1},
+            )
+        )
 
     def create_agent(
         self,

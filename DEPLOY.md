@@ -75,6 +75,12 @@ SQLite is intentionally not supported.
 Template registry credentials are not required in the production default. Built
 template images are pushed to the chart-managed in-cluster registry pod.
 
+E2B and Daytona template context uploads do not require AWS/S3 credentials.
+The compatibility endpoints return short-lived S3-shaped credentials that point
+back at the api-service host, then store uploaded archives in the configured
+PostgreSQL or MongoDB database. Keep `API_KEY`, `INTERNAL_API_KEY`, and the
+database Secret values consistent across api-service pods.
+
 `api-service` must not be given per-shard `DOCKER_HOST` values. In the Helm
 deployment it talks to runtime-gateway over HTTP only. The dockerd sidecar binds
 to `127.0.0.1:2375` inside each runtime-gateway pod and is not exposed through a
@@ -244,6 +250,38 @@ production path. Leave `templateRegistry.repoPrefix` empty and
 `templateRegistry.authRequired=false` so built templates stay in the internal
 registry pod and no ECR/template-registry credentials are required.
 
+## Build Context Storage
+
+E2B and Daytona template builds upload local build context archives through the
+API. By default, these objects use the same database backend as the rest of the
+control plane:
+
+```sh
+IMAGE_BUILDING_AUTH_REQUIRED=false
+```
+
+To store those uploaded build-context objects in S3 instead, set:
+
+```sh
+IMAGE_BUILDING_AUTH_REQUIRED=true
+IMAGE_BUILDING_S3_SECRET_NAME=sndbx-qa6-tier1-secret
+IMAGE_BUILDING_S3_PREFIX=template-build-contexts
+IMAGE_BUILDING_S3_ENDPOINT_URL=
+```
+
+The Secret must contain:
+
+```text
+IMAGE_BUILDING_S3_BUCKET
+IMAGE_BUILDING_S3_REGION
+IMAGE_BUILDING_S3_ACCESS_KEY_ID
+IMAGE_BUILDING_S3_SECRET_ACCESS_KEY
+IMAGE_BUILDING_S3_SESSION_TOKEN  # optional
+```
+
+The SDKs still upload to API URLs; the API writes those chunks to S3. Runtime
+gateway and the internal template-registry image path are unchanged.
+
 ## Ingress
 
 Helm creates one Ingress when `ingress.enabled=true`.
@@ -253,12 +291,28 @@ For QA6 it renders:
 - Ingress name: `sndbx-qa6-tier1-ingress`
 - Namespace: `spr-apps`
 - Ingress class: `ingress-nginx-office`
-- TLS secret: `sndbx-sprinklr-com-tls`
+- TLS: Prism-style ingress automation via `kubernetes.io/tls-acme: "true"`
 
 The ingress routes are:
 
 - `https://api.sndbx.sprinklr.com/` -> `sndbx-qa6-tier1-api-service:8000`
 - `https://*.sndbx.sprinklr.com/` -> `sndbx-qa6-tier1-runtime-gateway:8080`
+
+Daytona SSH compatibility is a separate TCP path, not an HTTP ingress route.
+The chart exposes `sndbx-qa6-tier1-api-service:2222` as the SSH gateway port.
+For external SSH access, configure the platform TCP ingress/load balancer to
+forward the public SSH host and port to that service port, then set
+`config.apiService.DAYTONA_SSH_GATEWAY_PUBLIC_HOST` and
+`DAYTONA_SSH_GATEWAY_PUBLIC_PORT` in the release values if the public endpoint
+differs from the API host and port `2222`.
+
+The API ingress also receives SDK template-context uploads:
+
+- `PUT /templates/<template-id>/files/<hash>/upload`
+- `PUT /daytona-volume-builds/<org>/<hash>/context.tar`
+
+The chart sets NGINX `proxy-body-size` to `1g` by default for these uploads.
+Raise it in release values if template contexts can exceed that.
 
 Sandbox data-plane requests use hostnames like:
 
@@ -273,9 +327,9 @@ Before deploy, confirm:
 
 - `api.sndbx.sprinklr.com` DNS points to the ingress controller/load balancer.
 - `*.sndbx.sprinklr.com` DNS points to the same ingress controller/load balancer.
-- `sndbx-sprinklr-com-tls` exists in `spr-apps`, is issued by a CA trusted by
-  SDK clients, and covers both the API host and wildcard sandbox host. The Helm
-  chart references this Secret but does not create it.
+- The `ingress-nginx-office` / platform ACME flow issues a certificate trusted
+  by SDK clients for both the API host and wildcard sandbox host. This mirrors
+  the Prism chart, which does not render an explicit `spec.tls.secretName`.
 - The ingress controller named `ingress-nginx-office` exists in the cluster.
 
 ## Direct Helm Validation
@@ -286,7 +340,8 @@ Render QA6 with test image tags:
 helm lint sndbx -f sndbx/releases/qa6-tier1/values.yaml \
   --set images.apiService.tag=test \
   --set images.runtimeGateway.tag=test \
-  --set images.dockerDind.tag=test
+  --set images.dockerDind.tag=test \
+  --set images.templateRegistry.tag=test
 ```
 
 Render internal-registry mode:
@@ -296,7 +351,8 @@ helm template internal-reg sndbx \
   --set secrets.name=sndbx-qa6-tier1-secret \
   --set images.apiService.tag=test \
   --set images.runtimeGateway.tag=test \
-  --set images.dockerDind.tag=test
+  --set images.dockerDind.tag=test \
+  --set images.templateRegistry.tag=test
 ```
 
 Render MongoDB mode with an existing Secret:
@@ -306,7 +362,8 @@ helm template mongo sndbx \
   --set secrets.name=sndbx-qa6-tier1-secret \
   --set images.apiService.tag=test \
   --set images.runtimeGateway.tag=test \
-  --set images.dockerDind.tag=test
+  --set images.dockerDind.tag=test \
+  --set images.templateRegistry.tag=test
 ```
 
 Expected intentional failures:
@@ -316,6 +373,8 @@ Expected intentional failures:
 - Unsupported `database.type`
 - `templateRegistry.pushEnabled=true`, empty repo prefix, and
   `templateRegistry.internal.enabled=false`
+- `imageBuilding.authRequired=true` with `secrets.create=true` and missing S3
+  secret values
 
 ## Deploy Flow
 

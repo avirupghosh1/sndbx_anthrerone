@@ -8,6 +8,7 @@ SHARDS="${SHARDS:-3}"
 IMAGE_FILTER="${IMAGE_FILTER:-mysandbox|custodian|python|agentlib|REPOSITORY}"
 DOCKER_HOST_IN_POD="${DOCKER_HOST_IN_POD:-tcp://127.0.0.1:2375}"
 GATEWAY_CONTAINER="${GATEWAY_CONTAINER:-runtime-gateway}"
+REGISTRY_CATALOG_LIMIT="${REGISTRY_CATALOG_LIMIT:-1000}"
 
 section() {
   printf '\n===== %s =====\n' "$1"
@@ -229,3 +230,77 @@ for image in c.images.list():
             print(f\"{tag}\t{image.attrs.get('Size', 0)}\t{image.short_id}\")
 " | grep -v '^REPOSITORY' || true
 done
+
+section "Template registry images"
+registry_pod=""
+registry_gateway_container=""
+for i in $(seq 0 "$((SHARDS - 1))"); do
+  pod="runtime-gateway-${i}"
+  if kubectl -n "$NAMESPACE" get pod "$pod" >/dev/null 2>&1; then
+    registry_pod="$pod"
+    registry_gateway_container="$(resolve_container "$pod" "$GATEWAY_CONTAINER" "gateway")"
+    break
+  fi
+done
+
+if [ -z "$registry_pod" ]; then
+  echo "No runtime-gateway pod available to query the template registry."
+else
+  kubectl -n "$NAMESPACE" exec "$registry_pod" -c "$registry_gateway_container" -- env REGISTRY_CATALOG_LIMIT="$REGISTRY_CATALOG_LIMIT" python -c '
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+server = (
+    os.environ.get("TEMPLATE_REGISTRY_SERVER")
+    or os.environ.get("TEMPLATE_REGISTRY_CACHE_SERVER")
+    or ""
+).strip().rstrip("/")
+limit = max(1, int(os.environ.get("REGISTRY_CATALOG_LIMIT") or "1000"))
+
+if not server:
+    print("TEMPLATE_REGISTRY_SERVER is not configured in this runtime-gateway pod.")
+    sys.exit(0)
+
+base = server if "://" in server else f"http://{server}"
+print(f"registry={base}")
+
+def get_json(path):
+    url = f"{base}{path}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8") or "{}")
+
+try:
+    catalog = get_json(f"/v2/_catalog?n={limit}")
+except urllib.error.HTTPError as exc:
+    print(f"registry catalog unavailable: HTTP {exc.code} {exc.reason}")
+    sys.exit(0)
+except Exception as exc:
+    print(f"registry catalog unavailable: {type(exc).__name__}: {exc}")
+    sys.exit(0)
+
+repos = sorted(str(x) for x in catalog.get("repositories", []) if str(x).strip())
+if not repos:
+    print("(registry catalog is empty)")
+    sys.exit(0)
+
+print("REPOSITORY:TAG")
+for repo in repos:
+    encoded_repo = urllib.parse.quote(repo, safe="/")
+    try:
+        tags_doc = get_json(f"/v2/{encoded_repo}/tags/list")
+        tags = sorted(str(x) for x in (tags_doc.get("tags") or []) if str(x).strip())
+    except Exception as exc:
+        print(f"{repo}:<tags unavailable: {type(exc).__name__}: {exc}>")
+        continue
+    if not tags:
+        print(f"{repo}:<no tags>")
+        continue
+    for tag in tags:
+        print(f"{repo}:{tag}")
+'
+fi

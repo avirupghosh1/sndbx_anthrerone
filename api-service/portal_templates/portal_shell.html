@@ -185,6 +185,7 @@
                 <th>Status</th>
                 <th>Mode</th>
                 <th>Image</th>
+                <th>Registry</th>
                 <th>Started</th>
                 <th>Completed</th>
               </tr>
@@ -197,11 +198,12 @@
                 <td><span class="status-pill {% if row.status == 'failed' %}danger{% elif row.status == 'success' %}success{% endif %}">{{ row.status }}</span></td>
                 <td>{{ popover(row.requested_mode ~ ' / ' ~ (row.effective_mode or '-')) }}</td>
                 <td>{{ popover(row.image_tag or '-', 'id-text', true) }}</td>
+                <td>{{ popover(row.registry_image_ref or '-', 'id-text', true) }}</td>
                 <td title="{{ row.created_at }}">{{ row.created_at_display }}</td>
                 <td title="{{ row.completed_at or '-' }}">{{ row.completed_at_display }}</td>
               </tr>
               <tr class="build-detail-row" hidden>
-                <td colspan="7">
+                <td colspan="8">
                   <div class="build-detail">
                     <div class="build-detail-head">
                       <span>Build details</span>
@@ -236,6 +238,7 @@
                 <th>Internal ID</th>
                 <th>Base Image</th>
                 <th>Snapshot</th>
+                <th>Registry</th>
                 <th>Start</th>
                 <th>Ready</th>
                 <th>Created</th>
@@ -251,6 +254,7 @@
                 <td>{{ popover(row.internal_id, 'id-text', true) }}</td>
                 <td>{{ popover(row.base_image) }}</td>
                 <td>{{ popover(row.warm_snapshot_image or '-', 'id-text', true) }}</td>
+                <td>{{ popover(row.registry_image_ref or '-', 'id-text', true) }}</td>
                 <td>{{ popover(row.start_cmd or '-', 'id-text') }}</td>
                 <td>{{ popover(row.ready_cmd or '-', 'id-text') }}</td>
                 <td title="{{ row.created_at }}">{{ row.created_at_display }}</td>

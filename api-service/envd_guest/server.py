@@ -250,6 +250,7 @@ class _ManagedProcess:
     history: List[Any] = field(default_factory=list)
     subscribers: set[asyncio.Queue] = field(default_factory=set)
     end_event: Optional[Any] = None
+    pty_reader_done: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
     def start_event(self) -> Any:
@@ -347,23 +348,29 @@ async def _read_pipe(proc: _ManagedProcess, stream: Any, kind: str) -> None:
 async def _read_pty(proc: _ManagedProcess) -> None:
     assert proc.master_fd is not None
     os.set_blocking(proc.master_fd, False)
-    while proc.end_event is None:
-        try:
-            chunk = os.read(proc.master_fd, 65536)
-            if chunk:
-                proc.emit_data("pty", chunk)
-                continue
-        except BlockingIOError:
-            pass
-        except OSError as exc:
-            if exc.errno not in (errno.EIO, errno.EBADF):
-                proc.emit_data("pty", str(exc).encode())
-            break
-        await asyncio.sleep(0.02)
+    try:
+        while True:
+            try:
+                chunk = os.read(proc.master_fd, 65536)
+                if chunk:
+                    proc.emit_data("pty", chunk)
+                    continue
+            except BlockingIOError:
+                pass
+            except OSError as exc:
+                if exc.errno not in (errno.EIO, errno.EBADF):
+                    proc.emit_data("pty", str(exc).encode())
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        proc.pty_reader_done.set()
 
 
 async def _wait_process(proc: _ManagedProcess) -> None:
     code = await proc.proc.wait()
+    if proc.is_pty:
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.pty_reader_done.wait(), timeout=1.0)
     proc.emit_end(int(code or 0))
 
 
@@ -371,6 +378,17 @@ def _resize_pty_fd(fd: int, rows: int, cols: int) -> None:
     rows = max(1, int(rows or 24))
     cols = max(1, int(cols or 80))
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+
+def _pty_preexec(slave_fd: int):
+    def _setup_child_session() -> None:
+        os.setsid()
+        for fd in (0, slave_fd):
+            with contextlib.suppress(OSError, AttributeError):
+                fcntl.ioctl(fd, termios.TIOCSCTTY, 0)
+                break
+
+    return _setup_child_session
 
 
 async def _start_process(req: Any) -> _ManagedProcess:
@@ -392,7 +410,7 @@ async def _start_process(req: Any) -> _ManagedProcess:
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
-            preexec_fn=os.setsid,
+            preexec_fn=_pty_preexec(slave_fd),
         )
         with contextlib.suppress(OSError):
             os.close(slave_fd)

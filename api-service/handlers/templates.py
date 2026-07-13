@@ -561,6 +561,7 @@ def _row_to_response(row: dict) -> dict:
         "settle_seconds": int(row.get("settle_seconds") or 20),
         "ready_cmd": row.get("ready_cmd") or "",
         "warm_snapshot_image": row.get("warm_snapshot_image"),
+        "registry_image_ref": row.get("registry_image_ref"),
         "build_error": row.get("build_error"),
         "created_at": row.get("created_at") or "",
         "updated_at": row.get("updated_at") or "",

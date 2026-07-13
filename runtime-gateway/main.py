@@ -354,4 +354,5 @@ if __name__ == "__main__":
         host=cfg.HOST,
         port=cfg.PORT,
         log_level=cfg.LOG_LEVEL.lower(),
+        access_log=False
     )

@@ -270,7 +270,10 @@ class WarmSandboxPool:
             )
         sid = self._manager._create_sandbox_fresh(
             template_id=self._logical_template_id,
-            metadata={"_warm_pool": True},
+            metadata={
+                "_warm_pool": True,
+                "warm_pool_snapshot_image": self._from_snapshot or "",
+            },
             cpu_limit=self._cpu,
             memory_limit=self._mem,
             timeout=self._timeout,
@@ -537,6 +540,15 @@ class MultiWarmSandboxPool:
 
             if old is not None:
                 old.stop(timeout=20.0)
+                removed = self._manager.trim_warm_pool_to_size(old.pool_key_string, 0)
+                if removed:
+                    logger.info(
+                        "Warm pool segment image changed: drained %s stale warm sandbox(es) key=%s old_snap=%r new_snap=%r",
+                        removed,
+                        old.pool_key_string,
+                        old.from_snapshot_image,
+                        snap,
+                    )
 
             self._manager.note_warm_pool_segment(
                 template_id=key[0],

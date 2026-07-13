@@ -381,8 +381,52 @@ class SandboxManager:
                 )
         return live
 
+    def _warm_pool_ready_image_ref(self, warm_pool_key: str) -> str:
+        segment = self.db.get_warm_pool_segment((warm_pool_key or "").strip())
+        return str((segment or {}).get("ready_image_ref") or "").strip()
+
+    @staticmethod
+    def _warm_pool_row_matches_image(row: Dict[str, Any], ready_image_ref: str) -> bool:
+        ref = (ready_image_ref or "").strip()
+        if not ref:
+            return True
+        md = row.get("metadata") if isinstance(row, dict) else {}
+        md = md if isinstance(md, dict) else {}
+        return str(md.get("warm_pool_snapshot_image") or "").strip() == ref
+
+    def _discard_stale_warm_pool_rows(self, warm_pool_key: str, ready_image_ref: str) -> int:
+        if not (ready_image_ref or "").strip():
+            return 0
+        removed = 0
+        for row in self.db.list_warm_pool_sandboxes(warm_pool_key=warm_pool_key):
+            if self._warm_pool_row_matches_image(row, ready_image_ref):
+                continue
+            sid = str(row.get("sandbox_id") or "").strip()
+            if not sid:
+                continue
+            try:
+                if self.kill_sandbox(sid, force=True):
+                    removed += 1
+            except Exception as ex:  # noqa: BLE001
+                logger.warning("Warm pool stale row discard failed sandbox=%s: %s", sid, ex)
+        if removed:
+            logger.info(
+                "Warm pool stale image drain: removed %s sandbox(es) key=%s ready_image_ref=%s",
+                removed,
+                warm_pool_key,
+                ready_image_ref,
+            )
+        return removed
+
     def warm_pool_ready_count(self, warm_pool_key: str) -> int:
-        return len(self.db.list_warm_pool_sandboxes(warm_pool_key=warm_pool_key))
+        ready_ref = self._warm_pool_ready_image_ref(warm_pool_key)
+        return len(
+            [
+                row
+                for row in self.db.list_warm_pool_sandboxes(warm_pool_key=warm_pool_key)
+                if self._warm_pool_row_matches_image(row, ready_ref)
+            ]
+        )
 
     def trim_warm_pool_to_size(self, warm_pool_key: str, desired_size: int) -> int:
         desired = max(0, int(desired_size))
@@ -716,8 +760,12 @@ class SandboxManager:
         handoff_timeout: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         key = self.warm_pool_key(template_id, cpu_limit, memory_limit, int(timeout))
+        ready_ref = self._warm_pool_ready_image_ref(key)
+        self._discard_stale_warm_pool_rows(key, ready_ref)
         inventory: Dict[str, List[Dict[str, Any]]] = {}
         for row in self.db.list_warm_pool_sandboxes(warm_pool_key=key):
+            if not self._warm_pool_row_matches_image(row, ready_ref):
+                continue
             instance_id = str(row.get("gateway_instance_id") or "").strip()
             if not instance_id:
                 continue
@@ -743,6 +791,17 @@ class SandboxManager:
                 timeout_seconds=handoff_timeout,
             )
             if claimed:
+                if not self._warm_pool_row_matches_image(claimed, ready_ref):
+                    sid = str(claimed.get("sandbox_id") or "").strip()
+                    logger.warning(
+                        "Warm pool claim returned stale image sandbox=%s key=%s ready_image_ref=%s",
+                        sid,
+                        key,
+                        ready_ref,
+                    )
+                    if sid:
+                        self.kill_sandbox(sid, force=True)
+                    continue
                 self._remember_recent_created_row(claimed)
                 return claimed
         claimed = self.db.claim_warm_pool_sandbox(
@@ -754,6 +813,17 @@ class SandboxManager:
             timeout_seconds=handoff_timeout,
         )
         if claimed:
+            if not self._warm_pool_row_matches_image(claimed, ready_ref):
+                sid = str(claimed.get("sandbox_id") or "").strip()
+                logger.warning(
+                    "Warm pool fallback claim returned stale image sandbox=%s key=%s ready_image_ref=%s",
+                    sid,
+                    key,
+                    ready_ref,
+                )
+                if sid:
+                    self.kill_sandbox(sid, force=True)
+                return None
             self._remember_recent_created_row(claimed)
             return claimed
         return None
@@ -1291,7 +1361,7 @@ class SandboxManager:
         return traffic_access_token_for_row(row)
 
     def get_envd_connection_ex(
-        self, sandbox_id: str
+        self, sandbox_id: str, *, internal: bool = True
     ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
         """Like ``get_envd_connection`` but on failure returns ``(None, short_reason)`` for HTTP 503 hints.
 
@@ -1327,22 +1397,41 @@ class SandboxManager:
             allow_public_traffic_for_row,
             data_plane_base_url,
             data_plane_enabled_for_config,
+            resolve_guest_upstream_http,
             sandbox_domain_for_config,
         )
 
         if data_plane_enabled_for_config(self._config):
+            external_http_base_url = data_plane_base_url(
+                self._config,
+                sandbox_id=sid,
+                port=port,
+                scheme="http",
+            )
+            internal_http_base_url = ""
+            internal_headers: Dict[str, str] = {}
+            if internal:
+                gateway_api_base = str(row.get("gateway_api_base") or "").strip().rstrip("/")
+                if gateway_api_base:
+                    internal_http_base_url = gateway_api_base
+                    internal_headers = {
+                        "x-runtime-gateway-forwarded": "1",
+                        "x-sandbox-id": sid,
+                        "x-guest-port": str(port),
+                    }
+                else:
+                    internal_http_base_url = resolve_guest_upstream_http(self, sid, port) or ""
+            if internal and not internal_http_base_url:
+                return None, f"envd internal upstream unavailable for guest port {port}"
             out = {
                 "sandbox_id": sid,
                 "envd_port": port,
                 "sandbox_domain": sandbox_domain_for_config(self._config),
-                "http_base_url": data_plane_base_url(
-                    self._config,
-                    sandbox_id=sid,
-                    port=port,
-                    scheme="http",
-                ),
+                "http_base_url": internal_http_base_url or external_http_base_url,
                 "access_token": tok,
             }
+            if internal_headers:
+                out["internal_route_headers"] = internal_headers
             if not allow_public_traffic_for_row(row, self._config):
                 ttr = self.get_traffic_access_token(sid)
                 if ttr:
@@ -1709,6 +1798,7 @@ class SandboxManager:
             [probe],
             timeout_seconds=wait,
             warn_on_failure=True,
+            update_routing_on_success=True,
         )
         # If no gateway probe is available for this runtime, preserve the existing route behavior.
         return True if ready is None else bool(ready)
@@ -2209,10 +2299,8 @@ class SandboxManager:
                 warm_key = self.warm_pool_key(tid, cpu_limit, memory_limit, int(timeout))
                 segment_before = self.db.get_warm_pool_segment(warm_key)
                 segment_desired = int((segment_before or {}).get("desired_size") or 0)
-                first_pool_request = (
-                    (segment_before is None or segment_desired <= 0)
-                    and self.warm_pool_ready_count(warm_key) <= 0
-                )
+                valid_ready_count = self.warm_pool_ready_count(warm_key)
+                first_pool_request = valid_ready_count <= 0
                 if first_pool_request and self.execution.get_backend_kind() in ("docker", "gvisor"):
                     seed_target = self._select_gateway_target_for_pool(
                         template_id=tid,

@@ -116,6 +116,47 @@ class Config:
         300,
         int(os.getenv("TEMPLATE_IMAGE_RETENTION_SEC", "172800")),
     )
+    # Optional S3-backed object storage for SDK template build context archives.
+    # When disabled, uploads stay in the configured application database.
+    IMAGE_BUILDING_AUTH_REQUIRED: bool = _env_bool("IMAGE_BUILDING_AUTH_REQUIRED", False)
+    IMAGE_BUILDING_S3_BUCKET: str = (os.getenv("IMAGE_BUILDING_S3_BUCKET") or "").strip()
+    IMAGE_BUILDING_S3_PREFIX: str = (
+        os.getenv("IMAGE_BUILDING_S3_PREFIX") or "template-build-contexts"
+    ).strip().strip("/")
+    IMAGE_BUILDING_S3_REGION: str = (
+        os.getenv("IMAGE_BUILDING_S3_REGION")
+        or os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or ""
+    ).strip()
+    IMAGE_BUILDING_S3_ENDPOINT_URL: str = (
+        os.getenv("IMAGE_BUILDING_S3_ENDPOINT_URL") or os.getenv("AWS_S3_ENDPOINT_URL") or ""
+    ).strip().rstrip("/")
+    IMAGE_BUILDING_S3_ACCESS_KEY_ID: str = (
+        os.getenv("IMAGE_BUILDING_S3_ACCESS_KEY_ID") or os.getenv("AWS_ACCESS_KEY_ID") or ""
+    ).strip()
+    IMAGE_BUILDING_S3_SECRET_ACCESS_KEY: str = (
+        os.getenv("IMAGE_BUILDING_S3_SECRET_ACCESS_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY") or ""
+    ).strip()
+    IMAGE_BUILDING_S3_SESSION_TOKEN: str = (
+        os.getenv("IMAGE_BUILDING_S3_SESSION_TOKEN") or os.getenv("AWS_SESSION_TOKEN") or ""
+    ).strip()
+    if IMAGE_BUILDING_AUTH_REQUIRED:
+        _missing_image_building_s3 = [
+            name
+            for name, value in (
+                ("IMAGE_BUILDING_S3_BUCKET", IMAGE_BUILDING_S3_BUCKET),
+                ("IMAGE_BUILDING_S3_REGION/AWS_REGION", IMAGE_BUILDING_S3_REGION),
+                ("IMAGE_BUILDING_S3_ACCESS_KEY_ID/AWS_ACCESS_KEY_ID", IMAGE_BUILDING_S3_ACCESS_KEY_ID),
+                ("IMAGE_BUILDING_S3_SECRET_ACCESS_KEY/AWS_SECRET_ACCESS_KEY", IMAGE_BUILDING_S3_SECRET_ACCESS_KEY),
+            )
+            if not value
+        ]
+        if _missing_image_building_s3:
+            raise RuntimeError(
+                "IMAGE_BUILDING_AUTH_REQUIRED=true requires S3 build context settings: "
+                + ", ".join(_missing_image_building_s3)
+            )
 
     # Warm pool: pre-create sandboxes matching this profile for faster POST /sandboxes.
     SANDBOX_WARM_POOL_SIZE: int = int(os.getenv("SANDBOX_WARM_POOL_SIZE", "0"))
@@ -306,6 +347,42 @@ class Config:
         else None
     )
     SANDBOX_DATA_PLANE_SCHEME: str = (os.getenv("SANDBOX_DATA_PLANE_SCHEME") or "http").strip().rstrip(":/")
+
+    # --- Daytona SSH compatibility gateway ---
+    # TCP SSH server in api-service. It authenticates Daytona SSH access tokens
+    # and bridges SSH channels to envd PTY sessions; no sshd is required inside
+    # the sandbox container.
+    DAYTONA_SSH_GATEWAY_ENABLED: bool = _env_bool("DAYTONA_SSH_GATEWAY_ENABLED", True)
+    DAYTONA_SSH_GATEWAY_HOST: str = (os.getenv("DAYTONA_SSH_GATEWAY_HOST") or "0.0.0.0").strip() or "0.0.0.0"
+    DAYTONA_SSH_GATEWAY_PORT: int = max(
+        1,
+        min(65535, int(os.getenv("DAYTONA_SSH_GATEWAY_PORT", "2222") or "2222")),
+    )
+    DAYTONA_SSH_GATEWAY_PUBLIC_HOST: str = (os.getenv("DAYTONA_SSH_GATEWAY_PUBLIC_HOST") or "").strip()
+    DAYTONA_SSH_GATEWAY_PUBLIC_PORT: int = max(
+        1,
+        min(
+            65535,
+            int(
+                os.getenv(
+                    "DAYTONA_SSH_GATEWAY_PUBLIC_PORT",
+                    os.getenv("DAYTONA_SSH_GATEWAY_PORT", "2222") or "2222",
+                )
+                or "2222"
+            ),
+        ),
+    )
+    # Optional PEM private host key. If unset, api-service generates an ephemeral
+    # host key on each boot and the returned SSH command disables known-host writes.
+    DAYTONA_SSH_GATEWAY_HOST_KEY: str = (os.getenv("DAYTONA_SSH_GATEWAY_HOST_KEY") or "").strip()
+    DAYTONA_SSH_ACCESS_DEFAULT_TTL_MIN: int = max(
+        1,
+        int(os.getenv("DAYTONA_SSH_ACCESS_DEFAULT_TTL_MIN", "60") or "60"),
+    )
+    DAYTONA_SSH_ACCESS_MAX_TTL_MIN: int = max(
+        1,
+        int(os.getenv("DAYTONA_SSH_ACCESS_MAX_TTL_MIN", "1440") or "1440"),
+    )
 
     # Runtime is Docker Engine only. ``runsc``/gVisor is selected via SANDBOX_ISOLATION or
     # SANDBOX_DOCKER_OCI_RUNTIME and executed by runtime-gateway's dockerd sidecar in prod.

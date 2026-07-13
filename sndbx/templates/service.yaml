@@ -16,6 +16,10 @@ spec:
       port: {{ .Values.service.apiService.port }}
       targetPort: http
       protocol: TCP
+    - name: ssh
+      port: {{ .Values.service.apiService.sshPort }}
+      targetPort: ssh
+      protocol: TCP
 ---
 apiVersion: {{ .Values.api.service | quote }}
 kind: Service

@@ -127,12 +127,14 @@ async def build_dockerfile_stream(request: Request) -> Response:
                 if event.get("type") == "result":
                     registry_image_ref = None
                     if bool(getattr(cfg, "TEMPLATE_REGISTRY_PUSH_ENABLED", False)):
+                        yield f"data: {json.dumps({'type': 'log', 'line': 'Pushing template image to registry\\n'}, ensure_ascii=True)}\n\n".encode("utf-8")
                         registry_image_ref = push_image_to_registry(
                             local_ref=str(event.get("image_tag") or ""),
                             template_id=str(payload.get("template_id") or ""),
                             repo_prefix=str(getattr(cfg, "TEMPLATE_REGISTRY_REPO_PREFIX", "") or ""),
                             timeout=max(600, int(payload.get("build_timeout_sec") or 3600)),
                         )
+                        yield f"data: {json.dumps({'type': 'log', 'line': f'Registry image: {registry_image_ref}\\n'}, ensure_ascii=True)}\n\n".encode("utf-8")
                     event = {
                         **event,
                         "registry_image_ref": registry_image_ref,

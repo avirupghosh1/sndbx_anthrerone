@@ -32,7 +32,7 @@ images:
     name: dockerd-gvisor
     tag: CHANGE_ME
     pullPolicy: IfNotPresent
-  registry:
+  templateRegistry:
     repo: prod-nexus.sprinklr.com:8123
     name: registry
     tag: CHANGE_ME
@@ -75,10 +75,14 @@ templateRegistry:
   internal:
     enabled: true
 
+imageBuilding:
+  authRequired: false
+  existingSecretName: sndbx-qa6-tier1-secret
+
 config:
   apiService:
     SANDBOX_DATA_PLANE_DOMAIN: "sndbx.sprinklr.com"
-    SANDBOX_DATA_PLANE_SCHEME: "http"
+    SANDBOX_DATA_PLANE_SCHEME: "https"
     SANDBOX_WARM_POOL_SIZE: "2"
   runtimeGateway:
     SANDBOX_DOMAIN: "sndbx.sprinklr.com"
@@ -88,12 +92,6 @@ ingress:
     - api.sndbx.sprinklr.com
   sandboxHosts:
     - "*.sndbx.sprinklr.com"
-  tls:
-    enabled: true
-    secretName: sndbx-sprinklr-com-tls
-    hosts:
-      - api.sndbx.sprinklr.com
-      - "*.sndbx.sprinklr.com"
 
 secrets:
   create: false

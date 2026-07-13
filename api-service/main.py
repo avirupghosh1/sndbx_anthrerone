@@ -25,7 +25,8 @@ from middleware import (
     APIException,
     ensure_bootstrap_client_and_key,
 )
-from handlers import sandboxes, commands, files, agents, templates, e2b_compat, daytona_compat, guest_connection, sandbox_envd, internal_routing, portal
+from handlers import sandboxes, commands, files, agents, templates, compat_dispatch, e2b_compat, daytona_compat, guest_connection, sandbox_envd, internal_routing, portal
+from handlers.daytona_ssh_gateway import start_daytona_ssh_gateway, stop_daytona_ssh_gateway
 
 # Configure logging
 logging.basicConfig(
@@ -83,6 +84,7 @@ app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
 # Include routers
+app.include_router(compat_dispatch.router)
 app.include_router(e2b_compat.router)
 app.include_router(daytona_compat.router)
 app.include_router(sandboxes.router)
@@ -173,7 +175,7 @@ async def startup_event():
     """Startup event."""
     ensure_bootstrap_client_and_key()
     logger.info("Starting Sandbox API Server (role=%s)", getattr(config, "API_SERVICE_ROLE", "control"))
-    logger.info(f"API Key: {config.API_KEY}")
+    logger.info("API key configured: %s", "yes" if getattr(config, "API_KEY", "") else "no")
     logger.info("Database: %s", getattr(config, "DATABASE_BACKEND", "unknown"))
     logger.info(f"Execution plane: {sandbox_manager.get_execution_kind()}")
     wp = getattr(sandbox_manager, "warm_pool", None)
@@ -188,12 +190,17 @@ async def startup_event():
         logger.info("Sandbox state reconcile: %s", reconcile)
     except Exception as ex:  # noqa: BLE001
         logger.warning("Sandbox state reconcile failed during startup: %s", ex)
+    await start_daytona_ssh_gateway(sandbox_manager)
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Shutdown event."""
     logger.info("Shutting down Sandbox API Server")
+    try:
+        await stop_daytona_ssh_gateway()
+    except Exception as ex:  # noqa: BLE001
+        logger.warning("Daytona SSH gateway stop: %s", ex)
 
     wp = getattr(sandbox_manager, "warm_pool", None)
     if wp is not None:
@@ -235,4 +242,6 @@ if __name__ == "__main__":
         port=config.PORT,
         reload=config.DEBUG,
         log_level=config.LOG_LEVEL.lower(),
+        access_log=False
+
     )

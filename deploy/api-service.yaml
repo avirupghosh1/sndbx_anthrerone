@@ -21,6 +21,9 @@ spec:
     - name: http
       port: 8000
       targetPort: 8000
+    - name: ssh
+      port: 2222
+      targetPort: 2222
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -45,6 +48,8 @@ spec:
           ports:
             - containerPort: 8000
               name: http
+            - containerPort: 2222
+              name: ssh
           envFrom:
             - configMapRef:
                 name: api-service-config
@@ -138,6 +143,13 @@ data:
   SANDBOX_DATA_PLANE_SCHEME: "https"
   SANDBOX_DATA_PLANE_DEBUG: "false"
   SANDBOX_DEFAULT_ALLOW_PUBLIC_TRAFFIC: "false"
+  DAYTONA_SSH_GATEWAY_ENABLED: "true"
+  DAYTONA_SSH_GATEWAY_HOST: "0.0.0.0"
+  DAYTONA_SSH_GATEWAY_PORT: "2222"
+  DAYTONA_SSH_GATEWAY_PUBLIC_HOST: "127.0.0.1"
+  DAYTONA_SSH_GATEWAY_PUBLIC_PORT: "2222"
+  DAYTONA_SSH_ACCESS_DEFAULT_TTL_MIN: "60"
+  DAYTONA_SSH_ACCESS_MAX_TTL_MIN: "1440"
   SANDBOX_LEASE_REAPER_INTERVAL_SEC: "5"
   SANDBOX_LOST_RETENTION_SEC: "86400"
   RUNTIME_EXITED_CONTAINER_RETENTION_SEC: "1800"

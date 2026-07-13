@@ -35,6 +35,10 @@ Expected image override keys from GitLab/Jenkins:
 - `templateRegistry.server`
 - `templateRegistry.existingSecretName`
 - `templateRegistry.internal.enabled`
+- `imageBuilding.authRequired`
+- `imageBuilding.existingSecretName`
+- `imageBuilding.s3.prefix`
+- `imageBuilding.s3.endpointUrl`
 - `images.templateRegistry`
 
 The chart deploys:
@@ -60,6 +64,14 @@ Required secret keys:
 - `DATABASE_USERNAME`
 - `DATABASE_PASSWORD`
 
+Required only when `imageBuilding.authRequired=true`:
+
+- `IMAGE_BUILDING_S3_BUCKET`
+- `IMAGE_BUILDING_S3_REGION`
+- `IMAGE_BUILDING_S3_ACCESS_KEY_ID`
+- `IMAGE_BUILDING_S3_SECRET_ACCESS_KEY`
+- `IMAGE_BUILDING_S3_SESSION_TOKEN` (optional)
+
 Important production notes:
 
 - `api-service` requires PostgreSQL or MongoDB via `DATABASE_TYPE=postgres|mongo`; there is no local database fallback.
@@ -67,6 +79,7 @@ Important production notes:
 - The Jenkins/image pipeline must publish four images for a full release: `api-service`, `runtime-gateway`, `dockerd-gvisor`, and `template-registry`.
 - The internal registry pod uses the CI-built `template-registry` image through `images.templateRegistry.*`. For manual deploys, it can pull `<images.templateRegistry.repo>/registry:3`, or you can set `templateRegistry.internal.image` as a full-image override.
 - Production template builds push to the chart-managed internal registry pod by default. No external template-registry credentials are required.
+- E2B/Daytona build-context uploads use API-local S3-compatible URLs. By default they are stored in the configured database; set `imageBuilding.authRequired=true` to store those upload objects in S3 instead.
 - With `templateRegistry.pushEnabled=true` and an empty `templateRegistry.repoPrefix`, `templateRegistry.internal.enabled=auto` creates an in-cluster registry Deployment and Service using `emptyDir` storage. Runtime-gateway pushes template images to `<release>-template-registry.<namespace>.svc.cluster.local:5000/templates`, and dockerd is configured with that internal registry as insecure HTTP.
 - The chart does not create PersistentVolumeClaims; restarting runtime-gateway or template-registry pods clears their local image data.
 - When `secrets.create=false`, the secret named by `secrets.name` must already exist in the target namespace before Helm deploy runs.
@@ -79,4 +92,5 @@ The chart intentionally fails fast when:
 - no database URL source is configured
 - `database.type` uses an unsupported value
 - `templateRegistry.pushEnabled=true` has no external repo prefix and internal registry is disabled
+- `imageBuilding.authRequired=true` is enabled without an existing Secret or Helm-created S3 secret values
 - ingress host lists are empty

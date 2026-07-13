@@ -72,6 +72,7 @@ images:
 service:
   apiService:
     port: 8000
+    sshPort: 2222
   runtimeGateway:
     httpPort: 8080
 
@@ -149,6 +150,13 @@ config:
     SANDBOX_DATA_PLANE_SCHEME: "https"
     SANDBOX_DATA_PLANE_DEBUG: "false"
     SANDBOX_DEFAULT_ALLOW_PUBLIC_TRAFFIC: "false"
+    DAYTONA_SSH_GATEWAY_ENABLED: "true"
+    DAYTONA_SSH_GATEWAY_HOST: "0.0.0.0"
+    DAYTONA_SSH_GATEWAY_PORT: "{{ .Values.service.apiService.sshPort }}"
+    DAYTONA_SSH_GATEWAY_PUBLIC_HOST: ""
+    DAYTONA_SSH_GATEWAY_PUBLIC_PORT: "{{ .Values.service.apiService.sshPort }}"
+    DAYTONA_SSH_ACCESS_DEFAULT_TTL_MIN: "60"
+    DAYTONA_SSH_ACCESS_MAX_TTL_MIN: "1440"
     SANDBOX_LEASE_REAPER_INTERVAL_SEC: "5"
     SANDBOX_LOST_RETENTION_SEC: "86400"
     RUNTIME_EXITED_CONTAINER_RETENTION_SEC: "1800"
@@ -181,6 +189,9 @@ config:
     RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO: "0.80"
     RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC: "2.0"
     WARM_POOL_IMAGE_PREFETCH_ENABLED: "true"
+    IMAGE_BUILDING_AUTH_REQUIRED: "{{ .Values.imageBuilding.authRequired }}"
+    IMAGE_BUILDING_S3_PREFIX: "{{ .Values.imageBuilding.s3.prefix }}"
+    IMAGE_BUILDING_S3_ENDPOINT_URL: "{{ .Values.imageBuilding.s3.endpointUrl }}"
   
   runtimeGateway:
     SANDBOX_DOMAIN: "sndbx.example.com"
@@ -240,6 +251,20 @@ templateRegistry:
         cpu: "1"
         memory: 512Mi
 
+imageBuilding:
+  # Optional S3-backed storage for SDK template build context uploads.
+  # false keeps the existing DB-backed storage path and requires no AWS secrets.
+  authRequired: false
+  existingSecretName: ""
+  bucketSecretKey: IMAGE_BUILDING_S3_BUCKET
+  regionSecretKey: IMAGE_BUILDING_S3_REGION
+  accessKeyIdSecretKey: IMAGE_BUILDING_S3_ACCESS_KEY_ID
+  secretAccessKeySecretKey: IMAGE_BUILDING_S3_SECRET_ACCESS_KEY
+  sessionTokenSecretKey: IMAGE_BUILDING_S3_SESSION_TOKEN
+  s3:
+    prefix: template-build-contexts
+    endpointUrl: ""
+
 secrets:
   create: false
   name: ""
@@ -253,6 +278,11 @@ secrets:
     databasePassword: ""
     registryUsername: ""
     registryPassword: ""
+    imageBuildingS3Bucket: ""
+    imageBuildingS3Region: ""
+    imageBuildingS3AccessKeyId: ""
+    imageBuildingS3SecretAccessKey: ""
+    imageBuildingS3SessionToken: ""
 
 ingress:
   enabled: true
@@ -261,17 +291,19 @@ ingress:
     kubernetes.io/tls-acme: "true"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
-    nginx.ingress.kubernetes.io/proxy-body-size: 100m
+    nginx.ingress.kubernetes.io/proxy-body-size: "1g"
   apiHosts:
     - api.sndbx.example.com
   sandboxHosts:
     - "*.sndbx.example.com"
   tls:
-    enabled: true
-    secretName: sndbx-example-com-tls
-    hosts:
-      - api.sndbx.example.com
-      - "*.sndbx.example.com"
+    # Production follows the Prism chart flow: rely on ingress class / ACME
+    # automation from kubernetes.io/tls-acme instead of rendering an explicit
+    # TLS secret. Set enabled=true only for local/manual deployments that
+    # pre-create a Secret.
+    enabled: false
+    secretName: ""
+    hosts: []
 
 podDisruptionBudget:
   enabled: true
