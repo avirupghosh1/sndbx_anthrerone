@@ -1,5 +1,5 @@
 apiVersion: v2
-name: sndbx
+name: agent-sandbox
 description: Control-plane and runtime-gateway deployment for the sandbox platform
 version: 0.1.0
 appVersion: "1.0"
