@@ -1,0 +1,27 @@
+obstore.exceptions.GenericError: Generic S3 error: Error performing HEAD http://api.sndbx.example.com/daytona-volume-builds/cl-763f2834d1e2c696/7621e8c242925657a7dcad68e98f0ee8/context.tar in 9.976789ms - HTTP error: builder error
+
+Debug source:
+Generic {
+    store: "S3",
+    source: RetryError(
+        RetryErrorImpl {
+            method: HEAD,
+            uri: Some(
+                http://api.sndbx.example.com/daytona-volume-builds/cl-763f2834d1e2c696/7621e8c242925657a7dcad68e98f0ee8/context.tar,
+            ),
+            retries: 0,
+            max_retries: 10,
+            elapsed: 9.976789ms,
+            retry_timeout: 180s,
+            inner: Http(
+                HttpError {
+                    kind: Unknown,
+                    source: reqwest::Error {
+                        kind: Builder,
+                        source: BadScheme,
+                    },
+                },
+            ),
+        },
+    ),
+}

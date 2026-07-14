@@ -1,3 +1,0 @@
-daytona.common.errors.DaytonaError: Failed to create snapshot: Generic S3 error: Error performing HEAD https://api.sndbx.example.com/daytona-volume-builds/cl-763f2834d1e2c696/7621e8c242925657a7dcad68e98f0ee8/context.tar in 57.452863499s, after 10 retries, max_retries: 10, retry_timeout: 180s  - HTTP error: error sending request
-
-when going to the url it says detail	"Method Not Allowed"
