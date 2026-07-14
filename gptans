@@ -192,3 +192,22 @@
   ./e2b_control_plane_smoke.py
 
   Right now the issue is not E2B, API, or image rebuild. It is definitely the TLS secret content being self-signed instead of mkcert-signed.
+  SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem" \
+  AWS_CA_BUNDLE="$(mkcert -CAROOT)/rootCA.pem" \
+  NO_PROXY="api.sndbx.example.com,.sndbx.example.com,localhost,127.0.0.1" \
+  API_URL=https://api.sndbx.example.com \
+  API_KEY=... \
+  ./daytona_control_plane_smoke.py
+
+
+  kubectl apply -f deploy/api-service.yaml
+  kubectl -n sandboxes rollout restart deploy/api-service
+
+  Then verify:
+
+  curl -sS -H "Authorization: Bearer $API_KEY" \
+    https://api.sndbx.example.com/object-storage/push-access
+
+  Expected response should include:
+
+  "storageUrl":"http://api.sndbx.example.com"

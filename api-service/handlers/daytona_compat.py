@@ -1699,11 +1699,12 @@ async def object_storage_push_access(
 ) -> dict[str, str]:
     _ = x_daytona_organization_id
     organization_id = str(principal.client_id)
+    storage_url = str(getattr(get_config(), "DAYTONA_OBJECT_STORAGE_URL", "") or "").strip().rstrip("/")
     return {
         "accessKey": "sndbx",
         "secret": "sndbx",
         "sessionToken": _storage_token(organization_id),
-        "storageUrl": _api_base_url(request),
+        "storageUrl": storage_url or _api_base_url(request),
         "organizationId": organization_id,
         "bucket": DAYTONA_CONTEXT_BUCKET,
     }

@@ -347,6 +347,7 @@ class Config:
         else None
     )
     SANDBOX_DATA_PLANE_SCHEME: str = (os.getenv("SANDBOX_DATA_PLANE_SCHEME") or "http").strip().rstrip(":/")
+    DAYTONA_OBJECT_STORAGE_URL: str = (os.getenv("DAYTONA_OBJECT_STORAGE_URL") or "").strip().rstrip("/")
 
     # --- Daytona SSH compatibility gateway ---
     # TCP SSH server in api-service. It authenticates Daytona SSH access tokens
