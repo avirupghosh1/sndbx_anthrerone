@@ -224,6 +224,8 @@ def _registry_auth_config() -> Optional[dict]:
     from config import get_config
 
     cfg = get_config()
+    if not bool(getattr(cfg, "TEMPLATE_REGISTRY_AUTH_REQUIRED", False)):
+        return None
     server = (getattr(cfg, "TEMPLATE_REGISTRY_SERVER", "") or "").strip().rstrip("/")
     if not server:
         server = _registry_server_from_repo_prefix(
@@ -265,6 +267,22 @@ def _registry_server_from_repo_prefix(repo_prefix: str) -> str:
     if "." in first or ":" in first or first == "localhost":
         return first.rstrip("/")
     return ""
+
+
+def _template_registry_ref_enabled(image_ref: str) -> bool:
+    from config import get_config
+
+    ref = (image_ref or "").strip()
+    if not ref:
+        return False
+    cfg = get_config()
+    repo_prefix = str(getattr(cfg, "TEMPLATE_REGISTRY_REPO_PREFIX", "") or "").strip().rstrip("/")
+    if repo_prefix:
+        return ref == repo_prefix or ref.startswith(f"{repo_prefix}/") or ref.startswith(f"{repo_prefix}:")
+    server = str(getattr(cfg, "TEMPLATE_REGISTRY_SERVER", "") or "").strip().rstrip("/")
+    if not server:
+        return False
+    return _registry_server_from_image_ref(ref).lower() == server.lower()
 
 
 def _registry_cache_ref_for_image_ref(image_ref: str) -> str:
@@ -399,10 +417,13 @@ def push_image_to_registry(
     from config import get_config
 
     cfg = get_config()
+    prefix = (repo_prefix or "").strip().rstrip("/")
+    if not prefix:
+        raise RuntimeError("TEMPLATE_REGISTRY_REPO_PREFIX is required when template registry push is enabled")
     target_ref = _published_template_ref(
         local_ref=local_ref,
         template_id=template_id,
-        repo_prefix=repo_prefix,
+        repo_prefix=prefix,
         layout=str(getattr(cfg, "TEMPLATE_REGISTRY_LAYOUT", "auto") or "auto"),
     )
     ensure_registry_login(timeout=timeout)
@@ -429,6 +450,9 @@ def push_image_to_registry(
 def registry_image_exists(*, image_ref: str, timeout: int = 60) -> bool:
     ref = (image_ref or "").strip()
     if not ref:
+        return False
+    if not _template_registry_ref_enabled(ref):
+        logger.info("Registry image check skipped for non-template-registry ref image=%s", ref)
         return False
     client = _docker_client(timeout)
     try:

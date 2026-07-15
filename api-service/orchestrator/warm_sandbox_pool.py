@@ -262,6 +262,7 @@ class WarmSandboxPool:
             th.join(timeout=2.0)
 
     def _provision_one(self, gateway_instance_id: str, reserved_bytes: int) -> tuple[Optional[str], str, int]:
+        row: Optional[Dict[str, Any]] = None
         try:
             row = self._manager.db.get_sandbox_template(self._logical_template_id)
             if row:
@@ -275,6 +276,12 @@ class WarmSandboxPool:
                 self._logical_template_id,
                 exc_info=True,
             )
+        if row and (row.get("source_kind") or "").strip().lower() == "dockerfile" and not self._from_snapshot:
+            self._manager._last_create_error = str(
+                row.get("build_error")
+                or f"Template {self._logical_template_id} has stored Dockerfile source but could not be rebuilt"
+            )
+            return None, gateway_instance_id, reserved_bytes
         sid = self._manager._create_sandbox_fresh(
             template_id=self._logical_template_id,
             metadata={

@@ -81,6 +81,17 @@ def _looks_like_explicit_image_ref(template_id: Optional[str]) -> bool:
     return "/" in resolved or ":" in last
 
 
+def _sanitize_template_image_part(template_id: str) -> str:
+    return (re.sub(r"[^a-z0-9._-]+", "-", (template_id or "").strip().lower()).strip("-") or "tpl")[:48]
+
+
+def _looks_like_generated_template_ref(image_ref: str) -> bool:
+    ref = (image_ref or "").strip()
+    repo = ref.rsplit(":", 1)[0] if ":" in ref.rsplit("/", 1)[-1] else ref
+    name = repo.rsplit("/", 1)[-1]
+    return name.startswith(("mysandbox-df-", "mysandbox-snap", "tpl-"))
+
+
 def _gateway_ordinal(instance_id: str) -> int:
     match = re.search(r"-(\d+)$", instance_id or "")
     return int(match.group(1)) if match else 0
@@ -1446,7 +1457,11 @@ class SandboxManager:
             )
             return None
         build_mode = (row.get("source_build_mode") or "docker_cli").strip() or "docker_cli"
-        image_tag = warm_ref or base_image or None
+        image_tag = warm_ref or None
+        if not image_tag and base_image and _looks_like_generated_template_ref(base_image):
+            image_tag = base_image
+        if not image_tag:
+            image_tag = f"mysandbox-df-{_sanitize_template_image_part(template_id)}:{uuid.uuid4().hex[:12]}"
         target = self._gateway_target_for_template_row(row)
         try:
             result = build_dockerfile_template_via_gateway(
@@ -1487,6 +1502,7 @@ class SandboxManager:
         registry_ref = (row.get("registry_image_ref") or "").strip()
         owner_instance = (row.get("materialized_gateway_instance_id") or "").strip()
         base_image = (row.get("base_image") or "").strip()
+        source_kind = (row.get("source_kind") or "").strip().lower()
 
         owner_target = target_for_instance(self._gateway_targets(), owner_instance)
         local_target = (
@@ -1541,6 +1557,7 @@ class SandboxManager:
             )
             return self.db.get_sandbox_template(template_id) or row
 
+        repair_attempted = False
         missing_ref = warm_ref or registry_ref
         if missing_ref:
             logger.warning(
@@ -1557,6 +1574,19 @@ class SandboxManager:
                 build_error=f"template image unavailable: {missing_ref}; rebuild required",
             )
             row = self.db.get_sandbox_template(template_id) or row
+            repair_attempted = True
+            rebuilt = self._repair_missing_template_image(template_id, row)
+            if rebuilt:
+                return self.db.get_sandbox_template(template_id) or row
+        if (
+            not repair_attempted
+            and source_kind == "dockerfile"
+            and str(row.get("dockerfile_text") or "").strip()
+        ):
+            logger.warning(
+                "Template %s has no live image refs but has stored Dockerfile source; attempting rebuild",
+                template_id,
+            )
             rebuilt = self._repair_missing_template_image(template_id, row)
             if rebuilt:
                 return self.db.get_sandbox_template(template_id) or row
@@ -2769,6 +2799,12 @@ class SandboxManager:
                 return None
             tpl = self._ensure_template_runtime_image(tid, tpl)
             if not (tpl.get("warm_snapshot_image") or tpl.get("registry_image_ref")):
+                if (tpl.get("source_kind") or "").strip().lower() == "dockerfile":
+                    self._last_create_error = str(
+                        tpl.get("build_error")
+                        or f"Template {tid} has stored Dockerfile source but could not be rebuilt"
+                    )
+                    return None
                 if not self._build_registered_template_snapshot(tid):
                     self._last_create_error = str(
                         (self.db.get_sandbox_template(tid) or {}).get("build_error")

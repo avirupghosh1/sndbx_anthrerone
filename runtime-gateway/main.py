@@ -87,9 +87,7 @@ def _registry_login_loop() -> None:
     if not bool(getattr(cfg, "TEMPLATE_REGISTRY_PUSH_ENABLED", False)):
         _set_registry_status(ready=True)
         return
-    if not _registry_login_required() and not (
-        getattr(cfg, "TEMPLATE_REGISTRY_USERNAME", "") and getattr(cfg, "TEMPLATE_REGISTRY_PASSWORD", "")
-    ):
+    if not _registry_login_required():
         _set_registry_status(ready=True)
         return
     from template_builder import ensure_registry_login
