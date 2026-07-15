@@ -151,6 +151,7 @@ async def create_sandbox_row(
         from_snapshot_image,
         principal.client_id,
         principal.key_id,
+        request.warmpool_size,
     )
 
     if not sandbox_id:

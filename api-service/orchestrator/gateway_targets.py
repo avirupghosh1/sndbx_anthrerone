@@ -34,6 +34,36 @@ def _trim_url(value: str) -> str:
 
 
 def build_gateway_targets(config: Any) -> List[GatewayTarget]:
+    discovery_mode = str(getattr(config, "RUNTIME_GATEWAY_TARGET_DISCOVERY_MODE", "static") or "static").strip().lower()
+    if discovery_mode in ("kubernetes", "k8s"):
+        try:
+            from .k8s_runtime_gateways import list_runtime_gateway_pods
+
+            namespace = (
+                getattr(config, "RUNTIME_GATEWAY_NAMESPACE", None)
+                or "sandboxes"
+            ).strip()
+            sts = (getattr(config, "RUNTIME_GATEWAY_STATEFULSET_NAME", None) or "runtime-gateway").strip()
+            headless = (getattr(config, "RUNTIME_GATEWAY_HEADLESS_SERVICE", None) or f"{sts}-headless").strip()
+            http_port = int(getattr(config, "RUNTIME_GATEWAY_SERVICE_PORT", 8080) or 8080)
+            discovered: List[GatewayTarget] = []
+            for pod in sorted(list_runtime_gateway_pods(config), key=lambda item: (item.ordinal, item.name)):
+                if not pod.ready or pod.deletion_timestamp:
+                    continue
+                host = f"{pod.name}.{headless}.{namespace}.svc.cluster.local"
+                api_base = f"http://{host}:{http_port}"
+                discovered.append(
+                    GatewayTarget(
+                        instance_id=pod.name,
+                        api_base=api_base,
+                        route_base=api_base,
+                    )
+                )
+            if discovered:
+                return discovered
+        except Exception:
+            pass
+
     explicit = list(getattr(config, "runtime_gateway_targets_json", lambda: [])() or [])
     out: List[GatewayTarget] = []
     for idx, item in enumerate(explicit):

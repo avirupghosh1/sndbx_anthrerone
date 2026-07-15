@@ -1,7 +1,7 @@
 """Pre-provisioned sandboxes to hide cold-start latency.
 
 When ``SANDBOX_WARM_POOL_SIZE > 0``, one or more **pool segments** run in the background.
-Each segment is keyed by ``(logical template_id, cpu, memory, timeout)``
+Each segment is keyed by ``(logical template_id, cpu, memory)``
 and may provision from a **warm snapshot image** (Docker custom templates) or from
 the base image (default ``SANDBOX_WARM_POOL_TEMPLATE_ID`` profile).
 
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PoolKey = Tuple[str, str, str, int]
+PoolKey = Tuple[str, str, str]
 
 
 def _compatible_pool_shape(
@@ -45,13 +45,12 @@ def warm_pool_key_string(
             template_id.strip(),
             str(cpu_limit),
             str(memory_limit),
-            str(int(timeout)),
         ]
     )
 
 
 class WarmSandboxPool:
-    """Maintains ``pool_size`` idle sandboxes for one (template_id, cpu, mem, timeout) profile."""
+    """Maintains ``pool_size`` idle sandboxes for one (template_id, cpu, mem) profile."""
 
     def __init__(
         self,
@@ -90,8 +89,12 @@ class WarmSandboxPool:
         return self._from_snapshot
 
     @property
+    def target_size(self) -> int:
+        return self._size
+
+    @property
     def pool_key(self) -> PoolKey:
-        return (self._logical_template_id, self._cpu, self._mem, self._timeout)
+        return (self._logical_template_id, self._cpu, self._mem)
 
     @property
     def pool_key_string(self) -> str:
@@ -133,6 +136,10 @@ class WarmSandboxPool:
 
     def discard(self, sandbox_id: str) -> None:
         return None
+
+    def resize(self, pool_size: int) -> None:
+        self._size = max(0, int(pool_size))
+        self._wake.set()
 
     def stats(self) -> dict[str, Any]:
         return {
@@ -461,7 +468,7 @@ class WarmSandboxPool:
 
 
 class MultiWarmSandboxPool:
-    """One ``WarmSandboxPool`` segment per distinct (template_id, cpu, mem, timeout) profile."""
+    """One ``WarmSandboxPool`` segment per distinct (template_id, cpu, mem) profile."""
 
     def __init__(self, manager: "SandboxManager", config: "Config"):
         self._manager = manager
@@ -474,27 +481,26 @@ class MultiWarmSandboxPool:
         self._sync_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        if self._size <= 0:
-            return
         self._sync_stop.clear()
-        tid = (self._cfg.SANDBOX_WARM_POOL_TEMPLATE_ID or self._cfg.DEFAULT_TEMPLATE).strip()
-        snap: Optional[str] = None
-        try:
-            row = self._manager.db.get_sandbox_template(tid)
-            if row:
-                row = self._manager._ensure_template_runtime_image(tid, row)
-                wi = (row.get("warm_snapshot_image") or "").strip()
-                if wi:
-                    snap = wi
-        except Exception:
-            logger.debug("warm pool: could not read warm_snapshot for %r", tid, exc_info=True)
-        self.ensure_pool_for(
-            tid,
-            self._cfg.SANDBOX_WARM_POOL_CPU or self._cfg.DEFAULT_CPU_LIMIT,
-            self._cfg.SANDBOX_WARM_POOL_MEMORY or self._cfg.DEFAULT_MEMORY_LIMIT,
-            int(self._cfg.SANDBOX_WARM_POOL_TIMEOUT or self._cfg.DEFAULT_TIMEOUT),
-            snap,
-        )
+        if self._size > 0:
+            tid = (self._cfg.SANDBOX_WARM_POOL_TEMPLATE_ID or self._cfg.DEFAULT_TEMPLATE).strip()
+            snap: Optional[str] = None
+            try:
+                row = self._manager.db.get_sandbox_template(tid)
+                if row:
+                    row = self._manager._ensure_template_runtime_image(tid, row)
+                    wi = (row.get("warm_snapshot_image") or "").strip()
+                    if wi:
+                        snap = wi
+            except Exception:
+                logger.debug("warm pool: could not read warm_snapshot for %r", tid, exc_info=True)
+            self.ensure_pool_for(
+                tid,
+                self._cfg.SANDBOX_WARM_POOL_CPU or self._cfg.DEFAULT_CPU_LIMIT,
+                self._cfg.SANDBOX_WARM_POOL_MEMORY or self._cfg.DEFAULT_MEMORY_LIMIT,
+                int(self._cfg.SANDBOX_WARM_POOL_TIMEOUT or self._cfg.DEFAULT_TIMEOUT),
+                snap,
+            )
         self._sync_persisted_segments()
         self._sync_thread = threading.Thread(
             target=self._sync_loop,
@@ -510,62 +516,89 @@ class MultiWarmSandboxPool:
         memory_limit: str,
         timeout: int,
         from_snapshot_image: Optional[str],
+        desired_size: Optional[int] = None,
     ) -> None:
-        if self._size <= 0:
-            return
-        wanted_shape = _compatible_pool_shape(logical_template_id, cpu_limit, memory_limit)
+        effective_size = self._size if desired_size is None else max(0, int(desired_size))
         key: PoolKey = (
             logical_template_id.strip(),
             str(cpu_limit),
             str(memory_limit),
-            int(timeout),
         )
+        key_string = warm_pool_key_string(key[0], key[1], key[2], int(timeout))
         snap = (from_snapshot_image or "").strip() or None
 
         # Serialize per pool key so two callers do not each ``start()`` a segment for the same key.
         with self._ensure_key_lock(key):
             old: Optional[WarmSandboxPool] = None
+            old_snap: Optional[str] = None
             with self._pools_lock:
                 cur = self._pools.get(key)
                 if cur is not None and cur.from_snapshot_image == snap:
-                    return
-                for existing_key, existing_pool in self._pools.items():
-                    if _compatible_pool_shape(*existing_key[:3]) != wanted_shape:
-                        continue
-                    if existing_pool.from_snapshot_image == snap:
+                    if effective_size <= 0:
+                        del self._pools[key]
+                        old = cur
+                        old_snap = cur.from_snapshot_image
+                    else:
+                        self._manager.note_warm_pool_segment(
+                            template_id=key[0],
+                            cpu_limit=key[1],
+                            memory_limit=key[2],
+                            timeout=int(timeout),
+                            desired_size=effective_size,
+                            ready_image_ref=snap,
+                        )
+                        cur.resize(effective_size)
+                        self._manager.trim_warm_pool_to_size(cur.pool_key_string, effective_size)
                         return
-                if cur is not None:
+                elif cur is not None:
                     del self._pools[key]
                     old = cur
+                    old_snap = cur.from_snapshot_image
+                elif effective_size <= 0:
+                    self._manager.note_warm_pool_segment(
+                        template_id=key[0],
+                        cpu_limit=key[1],
+                        memory_limit=key[2],
+                        timeout=int(timeout),
+                        desired_size=0,
+                        ready_image_ref=snap,
+                    )
+                    self._manager.trim_warm_pool_to_size(key_string, 0)
+                    return
 
             if old is not None:
                 old.stop(timeout=20.0)
                 removed = self._manager.trim_warm_pool_to_size(old.pool_key_string, 0)
                 if removed:
                     logger.info(
-                        "Warm pool segment image changed: drained %s stale warm sandbox(es) key=%s old_snap=%r new_snap=%r",
+                        "Warm pool segment drained: removed %s sandbox(es) key=%s old_snap=%r new_snap=%r desired=%s",
                         removed,
                         old.pool_key_string,
-                        old.from_snapshot_image,
+                        old_snap,
                         snap,
+                        effective_size,
                     )
 
             self._manager.note_warm_pool_segment(
                 template_id=key[0],
                 cpu_limit=key[1],
                 memory_limit=key[2],
-                timeout=key[3],
-                desired_size=self._size,
+                timeout=int(timeout),
+                desired_size=effective_size,
                 ready_image_ref=snap,
             )
+
+            if effective_size <= 0:
+                self._manager.trim_warm_pool_to_size(key_string, 0)
+                return
 
             pool = WarmSandboxPool(
                 self._manager,
                 logical_template_id=key[0],
                 cpu_limit=key[1],
                 memory_limit=key[2],
-                timeout=key[3],
-                pool_size=self._size,
+                timeout=int(timeout),
+                pool_size=effective_size,
                 from_snapshot_image=snap,
                 provision_concurrency=int(getattr(self._cfg, "SANDBOX_WARM_POOL_PROVISION_CONCURRENCY", 1) or 1),
             )
@@ -587,7 +620,6 @@ class MultiWarmSandboxPool:
             template_id.strip(),
             str(cpu_limit),
             str(memory_limit),
-            int(timeout),
         )
         with self._pools_lock:
             pool = self._pools.get(key)
@@ -658,32 +690,47 @@ class MultiWarmSandboxPool:
                 logger.debug("warm pool: persisted segment sync failed", exc_info=True)
 
     def _sync_persisted_segments(self) -> None:
-        tid = (self._cfg.SANDBOX_WARM_POOL_TEMPLATE_ID or self._cfg.DEFAULT_TEMPLATE).strip()
-        default_key = warm_pool_key_string(
-            tid,
-            self._cfg.SANDBOX_WARM_POOL_CPU or self._cfg.DEFAULT_CPU_LIMIT,
-            self._cfg.SANDBOX_WARM_POOL_MEMORY or self._cfg.DEFAULT_MEMORY_LIMIT,
-            int(self._cfg.SANDBOX_WARM_POOL_TIMEOUT or self._cfg.DEFAULT_TIMEOUT),
-        )
         try:
             persisted = self._manager.db.list_warm_pool_segments()
         except Exception:
             logger.debug("warm pool: could not list persisted segments", exc_info=True)
             return
+
+        selected: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+        selected_rank: Dict[tuple[str, str, str], tuple[int, str, int]] = {}
         for segment in persisted:
-            if str(segment.get("warm_pool_key") or "") == default_key:
-                continue
             if int(segment.get("desired_size") or 0) <= 0:
                 continue
             seg_tid = str(segment.get("template_id") or "").strip()
             if not seg_tid:
                 continue
-            self.ensure_pool_for(
+            seg_cpu = str(segment.get("cpu_limit") or self._cfg.DEFAULT_CPU_LIMIT)
+            seg_mem = str(segment.get("memory_limit") or self._cfg.DEFAULT_MEMORY_LIMIT)
+            shape = _compatible_pool_shape(seg_tid, seg_cpu, seg_mem)
+
+            canonical_key = warm_pool_key_string(
                 seg_tid,
+                seg_cpu,
+                seg_mem,
+                int(segment.get("timeout") or self._cfg.DEFAULT_TIMEOUT),
+            )
+            rank = (
+                1 if str(segment.get("warm_pool_key") or "").strip() == canonical_key else 0,
+                str(segment.get("updated_at") or ""),
+                1 if str(segment.get("ready_image_ref") or "").strip() else 0,
+            )
+            if shape not in selected_rank or rank > selected_rank[shape]:
+                selected[shape] = segment
+                selected_rank[shape] = rank
+
+        for segment in selected.values():
+            self.ensure_pool_for(
+                str(segment.get("template_id") or "").strip(),
                 str(segment.get("cpu_limit") or self._cfg.DEFAULT_CPU_LIMIT),
                 str(segment.get("memory_limit") or self._cfg.DEFAULT_MEMORY_LIMIT),
                 int(segment.get("timeout") or self._cfg.DEFAULT_TIMEOUT),
                 (str(segment.get("ready_image_ref") or "").strip() or None),
+                desired_size=int(segment.get("desired_size") or 0),
             )
 
     def _ensure_key_lock(self, key: PoolKey) -> threading.Lock:

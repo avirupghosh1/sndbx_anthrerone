@@ -25,8 +25,9 @@ from middleware import (
     APIException,
     ensure_bootstrap_client_and_key,
 )
-from handlers import sandboxes, commands, files, agents, templates, compat_dispatch, e2b_compat, daytona_compat, guest_connection, sandbox_envd, internal_routing, portal
+from handlers import sandboxes, commands, files, agents, templates, compat_dispatch, e2b_compat, daytona_compat, sandbox_extensions, guest_connection, sandbox_envd, internal_routing, portal
 from handlers.daytona_ssh_gateway import start_daytona_ssh_gateway, stop_daytona_ssh_gateway
+from handlers.modal_compat_gateway import start_modal_compat_gateway, stop_modal_compat_gateway
 
 # Configure logging
 logging.basicConfig(
@@ -90,6 +91,7 @@ app.include_router(daytona_compat.router)
 app.include_router(sandboxes.router)
 app.include_router(commands.router)
 app.include_router(files.router)
+app.include_router(sandbox_extensions.router)
 app.include_router(agents.router)
 app.include_router(templates.router)
 app.include_router(guest_connection.router)
@@ -191,6 +193,7 @@ async def startup_event():
     except Exception as ex:  # noqa: BLE001
         logger.warning("Sandbox state reconcile failed during startup: %s", ex)
     await start_daytona_ssh_gateway(sandbox_manager)
+    await start_modal_compat_gateway(sandbox_manager)
 
 
 @app.on_event("shutdown")
@@ -201,6 +204,10 @@ async def shutdown_event():
         await stop_daytona_ssh_gateway()
     except Exception as ex:  # noqa: BLE001
         logger.warning("Daytona SSH gateway stop: %s", ex)
+    try:
+        await stop_modal_compat_gateway()
+    except Exception as ex:  # noqa: BLE001
+        logger.warning("Modal compatibility gateway stop: %s", ex)
 
     wp = getattr(sandbox_manager, "warm_pool", None)
     if wp is not None:

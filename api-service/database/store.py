@@ -2112,6 +2112,40 @@ class _PostgresDatabase:
             conn.close()
         return result
 
+    def merge_template_env(self, template_id: str, env_updates: Dict[str, Any]) -> bool:
+        tid = (template_id or "").strip()
+        updates = {str(k): v for k, v in dict(env_updates or {}).items() if str(k)}
+        if not tid or not updates:
+            return False
+        now = _utc_now_iso()
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute("SELECT env_json FROM sandbox_templates WHERE template_id = ?", (tid,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return False
+            try:
+                current = json.loads(row[0] or "{}")
+            except Exception:
+                current = {}
+            if not isinstance(current, dict):
+                current = {}
+            current.update(updates)
+            cursor.execute(
+                """
+                UPDATE sandbox_templates
+                SET env_json = ?, updated_at = ?
+                WHERE template_id = ?
+                """,
+                (json.dumps(current), now, tid),
+            )
+            n = cursor.rowcount
+            conn.commit()
+            conn.close()
+        return n > 0
+
     def get_sandbox_template_by_alias(
         self,
         client_id: str,
@@ -3878,6 +3912,16 @@ class _MongoDatabase:
     def get_sandbox_template(self, template_id: str) -> Optional[Dict[str, Any]]:
         doc = self.db.sandbox_templates.find_one({"_id": template_id})
         return self._template_dict_from_doc(doc) if doc else None
+
+    def merge_template_env(self, template_id: str, env_updates: Dict[str, Any]) -> bool:
+        tid = (template_id or "").strip()
+        updates = {str(k): v for k, v in dict(env_updates or {}).items() if str(k)}
+        if not tid or not updates:
+            return False
+        set_values = {f"env.{key}": value for key, value in updates.items()}
+        set_values["updated_at"] = _utc_now_iso()
+        res = self.db.sandbox_templates.update_one({"_id": tid}, {"$set": set_values})
+        return int(getattr(res, "matched_count", 0) or 0) > 0
 
     def get_sandbox_template_by_alias(
         self,

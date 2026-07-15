@@ -43,6 +43,16 @@ class CreateSandboxRequest(BaseModel):
     cpu_limit: Optional[str] = Field(default="1", description="CPU limit (e.g., '1', '0.5')")
     memory_limit: Optional[str] = Field(default="512m", description="Memory limit (e.g., '512m', '1g')")
     timeout: Optional[int] = Field(default=3600, description="Sandbox timeout in seconds")
+    warmpool_size: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices("warmpool_size", "warmPoolSize", "warm_pool_size", "warmPool"),
+        ge=0,
+        le=1000,
+        description=(
+            "Optional desired warm-pool size for this template/cpu/memory key. "
+            "When omitted, the server default warm-pool size is used."
+        ),
+    )
     from_snapshot_image: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("from_snapshot_image", "fromSnapshotImage"),
@@ -58,7 +68,8 @@ class CreateSandboxRequest(BaseModel):
                 "metadata": {"purpose": "testing"},
                 "cpu_limit": "2",
                 "memory_limit": "1g",
-                "timeout": 7200
+                "timeout": 7200,
+                "warmpool_size": 2
             }
         })
 

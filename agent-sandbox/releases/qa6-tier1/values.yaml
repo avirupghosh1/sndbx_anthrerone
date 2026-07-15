@@ -49,6 +49,17 @@ apiService:
       memory: 4Gi
 
 runtimeGateway:
+  autoscaling:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 75
+    packingTarget: 4
+    scaleDownStabilizationWindowSeconds: 900
+    scaleDownPeriodSeconds: 300
+    scaleUpStabilizationWindowSeconds: 0
+    scaleUpPeriodSeconds: 60
   resources:
     requests:
       cpu: "500m"

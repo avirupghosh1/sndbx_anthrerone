@@ -53,6 +53,9 @@ spec:
             - name: ssh
               containerPort: {{ .Values.service.apiService.sshPort }}
               protocol: TCP
+            - name: modal-grpc
+              containerPort: {{ .Values.service.apiService.modalGrpcPort }}
+              protocol: TCP
           envFrom:
             - configMapRef:
                 name: {{ include "sndbx.apiServiceName" . }}-config

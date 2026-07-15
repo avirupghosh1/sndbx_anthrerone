@@ -57,7 +57,7 @@ spec:
               memory: "128Mi"
             limits:
               cpu: "1"
-              memory: "512Mi"
+              memory: "2Gi"
       volumes:
         - name: registry-data
           emptyDir: {}
@@ -96,7 +96,7 @@ metadata:
   namespace: sandboxes
 spec:
   serviceName: runtime-gateway-headless
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: runtime-gateway
@@ -199,10 +199,10 @@ spec:
           resources:
             requests:
               cpu: "100m"
-              memory: "192Mi"
+              memory: "256Mi"
             limits:
               cpu: "1"
-              memory: "512Mi"
+              memory: "2Gi"
       volumes:
         - name: docker-graph
           emptyDir: {}
@@ -233,6 +233,45 @@ data:
   TEMPLATE_REGISTRY_SERVER: "registry.sandboxes.svc.cluster.local:5000"
   TEMPLATE_REGISTRY_AUTH_REQUIRED: "false"
   TEMPLATE_REGISTRY_LAYOUT: "auto"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: runtime-gateway
+  namespace: sandboxes
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: runtime-gateway
+  minReplicas: 1
+  maxReplicas: 4
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 900
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 300
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress

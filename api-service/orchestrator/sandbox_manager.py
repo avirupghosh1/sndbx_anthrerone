@@ -81,6 +81,15 @@ def _looks_like_explicit_image_ref(template_id: Optional[str]) -> bool:
     return "/" in resolved or ":" in last
 
 
+def _gateway_ordinal(instance_id: str) -> int:
+    match = re.search(r"-(\d+)$", instance_id or "")
+    return int(match.group(1)) if match else 0
+
+
+def _clamp_pod_deletion_cost(value: int) -> int:
+    return max(-(2**31), min((2**31) - 1, int(value)))
+
+
 class SandboxManager:
     """Manages sandbox lifecycle."""
 
@@ -120,22 +129,119 @@ class SandboxManager:
         self._recent_created_rows_lock = threading.Lock()
         self._lease_reaper_stop = threading.Event()
         self._lease_reaper_thread: Optional[threading.Thread] = None
+        self._gateway_deletion_cost_stop = threading.Event()
+        self._gateway_deletion_cost_thread: Optional[threading.Thread] = None
         self._last_create_error: str = ""
         self.warm_pool: Optional[Any] = None
         try:
             cfg = self._config
-            kind = self.execution.get_backend_kind()
-            if cfg.SANDBOX_WARM_POOL_SIZE > 0:
-                from .warm_sandbox_pool import MultiWarmSandboxPool
+            from .warm_sandbox_pool import MultiWarmSandboxPool
 
-                self.warm_pool = MultiWarmSandboxPool(self, cfg)
-                self.warm_pool.start()
+            self.warm_pool = MultiWarmSandboxPool(self, cfg)
+            self.warm_pool.start()
         except Exception as ex:  # noqa: BLE001
             logger.warning("Warm sandbox pool not started: %s", ex)
         try:
             self._start_lease_reaper()
         except Exception as ex:  # noqa: BLE001
             logger.warning("Sandbox lease reaper not started: %s", ex)
+        try:
+            self._start_runtime_gateway_deletion_cost_loop()
+        except Exception as ex:  # noqa: BLE001
+            logger.warning("Runtime gateway deletion-cost updater not started: %s", ex)
+
+    def _statefulset_scale_down_aware(self) -> bool:
+        return bool(getattr(self._config, "RUNTIME_GATEWAY_STATEFULSET_SCALE_DOWN_AWARE", False))
+
+    def _statefulset_packing_target(self) -> int:
+        return max(1, int(getattr(self._config, "RUNTIME_GATEWAY_STATEFULSET_PACKING_TARGET", 4) or 4))
+
+    def _start_runtime_gateway_deletion_cost_loop(self) -> None:
+        if not bool(getattr(self._config, "RUNTIME_GATEWAY_POD_DELETION_COST_ENABLED", False)):
+            return
+        if self._gateway_deletion_cost_thread and self._gateway_deletion_cost_thread.is_alive():
+            return
+        self._gateway_deletion_cost_thread = threading.Thread(
+            target=self._runtime_gateway_deletion_cost_loop,
+            name="runtime-gateway-deletion-cost",
+            daemon=True,
+        )
+        self._gateway_deletion_cost_thread.start()
+
+    def _runtime_gateway_deletion_cost_loop(self) -> None:
+        interval = max(
+            2.0,
+            float(getattr(self._config, "RUNTIME_GATEWAY_POD_DELETION_COST_INTERVAL_SEC", 15.0) or 15.0),
+        )
+        while not self._gateway_deletion_cost_stop.wait(interval):
+            try:
+                self.update_runtime_gateway_deletion_costs()
+            except Exception as ex:  # noqa: BLE001
+                logger.debug("runtime-gateway deletion-cost update failed: %s", ex, exc_info=True)
+
+    def update_runtime_gateway_deletion_costs(self) -> Dict[str, int]:
+        """Annotate runtime pods with their current load.
+
+        StatefulSets still scale down by ordinal, so scheduler placement is the
+        real protection. This annotation is useful for visibility and for any
+        controller path that does honor pod deletion cost.
+        """
+        try:
+            from .k8s_runtime_gateways import list_runtime_gateway_pods, patch_runtime_gateway_deletion_cost
+        except Exception as ex:  # noqa: BLE001
+            logger.debug("runtime-gateway Kubernetes helpers unavailable: %s", ex)
+            return {}
+
+        pods = [
+            pod
+            for pod in list_runtime_gateway_pods(self._config, force_refresh=True)
+            if pod.ready and not pod.deletion_timestamp
+        ]
+        if not pods:
+            return {}
+
+        warm_counts: Dict[str, int] = {}
+        try:
+            for row in self.db.list_warm_pool_sandboxes():
+                gid = str(row.get("gateway_instance_id") or "").strip()
+                if gid:
+                    warm_counts[gid] = warm_counts.get(gid, 0) + 1
+        except Exception:
+            logger.debug("runtime-gateway deletion-cost: warm inventory unavailable", exc_info=True)
+
+        targets_by_instance = {target.instance_id: target for target in self._gateway_targets()}
+        costs: Dict[str, int] = {}
+        for pod in pods:
+            running = int(self.db.count_running_sandboxes(gateway_instance_id=pod.name))
+            warm = int(warm_counts.get(pod.name, 0))
+            disk_score = 0
+            target = targets_by_instance.get(pod.name)
+            if target is not None:
+                try:
+                    status = self._gateway_runtime_status(target, force_refresh=True)
+                    if status.get("reachable"):
+                        disk_score = int(float(status.get("disk_used_ratio") or 0.0) * 10_000)
+                except Exception:
+                    logger.debug(
+                        "runtime-gateway deletion-cost: status unavailable gateway=%s",
+                        pod.name,
+                        exc_info=True,
+                    )
+            memory_mib = int(max(0, pod.memory_bytes) / (1024 * 1024))
+            cost = _clamp_pod_deletion_cost(
+                running * 100_000
+                + warm * 50_000
+                + disk_score
+                + int(max(0, pod.cpu_millicores))
+                + memory_mib
+                - int(max(0, pod.ordinal))
+            )
+            if patch_runtime_gateway_deletion_cost(self._config, pod.name, cost):
+                costs[pod.name] = cost
+
+        if costs:
+            logger.debug("runtime-gateway deletion costs updated: %s", costs)
+        return costs
 
     def _gateway_targets(self) -> List[GatewayTarget]:
         try:
@@ -146,6 +252,32 @@ class SandboxManager:
 
     def _current_gateway_instance_ids(self) -> set[str]:
         return {str(t.instance_id or "").strip() for t in self._gateway_targets() if str(t.instance_id or "").strip()}
+
+    def _live_runtime_gateway_instance_ids(self, *, force_refresh: bool = False) -> tuple[set[str], bool]:
+        """Return live runtime-gateway pod ids when Kubernetes discovery is authoritative.
+
+        The boolean tells callers whether the set came from live pod discovery.
+        If Kubernetes discovery is disabled or temporarily unavailable, callers
+        must avoid treating absent ids as dead pods.
+        """
+        mode = str(
+            getattr(self._config, "RUNTIME_GATEWAY_TARGET_DISCOVERY_MODE", "static") or "static"
+        ).strip().lower()
+        if mode not in ("kubernetes", "k8s"):
+            return self._current_gateway_instance_ids(), False
+        try:
+            from .k8s_runtime_gateways import list_runtime_gateway_pods
+
+            pods = list_runtime_gateway_pods(self._config, force_refresh=force_refresh)
+        except Exception as ex:  # noqa: BLE001
+            logger.warning("Runtime gateway pod discovery failed during reconcile: %s", ex)
+            return set(), False
+        live = {
+            str(pod.name or "").strip()
+            for pod in pods
+            if pod.ready and not pod.deletion_timestamp
+        }
+        return {item for item in live if item}, True
 
     def _choose_gateway_target(self) -> Optional[GatewayTarget]:
         targets = self._gateway_targets()
@@ -434,7 +566,7 @@ class SandboxManager:
         extra = len(rows) - desired
         if extra <= 0:
             return 0
-        rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        rows.sort(key=lambda row: str(row.get("created_at") or ""))
         removed = 0
         for row in rows[:extra]:
             sid = str(row.get("sandbox_id") or "").strip()
@@ -580,7 +712,7 @@ class SandboxManager:
         extra_used_bytes_by_gateway: Optional[Dict[str, int]] = None,
     ) -> Optional[GatewayTarget]:
         best: Optional[GatewayTarget] = None
-        best_score: tuple[float, int, int, int, str] | None = None
+        best_score: tuple[Any, ...] | None = None
         image_ref = (preferred_image_ref or "").strip()
         statuses: Dict[str, Dict[str, Any]] = {}
         if len(candidates) > 1:
@@ -629,18 +761,44 @@ class SandboxManager:
                 if cached and (time.time() - float(cached[0])) <= 10.0 and bool(cached[1]):
                     has_image_rank = 0
             running_count = self.db.count_running_sandboxes(gateway_instance_id=target.instance_id)
-            score = (ratio, int(running_count), used, has_image_rank, target.instance_id)
+            if self._statefulset_scale_down_aware():
+                packing_target = self._statefulset_packing_target()
+                load_bucket = int(running_count) // packing_target
+                disk_bucket = int(ratio * 10)
+                score = (
+                    load_bucket,
+                    _gateway_ordinal(target.instance_id),
+                    disk_bucket,
+                    ratio,
+                    int(running_count),
+                    used,
+                    has_image_rank,
+                    target.instance_id,
+                )
+            else:
+                score = (ratio, int(running_count), used, has_image_rank, target.instance_id)
             if best_score is None or score < best_score:
                 best = target
                 best_score = score
         if best is not None and best_score is not None:
+            if self._statefulset_scale_down_aware():
+                disk_ratio = float(best_score[3])
+                disk_used = int(best_score[5])
+                image_rank = int(best_score[6])
+                ordinal = int(best_score[1])
+            else:
+                disk_ratio = float(best_score[0])
+                disk_used = int(best_score[2])
+                image_rank = int(best_score[3])
+                ordinal = _gateway_ordinal(best.instance_id)
             logger.info(
-                "Scheduler decision: reason=free_disk gateway=%s disk_used_ratio=%.4f disk_used_bytes=%s image_ref=%s image_cached_rank=%s",
+                "Scheduler decision: reason=free_disk gateway=%s ordinal=%s disk_used_ratio=%.4f disk_used_bytes=%s image_ref=%s image_cached_rank=%s",
                 best.instance_id,
-                float(best_score[0]),
-                int(best_score[2]),
+                ordinal,
+                disk_ratio,
+                disk_used,
                 image_ref or "-",
-                int(best_score[3]),
+                image_rank,
             )
         elif candidates:
             logger.warning(
@@ -692,7 +850,8 @@ class SandboxManager:
             str((segment or {}).get("ready_image_ref") or "").strip()
             or registry_ref
         )
-        candidates: list[tuple[int, int, float, int, int, str, GatewayTarget]] = []
+        candidates: list[tuple[Any, ...]] = []
+        scale_down_aware = self._statefulset_scale_down_aware()
         for target in candidate_targets:
             status = self._gateway_runtime_status(target, force_refresh=force_refresh)
             if not status.get("reachable"):
@@ -720,8 +879,13 @@ class SandboxManager:
                 (extra_warm_counts_by_gateway or {}).get(target.instance_id) or 0
             )
             preferred_rank = 0 if preferred_instance and target.instance_id == preferred_instance else 1
+            ordinal_rank = _gateway_ordinal(target.instance_id) if scale_down_aware else 0
+            load_count = int(warm_count) + int(running_count)
+            load_bucket = load_count // self._statefulset_packing_target() if scale_down_aware else 0
             candidates.append(
                 (
+                    int(load_bucket),
+                    int(ordinal_rank),
                     int(warm_count),
                     int(running_count),
                     float(ratio),
@@ -731,12 +895,23 @@ class SandboxManager:
                     target,
                 )
             )
-        candidates.sort(key=lambda item: item[:6])
+        candidates.sort(key=lambda item: item[:-1])
         if candidates:
-            warm_count, running_count, ratio, used, _preferred_rank, _instance_id, target = candidates[0]
+            (
+                _load_bucket,
+                ordinal,
+                warm_count,
+                running_count,
+                ratio,
+                used,
+                _preferred_rank,
+                _instance_id,
+                target,
+            ) = candidates[0]
             logger.info(
-                "Scheduler decision: reason=balanced_warm_pool gateway=%s template=%s warm_count=%s running_count=%s disk_used_ratio=%.4f disk_used_bytes=%s image_ref=%s",
+                "Scheduler decision: reason=balanced_warm_pool gateway=%s ordinal=%s template=%s warm_count=%s running_count=%s disk_used_ratio=%.4f disk_used_bytes=%s image_ref=%s",
                 target.instance_id,
+                ordinal,
                 template_id,
                 warm_count,
                 running_count,
@@ -778,7 +953,11 @@ class SandboxManager:
             instance_id
             for instance_id, rows in sorted(
                 inventory.items(),
-                key=lambda item: (-len(item[1]), item[0]),
+                key=(
+                    (lambda item: (_gateway_ordinal(item[0]), -len(item[1]), item[0]))
+                    if self._statefulset_scale_down_aware()
+                    else (lambda item: (-len(item[1]), item[0]))
+                ),
             )
         ]
         for instance_id in preferred_instances:
@@ -932,13 +1111,30 @@ class SandboxManager:
         self._lease_reaper_stop.set()
         if self._lease_reaper_thread and self._lease_reaper_thread.is_alive():
             self._lease_reaper_thread.join(timeout=timeout)
+        self._gateway_deletion_cost_stop.set()
+        if self._gateway_deletion_cost_thread and self._gateway_deletion_cost_thread.is_alive():
+            self._gateway_deletion_cost_thread.join(timeout=timeout)
 
     def _lease_reaper_loop(self) -> None:
         interval = max(
             1.0,
             float(getattr(self._config, "SANDBOX_LEASE_REAPER_INTERVAL_SEC", 5.0) or 5.0),
         )
+        reconcile_interval = max(
+            interval,
+            float(getattr(self._config, "SANDBOX_STATE_RECONCILE_INTERVAL_SEC", 10.0) or 10.0),
+        )
+        last_reconcile_at = 0.0
         while not self._lease_reaper_stop.wait(interval):
+            now = time.monotonic()
+            if now - last_reconcile_at >= reconcile_interval:
+                try:
+                    stats = self.reconcile_persisted_state(limit=5000)
+                    if int(stats.get("stale_marked_lost") or 0) or int(stats.get("warm_pool_revived") or 0):
+                        logger.info("Sandbox state reconcile: %s", stats)
+                except Exception as ex:  # noqa: BLE001
+                    logger.warning("Sandbox state reconcile cycle failed: %s", ex)
+                last_reconcile_at = now
             try:
                 self.reap_expired_sandboxes(limit=100)
             except Exception as ex:  # noqa: BLE001
@@ -1118,6 +1314,8 @@ class SandboxManager:
             registry_image_ref=registry_ref or None,
             materialized_gateway_instance_id=gateway_instance_id or None,
         )
+        if bool(getattr(self._config, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)):
+            self._mark_template_envd_baked(template_id)
         logger.info("Template %s rebuilt missing runtime image: %s", template_id, effective_ref)
         self.sync_warm_pool_default_segment(template_id, effective_ref)
         return effective_ref
@@ -1205,12 +1403,15 @@ class SandboxManager:
 
     def reconcile_persisted_state(self, limit: int = 5000) -> Dict[str, int]:
         """Reconcile DB sandbox rows against the live execution plane after a restart."""
-        blocker = self.describe_docker_workload_blocker()
+        from orchestrator.runtime_utils import workload_blocker_message
+
+        blocker = workload_blocker_message(self.execution)
         if blocker:
             logger.warning("Sandbox reconcile skipped because execution plane is not ready: %s", blocker)
             return {
                 "checked": 0,
                 "stale_marked_lost": 0,
+                "gateway_missing_marked_lost": 0,
                 "expired_reaped": 0,
                 "routing_refreshed": 0,
             }
@@ -1218,17 +1419,44 @@ class SandboxManager:
         stats = {
             "checked": 0,
             "stale_marked_lost": 0,
+            "gateway_missing_marked_lost": 0,
             "liveness_unknown": 0,
             "warm_pool_revived": 0,
             "expired_reaped": 0,
             "routing_refreshed": 0,
         }
+        live_gateway_ids, gateway_discovery_authoritative = self._live_runtime_gateway_instance_ids(force_refresh=True)
+        active_states = {"running", "starting", "pausing", "resuming"}
         for row in rows:
             sid = str(row.get("sandbox_id") or "").strip()
             cid = str(row.get("container_id") or "").strip()
             if not sid:
                 continue
             row_state = str(row.get("state") or "").strip().lower()
+            gateway_id = str(row.get("gateway_instance_id") or "").strip()
+            if (
+                gateway_discovery_authoritative
+                and row_state in active_states
+                and gateway_id
+                and gateway_id not in live_gateway_ids
+            ):
+                if self._mark_sandbox_lost(
+                    sid,
+                    detail=(
+                        f"Runtime gateway pod {gateway_id} is no longer live; "
+                        "the sandbox workload was lost and must be recreated."
+                    ),
+                ):
+                    stats["gateway_missing_marked_lost"] += 1
+                    stats["stale_marked_lost"] += 1
+                logger.warning(
+                    "Sandbox reconcile: marked sandbox lost because gateway pod is gone sandbox=%s gateway=%s state=%s warm_pool=%s",
+                    sid,
+                    gateway_id,
+                    row_state,
+                    bool(row.get("is_warm_pool")),
+                )
+                continue
             if row_state != "running":
                 if row_state == "starting" and cid:
                     try:
@@ -1247,8 +1475,11 @@ class SandboxManager:
                     except Exception as ex:  # noqa: BLE001
                         logger.debug("Sandbox reconcile: starting-state probe failed sandbox=%s: %s", sid, ex)
                 if row_state == "lost" and bool(row.get("is_warm_pool")) and cid:
-                    gateway_id = str(row.get("gateway_instance_id") or "").strip()
-                    current_gateways = self._current_gateway_instance_ids()
+                    current_gateways = (
+                        live_gateway_ids
+                        if gateway_discovery_authoritative
+                        else self._current_gateway_instance_ids()
+                    )
                     if gateway_id and current_gateways and gateway_id not in current_gateways:
                         continue
                     try:
@@ -1520,6 +1751,18 @@ class SandboxManager:
             return False
         raw = str((row.get("env") or {}).get(ENVD_TEMPLATE_BAKED_ENV) or "").strip().lower()
         return raw in ("1", "true", "yes", "on")
+
+    def _mark_template_envd_baked(self, template_id: str) -> None:
+        tid = (template_id or "").strip()
+        if not tid or not should_embed_envd_at_template_build(self._config):
+            return
+        merge = getattr(self.db, "merge_template_env", None)
+        if not callable(merge):
+            return
+        try:
+            merge(tid, {ENVD_TEMPLATE_BAKED_ENV: "true"})
+        except Exception:
+            logger.debug("Template %s envd-baked marker update failed", tid, exc_info=True)
 
     def _startup_managed_bootstrap_spec(
         self,
@@ -2166,9 +2409,18 @@ class SandboxManager:
         from_snapshot_image: Optional[str] = None,
         owner_client_id: Optional[str] = None,
         owner_api_key_id: Optional[str] = None,
+        warmpool_size: Optional[int] = None,
     ) -> Optional[str]:
         """Create new sandbox, optionally from a prior ``docker commit`` image or warm pool."""
         self._last_create_error = ""
+        requested_warm_pool_size = (
+            None if warmpool_size is None else max(0, int(warmpool_size))
+        )
+        desired_warm_pool_size = (
+            requested_warm_pool_size
+            if requested_warm_pool_size is not None
+            else max(0, int(getattr(self._config, "SANDBOX_WARM_POOL_SIZE", 0) or 0))
+        )
         snap = (from_snapshot_image or "").strip()
         if snap:
             return self._create_sandbox_fresh(
@@ -2198,7 +2450,7 @@ class SandboxManager:
         if (
             tid
             and tpl is None
-            and int(self._config.SANDBOX_WARM_POOL_SIZE) > 0
+            and desired_warm_pool_size > 0
             and tid != warm_pool_default_tid
         ):
             if not _looks_like_explicit_image_ref(tid):
@@ -2290,15 +2542,25 @@ class SandboxManager:
                         tid,
                         bi,
                     )
+            if warm_img and should_embed_envd_at_template_build(self._config) and not self._template_declares_envd_baked(tid):
+                self._mark_template_envd_baked(tid)
+                tpl = self.db.get_sandbox_template(tid) or tpl
             cfg = self._config
             first_pool_request = False
             seed_target: Optional[GatewayTarget] = None
-            pool_managed_template = bool(pool is not None and cfg.SANDBOX_WARM_POOL_SIZE > 0 and warm_img)
+            pool_managed_template = bool(pool is not None and desired_warm_pool_size > 0 and warm_img)
             warm_key = ""
+            if pool is not None and warm_img and desired_warm_pool_size <= 0 and requested_warm_pool_size is not None:
+                pool.ensure_pool_for(
+                    tid,
+                    cpu_limit,
+                    memory_limit,
+                    int(timeout),
+                    warm_img,
+                    desired_size=0,
+                )
             if pool_managed_template:
                 warm_key = self.warm_pool_key(tid, cpu_limit, memory_limit, int(timeout))
-                segment_before = self.db.get_warm_pool_segment(warm_key)
-                segment_desired = int((segment_before or {}).get("desired_size") or 0)
                 valid_ready_count = self.warm_pool_ready_count(warm_key)
                 first_pool_request = valid_ready_count <= 0
                 if first_pool_request and self.execution.get_backend_kind() in ("docker", "gvisor"):
@@ -2315,12 +2577,19 @@ class SandboxManager:
                             cpu_limit=cpu_limit,
                             memory_limit=memory_limit,
                             timeout=int(timeout),
-                            desired_size=int(cfg.SANDBOX_WARM_POOL_SIZE),
+                            desired_size=int(desired_warm_pool_size),
                             ready_image_ref=warm_img,
                             preferred_gateway_instance_id=seed_target.instance_id,
                         )
                 if not first_pool_request:
-                    pool.ensure_pool_for(tid, cpu_limit, memory_limit, int(timeout), warm_img)
+                    pool.ensure_pool_for(
+                        tid,
+                        cpu_limit,
+                        memory_limit,
+                        int(timeout),
+                        warm_img,
+                        desired_size=int(desired_warm_pool_size),
+                    )
             if pool_managed_template and not first_pool_request:
                 sid = pool.try_acquire(
                     tid,
@@ -2354,10 +2623,20 @@ class SandboxManager:
                 forced_gateway_instance_id=seed_target.instance_id if seed_target is not None else None,
             )
             if sid and pool_managed_template and first_pool_request:
-                pool.ensure_pool_for(tid, cpu_limit, memory_limit, int(timeout), warm_img)
+                pool.ensure_pool_for(
+                    tid,
+                    cpu_limit,
+                    memory_limit,
+                    int(timeout),
+                    warm_img,
+                    desired_size=int(desired_warm_pool_size),
+                )
             return sid
 
-        if pool is not None:
+        if pool is not None and requested_warm_pool_size is not None and desired_warm_pool_size <= 0:
+            pool.ensure_pool_for(tid, cpu_limit, memory_limit, int(timeout), None, desired_size=0)
+
+        if pool is not None and desired_warm_pool_size > 0:
             sid = pool.try_acquire(
                 tid,
                 metadata,
@@ -2387,7 +2666,7 @@ class SandboxManager:
         (raw ``python:3.11``) while ``POST /sandboxes`` uses ``warm_snapshot_image`` — different images.
         """
         pool = getattr(self, "warm_pool", None)
-        if pool is None or int(getattr(self._config, "SANDBOX_WARM_POOL_SIZE", 0) or 0) <= 0:
+        if pool is None:
             return
         pid = (self._config.SANDBOX_WARM_POOL_TEMPLATE_ID or self._config.DEFAULT_TEMPLATE).strip()
         if (template_id or "").strip() != pid:
@@ -2395,12 +2674,27 @@ class SandboxManager:
         ref = (warm_ref or "").strip()
         if not ref:
             return
+        key = self.warm_pool_key(
+            pid,
+            self._config.SANDBOX_WARM_POOL_CPU or self._config.DEFAULT_CPU_LIMIT,
+            self._config.SANDBOX_WARM_POOL_MEMORY or self._config.DEFAULT_MEMORY_LIMIT,
+            int(self._config.SANDBOX_WARM_POOL_TIMEOUT or self._config.DEFAULT_TIMEOUT),
+        )
+        segment = self.db.get_warm_pool_segment(key)
+        desired_size = int(
+            (segment or {}).get("desired_size")
+            or getattr(self._config, "SANDBOX_WARM_POOL_SIZE", 0)
+            or 0
+        )
+        if desired_size <= 0:
+            return
         pool.ensure_pool_for(
             pid,
             self._config.SANDBOX_WARM_POOL_CPU or self._config.DEFAULT_CPU_LIMIT,
             self._config.SANDBOX_WARM_POOL_MEMORY or self._config.DEFAULT_MEMORY_LIMIT,
             int(self._config.SANDBOX_WARM_POOL_TIMEOUT or self._config.DEFAULT_TIMEOUT),
             ref,
+            desired_size=desired_size,
         )
         logger.info(
             "Warm pool default segment now uses warm_snapshot_image for template_id=%r",
@@ -2457,6 +2751,8 @@ class SandboxManager:
                     registry_image_ref=registry_ref or None,
                     materialized_gateway_instance_id=gateway_instance_id or None,
                 )
+                if bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)):
+                    self._mark_template_envd_baked(template_id)
                 logger.info("Template %s warm snapshot (runtime-gateway): %s", template_id, effective_ref)
                 self.sync_warm_pool_default_segment(template_id, effective_ref)
                 return True
@@ -2528,6 +2824,8 @@ class SandboxManager:
                     self.db.set_template_build_error(template_id, "docker commit failed")
                     return False
                 self.db.set_template_warm_snapshot(template_id, image_ref, None)
+                if should_embed_envd_at_template_build(cfg):
+                    self._mark_template_envd_baked(template_id)
                 logger.info("Template %s warm snapshot: %s", template_id, image_ref)
                 self.sync_warm_pool_default_segment(template_id, image_ref)
                 return True
@@ -2617,12 +2915,13 @@ class SandboxManager:
                 pa = getattr(plane, "put_archive_to_container", None)
                 if callable(pa):
                     pt = float(getattr(cfg, "ENVD_BOOTSTRAP_PIP_TIMEOUT_SEC", 300.0) or 300.0)
-                    bake_envd_guest_into_container(
+                    if bake_envd_guest_into_container(
                         put_archive_to_container=pa,
                         run_command=plane.run_command,
                         container_id=cid,
                         pip_timeout_sec=pt,
-                    )
+                    ):
+                        merged_template_env[ENVD_TEMPLATE_BAKED_ENV] = "true"
 
             sc = (start_cmd or "").strip()
             if sc:
@@ -2720,6 +3019,8 @@ class SandboxManager:
                 f"set_template_warm_snapshot failed for template_id={template_id!r} "
                 f"(image_ref={image_ref!r}); template row missing after upsert — check DATABASE_URL / DB."
             )
+        if str(merged_template_env.get(ENVD_TEMPLATE_BAKED_ENV) or "").strip().lower() in ("1", "true", "yes", "on"):
+            self._mark_template_envd_baked(template_id)
         logger.info("Template %s (parsed Dockerfile) warm snapshot: %s", template_id, image_ref)
         self.sync_warm_pool_default_segment(template_id, image_ref)
         return self.db.get_sandbox_template(template_id) or {}
@@ -2740,7 +3041,7 @@ class SandboxManager:
     ) -> Optional[str]:
         """Create a brand-new sandbox (never taken from the warm pool)."""
         create_started = time.monotonic()
-        sandbox_id = f"sb-{uuid.uuid4().hex[:16]}"
+        sandbox_id = f"sb-{uuid.uuid4().hex[:22]}"
         container_name = f"sandbox-{sandbox_id}"
 
         meta = dict(metadata or {})
@@ -3325,6 +3626,7 @@ class SandboxManager:
         meta["runtime_error_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         self.db.update_sandbox_state(sid, "lost")
         self.db.merge_sandbox_metadata(sid, meta)
+        self.discard_from_warm_pool(sid)
         return True
 
     def _clear_sandbox_runtime_error(self, sandbox_id: str) -> None:

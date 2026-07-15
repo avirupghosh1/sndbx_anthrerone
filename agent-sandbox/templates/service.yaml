@@ -20,6 +20,10 @@ spec:
       port: {{ .Values.service.apiService.sshPort }}
       targetPort: ssh
       protocol: TCP
+    - name: modal-grpc
+      port: {{ .Values.service.apiService.modalGrpcPort }}
+      targetPort: modal-grpc
+      protocol: TCP
 ---
 apiVersion: {{ .Values.api.service | quote }}
 kind: Service

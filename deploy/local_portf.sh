@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cleanup() { kill "${PF_API:-}" "${PF_SSH:-}" "${PF_ING:-}" 2>/dev/null || true; }
+cleanup() { kill "${PF_API:-}" "${PF_SSH:-}" "${PF_MODAL:-}" "${PF_ING:-}" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
 echo "Branch B (no sudo) port-forwards:"
 echo "  control plane  http://127.0.0.1:8001  → api-service:8000"
 echo "  ssh gateway    ssh://127.0.0.1:2222     → api-service:2222"
+echo "  modal grpc     http://127.0.0.1:50051 → api-service:50051"
 echo "  data plane     http://127.0.0.1:18080 → proxy-service:8080"
 echo ""
 echo "Data plane goes directly to proxy-service (debug headers X-Sandbox-Id / X-Guest-Port)."
@@ -18,6 +19,8 @@ kubectl port-forward -n sandboxes svc/api-service 8001:8000 &
 PF_API=$!
 kubectl port-forward -n sandboxes svc/api-service 2222:2222 &
 PF_SSH=$!
+kubectl port-forward -n sandboxes svc/api-service 50051:50051 &
+PF_MODAL=$!
 kubectl port-forward -n sandboxes svc/runtime-gateway 18080:8080 &
 PF_ING=$!
 

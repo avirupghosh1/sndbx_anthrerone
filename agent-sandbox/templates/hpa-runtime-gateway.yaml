@@ -1,0 +1,42 @@
+{{- if .Values.runtimeGateway.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "sndbx.runtimeGatewayName" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+{{ include "sndbx.labels" . | indent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: {{ include "sndbx.runtimeGatewayName" . }}
+  minReplicas: {{ .Values.runtimeGateway.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.runtimeGateway.autoscaling.maxReplicas }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ .Values.runtimeGateway.autoscaling.scaleDownStabilizationWindowSeconds }}
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: {{ .Values.runtimeGateway.autoscaling.scaleDownPeriodSeconds }}
+    scaleUp:
+      stabilizationWindowSeconds: {{ .Values.runtimeGateway.autoscaling.scaleUpStabilizationWindowSeconds }}
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: {{ .Values.runtimeGateway.autoscaling.scaleUpPeriodSeconds }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.runtimeGateway.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.runtimeGateway.autoscaling.targetMemoryUtilizationPercentage }}
+{{- end }}

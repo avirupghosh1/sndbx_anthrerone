@@ -104,6 +104,10 @@ class Config:
         1.0,
         float(os.getenv("SANDBOX_LEASE_REAPER_INTERVAL_SEC", "5")),
     )
+    SANDBOX_STATE_RECONCILE_INTERVAL_SEC: float = max(
+        1.0,
+        float(os.getenv("SANDBOX_STATE_RECONCILE_INTERVAL_SEC", "10")),
+    )
     SANDBOX_LOST_RETENTION_SEC: int = max(
         60,
         int(os.getenv("SANDBOX_LOST_RETENTION_SEC", "86400")),
@@ -216,6 +220,38 @@ class Config:
     ).strip()
     RUNTIME_GATEWAY_SHARD_COUNT: int = max(1, int(os.getenv("RUNTIME_GATEWAY_SHARD_COUNT", "1")))
     RUNTIME_GATEWAY_SCHEDULER: str = (os.getenv("RUNTIME_GATEWAY_SCHEDULER") or "round_robin").strip().lower()
+    RUNTIME_GATEWAY_TARGET_DISCOVERY_MODE: str = (
+        os.getenv("RUNTIME_GATEWAY_TARGET_DISCOVERY_MODE") or "static"
+    ).strip().lower()
+    RUNTIME_GATEWAY_STATEFULSET_SCALE_DOWN_AWARE: bool = _env_bool(
+        "RUNTIME_GATEWAY_STATEFULSET_SCALE_DOWN_AWARE",
+        False,
+    )
+    RUNTIME_GATEWAY_STATEFULSET_PACKING_TARGET: int = max(
+        1,
+        int(os.getenv("RUNTIME_GATEWAY_STATEFULSET_PACKING_TARGET", "4") or "4"),
+    )
+    RUNTIME_GATEWAY_POD_DELETION_COST_ENABLED: bool = _env_bool(
+        "RUNTIME_GATEWAY_POD_DELETION_COST_ENABLED",
+        False,
+    )
+    RUNTIME_GATEWAY_POD_DELETION_COST_INTERVAL_SEC: float = max(
+        2.0,
+        float(os.getenv("RUNTIME_GATEWAY_POD_DELETION_COST_INTERVAL_SEC", "15.0")),
+    )
+    RUNTIME_GATEWAY_POD_DISCOVERY_TTL_SEC: float = max(
+        0.2,
+        float(os.getenv("RUNTIME_GATEWAY_POD_DISCOVERY_TTL_SEC", "5.0")),
+    )
+    RUNTIME_GATEWAY_POD_METRICS_ENABLED: bool = _env_bool("RUNTIME_GATEWAY_POD_METRICS_ENABLED", True)
+    RUNTIME_GATEWAY_POD_LABEL_SELECTOR: str = (
+        os.getenv("RUNTIME_GATEWAY_POD_LABEL_SELECTOR") or ""
+    ).strip()
+    RUNTIME_GATEWAY_POD_LABEL_APP: str = (os.getenv("RUNTIME_GATEWAY_POD_LABEL_APP") or "agent-sandbox").strip()
+    RUNTIME_GATEWAY_POD_LABEL_TIER: str = (os.getenv("RUNTIME_GATEWAY_POD_LABEL_TIER") or "").strip()
+    RUNTIME_GATEWAY_POD_LABEL_COMPONENT: str = (
+        os.getenv("RUNTIME_GATEWAY_POD_LABEL_COMPONENT") or "runtime-gateway"
+    ).strip()
     RUNTIME_GATEWAY_HEADLESS_SERVICE: str = (
         os.getenv("RUNTIME_GATEWAY_HEADLESS_SERVICE") or "runtime-gateway-headless"
     ).strip()
@@ -384,6 +420,25 @@ class Config:
         1,
         int(os.getenv("DAYTONA_SSH_ACCESS_MAX_TTL_MIN", "1440") or "1440"),
     )
+
+    # --- Modal Python SDK compatibility gateway ---
+    # Modal's SDK uses gRPC/HTTP2, so this is a separate TCP listener from
+    # the FastAPI HTTP API. Use MODAL_SERVER_URL=http://host:50051 and put the
+    # sandbox API key in MODAL_TOKEN_SECRET.
+    MODAL_COMPAT_GATEWAY_ENABLED: bool = _env_bool("MODAL_COMPAT_GATEWAY_ENABLED", True)
+    MODAL_COMPAT_GATEWAY_HOST: str = (
+        os.getenv("MODAL_COMPAT_GATEWAY_HOST") or "0.0.0.0"
+    ).strip() or "0.0.0.0"
+    MODAL_COMPAT_GATEWAY_PORT: int = max(
+        1,
+        min(65535, int(os.getenv("MODAL_COMPAT_GATEWAY_PORT", "50051") or "50051")),
+    )
+    MODAL_COMPAT_GATEWAY_PUBLIC_URL: str = (
+        os.getenv("MODAL_COMPAT_GATEWAY_PUBLIC_URL") or ""
+    ).strip().rstrip("/")
+    MODAL_COMPAT_GATEWAY_PUBLIC_HOST: str = (
+        os.getenv("MODAL_COMPAT_GATEWAY_PUBLIC_HOST") or ""
+    ).strip()
 
     # Runtime is Docker Engine only. ``runsc``/gVisor is selected via SANDBOX_ISOLATION or
     # SANDBOX_DOCKER_OCI_RUNTIME and executed by runtime-gateway's dockerd sidecar in prod.

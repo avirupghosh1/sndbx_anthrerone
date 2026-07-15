@@ -9,6 +9,43 @@ metadata:
   name: sandbox-controller
   namespace: sandboxes
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-controller-runtime-gateway-discovery
+  namespace: sandboxes
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+  - apiGroups:
+      - metrics.k8s.io
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandbox-controller-runtime-gateway-discovery
+  namespace: sandboxes
+subjects:
+  - kind: ServiceAccount
+    name: sandbox-controller
+    namespace: sandboxes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-controller-runtime-gateway-discovery
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -24,6 +61,9 @@ spec:
     - name: ssh
       port: 2222
       targetPort: 2222
+    - name: modal-grpc
+      port: 50051
+      targetPort: 50051
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -50,6 +90,8 @@ spec:
               name: http
             - containerPort: 2222
               name: ssh
+            - containerPort: 50051
+              name: modal-grpc
           envFrom:
             - configMapRef:
                 name: api-service-config
@@ -143,7 +185,7 @@ data:
   SANDBOX_DATA_PLANE_SCHEME: "https"
   SANDBOX_DATA_PLANE_DEBUG: "false"
   SANDBOX_DEFAULT_ALLOW_PUBLIC_TRAFFIC: "false"
-  DAYTONA_OBJECT_STORAGE_URL: "http://api.sndbx.example.com"
+  DAYTONA_OBJECT_STORAGE_URL: "https://api.sndbx.example.com"
   DAYTONA_SSH_GATEWAY_ENABLED: "true"
   DAYTONA_SSH_GATEWAY_HOST: "0.0.0.0"
   DAYTONA_SSH_GATEWAY_PORT: "2222"
@@ -151,7 +193,12 @@ data:
   DAYTONA_SSH_GATEWAY_PUBLIC_PORT: "2222"
   DAYTONA_SSH_ACCESS_DEFAULT_TTL_MIN: "60"
   DAYTONA_SSH_ACCESS_MAX_TTL_MIN: "1440"
+  MODAL_COMPAT_GATEWAY_ENABLED: "true"
+  MODAL_COMPAT_GATEWAY_HOST: "0.0.0.0"
+  MODAL_COMPAT_GATEWAY_PORT: "50051"
+  MODAL_COMPAT_GATEWAY_PUBLIC_URL: "http://127.0.0.1:50051"
   SANDBOX_LEASE_REAPER_INTERVAL_SEC: "5"
+  SANDBOX_STATE_RECONCILE_INTERVAL_SEC: "10"
   SANDBOX_LOST_RETENTION_SEC: "86400"
   RUNTIME_EXITED_CONTAINER_RETENTION_SEC: "1800"
   TEMPLATE_IMAGE_RETENTION_SEC: "172800"
@@ -174,7 +221,18 @@ data:
   PORT: "8000"
   HOST: "0.0.0.0"
   RUNTIME_GATEWAY_NAMESPACE: "sandboxes"
-  RUNTIME_GATEWAY_SHARD_COUNT: "3"
+  RUNTIME_GATEWAY_SHARD_COUNT: "1"
+  RUNTIME_GATEWAY_TARGET_DISCOVERY_MODE: "kubernetes"
+  RUNTIME_GATEWAY_STATEFULSET_SCALE_DOWN_AWARE: "true"
+  RUNTIME_GATEWAY_STATEFULSET_PACKING_TARGET: "4"
+  RUNTIME_GATEWAY_POD_DELETION_COST_ENABLED: "true"
+  RUNTIME_GATEWAY_POD_DELETION_COST_INTERVAL_SEC: "15.0"
+  RUNTIME_GATEWAY_POD_DISCOVERY_TTL_SEC: "5.0"
+  RUNTIME_GATEWAY_POD_METRICS_ENABLED: "true"
+  RUNTIME_GATEWAY_POD_LABEL_SELECTOR: "app=runtime-gateway"
+  RUNTIME_GATEWAY_POD_LABEL_APP: "runtime-gateway"
+  RUNTIME_GATEWAY_POD_LABEL_TIER: ""
+  RUNTIME_GATEWAY_POD_LABEL_COMPONENT: ""
   RUNTIME_GATEWAY_STATEFULSET_NAME: "runtime-gateway"
   RUNTIME_GATEWAY_HEADLESS_SERVICE: "runtime-gateway-headless"
   RUNTIME_GATEWAY_SERVICE_PORT: "8080"
