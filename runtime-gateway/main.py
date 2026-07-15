@@ -44,7 +44,9 @@ from runtime_routes import (
     file_write,
     image_exists,
     image_metadata,
+    image_push,
     image_pull,
+    image_registry_exists,
     prune_containers,
     prune_images,
 )
@@ -316,6 +318,8 @@ routes = [
     Route("/internal/runtime/probe", runtime_probe, methods=["POST"]),
     Route("/internal/runtime/images/pull", image_pull, methods=["POST"]),
     Route("/internal/runtime/images/exists", image_exists, methods=["POST"]),
+    Route("/internal/runtime/images/registry-exists", image_registry_exists, methods=["POST"]),
+    Route("/internal/runtime/images/push", image_push, methods=["POST"]),
     Route("/internal/runtime/images/metadata", image_metadata, methods=["POST"]),
     Route("/internal/runtime/containers/create", create_container, methods=["POST"]),
     Route("/internal/runtime/containers/{container_id}/exec", container_exec, methods=["POST"]),

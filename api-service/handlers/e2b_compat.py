@@ -513,16 +513,15 @@ async def _run_e2b_template_build_background(
                 build_args={},
                 context_tar_gzip_base64=context_tar_gzip_base64,
             )
-            effective_ref = registry_ref or tag
             await run_io(
                 sandbox_manager.db.set_template_warm_snapshot,
                 template_id,
-                effective_ref,
+                tag,
                 None,
                 registry_image_ref=registry_ref or None,
                 materialized_gateway_instance_id=gateway_instance_id or None,
             )
-            await run_io(sandbox_manager.sync_warm_pool_default_segment, template_id, effective_ref)
+            await run_io(sandbox_manager.sync_warm_pool_default_segment, template_id, tag)
             await template_handlers._finish_build_record(
                 sandbox_manager,
                 build_id,

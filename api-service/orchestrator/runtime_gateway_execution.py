@@ -174,6 +174,25 @@ class RuntimeGatewayExecution:
         body = {"image": (image_ref or "").strip()}
         return bool(self._safe(False, lambda: self._request("POST", "/internal/runtime/images/exists", json_body=body).get("exists")))
 
+    def registry_image_exists(self, image_ref: str) -> bool:
+        body = {"image": (image_ref or "").strip(), "timeout": 60}
+        return bool(
+            self._safe(
+                False,
+                lambda: self._request("POST", "/internal/runtime/images/registry-exists", json_body=body).get("exists"),
+            )
+        )
+
+    def push_image_to_registry(self, image_ref: str, template_id: str, timeout: int = 600) -> Optional[str]:
+        body = {
+            "image": (image_ref or "").strip(),
+            "template_id": (template_id or "").strip(),
+            "timeout": int(timeout),
+        }
+        data = self._safe({}, self._request, "POST", "/internal/runtime/images/push", json_body=body)
+        ref = str(data.get("registry_image_ref") or "").strip() if isinstance(data, dict) and data.get("ok") else ""
+        return ref or None
+
     def create_container(self, name: str, config: ContainerConfig) -> Optional[str]:
         payload = {"name": name, "config": asdict(config)}
         data = self._safe({}, self._request, "POST", "/internal/runtime/containers/create", json_body=payload)

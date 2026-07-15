@@ -170,8 +170,8 @@ async def register_template_from_dockerfile(
 ):
     """Register a template from a Dockerfile.
 
-    ``warm_snapshot_image`` is always the built OCI image tag. In production the build is
-    delegated to runtime-gateway so the image lands in the Docker graph used by sandbox shards.
+    ``warm_snapshot_image`` is the local built OCI image tag. In production the build is
+    delegated to runtime-gateway, and ``registry_image_ref`` stores the published copy if enabled.
     """
     alias = _validate_template_id(request.template_id)
     existing = await run_io(sandbox_manager.db.get_sandbox_template_by_alias, principal.client_id, alias)
@@ -267,16 +267,16 @@ async def register_template_from_dockerfile(
             build_args=request.build_args or {},
             context_tar_gzip_base64=request.context_tar_gzip_base64,
         )
-        effective_ref = registry_ref or tag
         await run_io(
             sandbox_manager.db.set_template_warm_snapshot,
             tid,
-            effective_ref,
+            tag,
             None,
             registry_image_ref=registry_ref or None,
             materialized_gateway_instance_id=gateway_instance_id or None,
         )
-        await run_io(sandbox_manager.sync_warm_pool_default_segment, tid, effective_ref)
+        await run_io(sandbox_manager.sync_warm_pool_default_segment, tid, tag)
+        row = await run_io(sandbox_manager.db.get_sandbox_template, tid) or row
         await _finish_build_record(
             sandbox_manager,
             build_id,
@@ -490,16 +490,16 @@ async def register_template_from_dockerfile_stream(
                         build_args=request.build_args or {},
                         context_tar_gzip_base64=request.context_tar_gzip_base64,
                     )
-                    effective_ref = registry_ref or tag
                     await run_io(
                         sandbox_manager.db.set_template_warm_snapshot,
                         tid,
-                        effective_ref,
+                        tag,
                         None,
                         registry_image_ref=registry_ref or None,
                         materialized_gateway_instance_id=gateway_instance_id or None,
                     )
-                    await run_io(sandbox_manager.sync_warm_pool_default_segment, tid, effective_ref)
+                    await run_io(sandbox_manager.sync_warm_pool_default_segment, tid, tag)
+                    row = await run_io(sandbox_manager.db.get_sandbox_template, tid) or row
                     await _finish_build_record(
                         sandbox_manager,
                         build_id,

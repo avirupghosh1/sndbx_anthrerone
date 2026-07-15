@@ -405,8 +405,6 @@ def push_image_to_registry(
         repo_prefix=repo_prefix,
         layout=str(getattr(cfg, "TEMPLATE_REGISTRY_LAYOUT", "auto") or "auto"),
     )
-    if target_ref == local_ref:
-        return local_ref
     ensure_registry_login(timeout=timeout)
     client = _docker_client(timeout)
     try:
@@ -424,6 +422,24 @@ def push_image_to_registry(
             if isinstance(entry, dict) and entry.get("error"):
                 raise RuntimeError(str(entry.get("error")))
         return target_ref
+    finally:
+        client.close()
+
+
+def registry_image_exists(*, image_ref: str, timeout: int = 60) -> bool:
+    ref = (image_ref or "").strip()
+    if not ref:
+        return False
+    client = _docker_client(timeout)
+    try:
+        client.images.get_registry_data(
+            ref,
+            auth_config=_registry_auth_config_for_ref(ref),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Registry image unavailable image=%s: %s", ref, exc)
+        return False
     finally:
         client.close()
 

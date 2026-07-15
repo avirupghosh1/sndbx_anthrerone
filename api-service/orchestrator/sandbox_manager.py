@@ -131,6 +131,7 @@ class SandboxManager:
         self._lease_reaper_thread: Optional[threading.Thread] = None
         self._gateway_deletion_cost_stop = threading.Event()
         self._gateway_deletion_cost_thread: Optional[threading.Thread] = None
+        self._last_template_image_reconcile_at = 0.0
         self._last_create_error: str = ""
         self.warm_pool: Optional[Any] = None
         try:
@@ -646,6 +647,98 @@ class SandboxManager:
             self._gateway_image_cache[cache_key] = (now, exists)
         return exists
 
+    def _find_gateway_with_image(
+        self,
+        image_ref: str,
+        *,
+        preferred_instance_id: Optional[str] = None,
+        force_refresh: bool = True,
+    ) -> Optional[GatewayTarget]:
+        ref = (image_ref or "").strip()
+        if not ref:
+            return None
+        targets = self._gateway_targets()
+        if not targets:
+            return None
+        ordered = list(targets)
+        preferred = target_for_instance(ordered, preferred_instance_id or "")
+        if preferred is not None:
+            ordered = [preferred] + [t for t in ordered if t.instance_id != preferred.instance_id]
+        if len(ordered) == 1:
+            target = ordered[0]
+            return target if self._gateway_has_image(target, ref, force_refresh=force_refresh) else None
+        with ThreadPoolExecutor(max_workers=min(8, len(ordered))) as pool:
+            future_by_target = {
+                pool.submit(self._gateway_has_image, target, ref, force_refresh=force_refresh): target
+                for target in ordered
+            }
+            for future in as_completed(future_by_target):
+                target = future_by_target[future]
+                try:
+                    if bool(future.result()):
+                        return target
+                except Exception:
+                    continue
+        return None
+
+    def _registry_image_exists_from_gateway(
+        self,
+        target: Optional[GatewayTarget],
+        image_ref: str,
+    ) -> bool:
+        ref = (image_ref or "").strip()
+        if not ref:
+            return False
+        targets = self._gateway_targets()
+        ordered: List[GatewayTarget] = []
+        if target is not None:
+            ordered.append(target)
+        ordered.extend(t for t in targets if target is None or t.instance_id != target.instance_id)
+        for candidate in ordered:
+            try:
+                execution = self._execution_for_gateway_target(candidate)
+                fn = getattr(execution, "registry_image_exists", None)
+                if callable(fn) and bool(fn(ref)):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _push_gateway_image_to_registry(
+        self,
+        *,
+        template_id: str,
+        image_ref: str,
+        source_target: GatewayTarget,
+    ) -> Optional[str]:
+        ref = (image_ref or "").strip()
+        if not ref:
+            return None
+        try:
+            execution = self._execution_for_gateway_target(source_target)
+            push = getattr(execution, "push_image_to_registry", None)
+            if not callable(push):
+                return None
+            registry_ref = str(push(ref, template_id, 600) or "").strip()
+            if registry_ref:
+                logger.info(
+                    "Template image restored to registry template=%s source_gateway=%s local_ref=%s registry_ref=%s",
+                    template_id,
+                    source_target.instance_id,
+                    ref,
+                    registry_ref,
+                )
+                return registry_ref
+        except Exception as ex:  # noqa: BLE001
+            logger.warning(
+                "Template image registry restore failed template=%s source_gateway=%s image=%s: %s",
+                template_id,
+                source_target.instance_id,
+                ref,
+                ex,
+            )
+        return None
+
     def _schedule_gateway_image_prefetch(self, image_ref: str) -> None:
         ref = (image_ref or "").strip()
         if not ref or not bool(getattr(self._config, "WARM_POOL_IMAGE_PREFETCH_ENABLED", True)):
@@ -1124,6 +1217,10 @@ class SandboxManager:
             interval,
             float(getattr(self._config, "SANDBOX_STATE_RECONCILE_INTERVAL_SEC", 10.0) or 10.0),
         )
+        template_image_reconcile_interval = max(
+            reconcile_interval,
+            float(getattr(self._config, "TEMPLATE_IMAGE_RECONCILE_INTERVAL_SEC", 60.0) or 60.0),
+        )
         last_reconcile_at = 0.0
         while not self._lease_reaper_stop.wait(interval):
             now = time.monotonic()
@@ -1135,6 +1232,14 @@ class SandboxManager:
                 except Exception as ex:  # noqa: BLE001
                     logger.warning("Sandbox state reconcile cycle failed: %s", ex)
                 last_reconcile_at = now
+            if now - self._last_template_image_reconcile_at >= template_image_reconcile_interval:
+                try:
+                    stats = self.reconcile_template_image_availability(limit=500)
+                    if int(stats.get("changed") or 0) or int(stats.get("errors") or 0):
+                        logger.info("Template image availability reconcile: %s", stats)
+                except Exception as ex:  # noqa: BLE001
+                    logger.warning("Template image availability reconcile cycle failed: %s", ex)
+                self._last_template_image_reconcile_at = now
             try:
                 self.reap_expired_sandboxes(limit=100)
             except Exception as ex:  # noqa: BLE001
@@ -1178,8 +1283,10 @@ class SandboxManager:
     def prune_runtime_artifacts(self) -> Dict[str, int]:
         results = {"containers": 0, "images": 0}
         keep_refs: set[str] = set()
-        for row in self.db.list_sandbox_templates():
-            for key in ("warm_snapshot_image", "base_image"):
+        list_templates = getattr(self.db, "list_all_sandbox_templates", None)
+        template_rows = list_templates() if callable(list_templates) else self.db.list_sandbox_templates()
+        for row in template_rows:
+            for key in ("warm_snapshot_image", "registry_image_ref", "base_image"):
                 ref = str(row.get(key) or "").strip()
                 if ref:
                     keep_refs.add(ref)
@@ -1238,6 +1345,40 @@ class SandboxManager:
             )
         return results
 
+    def reconcile_template_image_availability(self, limit: int = 200) -> Dict[str, int]:
+        stats = {"checked": 0, "changed": 0, "errors": 0}
+        if self.execution.get_backend_kind() not in ("docker", "gvisor"):
+            return stats
+        list_templates = getattr(self.db, "list_all_sandbox_templates", None)
+        rows = list_templates(limit=max(1, int(limit))) if callable(list_templates) else self.db.list_sandbox_templates()
+        for row in rows:
+            template_id = str(row.get("template_id") or "").strip()
+            if not template_id:
+                continue
+            if not (str(row.get("warm_snapshot_image") or "").strip() or str(row.get("registry_image_ref") or "").strip()):
+                continue
+            before = (
+                str(row.get("warm_snapshot_image") or "").strip(),
+                str(row.get("registry_image_ref") or "").strip(),
+                str(row.get("materialized_gateway_instance_id") or "").strip(),
+                str(row.get("build_error") or "").strip(),
+            )
+            try:
+                stats["checked"] += 1
+                updated = self._ensure_template_runtime_image(template_id, row)
+                after = (
+                    str(updated.get("warm_snapshot_image") or "").strip(),
+                    str(updated.get("registry_image_ref") or "").strip(),
+                    str(updated.get("materialized_gateway_instance_id") or "").strip(),
+                    str(updated.get("build_error") or "").strip(),
+                )
+                if after != before:
+                    stats["changed"] += 1
+            except Exception as ex:  # noqa: BLE001
+                stats["errors"] += 1
+                logger.warning("Template image availability reconcile failed template=%s: %s", template_id, ex)
+        return stats
+
     def _image_exists(self, image_ref: str) -> bool:
         ref = (image_ref or "").strip()
         if not ref:
@@ -1256,7 +1397,10 @@ class SandboxManager:
             return False
         registry_ref = str((row or {}).get("registry_image_ref") or "").strip()
         if registry_ref and ref == registry_ref:
-            return True
+            return self._registry_image_exists_from_gateway(self._gateway_target_for_template_row(row), ref)
+        if self.execution.get_backend_kind() in ("docker", "gvisor"):
+            owner = str((row or {}).get("materialized_gateway_instance_id") or "").strip()
+            return self._find_gateway_with_image(ref, preferred_instance_id=owner or None, force_refresh=True) is not None
         execution = self.execution
         owner_target = self._gateway_target_for_template_row(row)
         if owner_target is not None:
@@ -1303,67 +1447,152 @@ class SandboxManager:
         rebuilt = str(result.get("image_tag") or image_tag or "").strip()
         registry_ref = str(result.get("registry_image_ref") or "").strip()
         gateway_instance_id = str(result.get("gateway_instance_id") or "").strip()
-        effective_ref = registry_ref or rebuilt
-        if not effective_ref:
+        if not rebuilt:
             self.db.set_template_build_error(template_id, "runtime-gateway rebuild produced no image tag")
             return None
         self.db.set_template_warm_snapshot(
             template_id,
-            effective_ref,
+            rebuilt,
             None,
             registry_image_ref=registry_ref or None,
             materialized_gateway_instance_id=gateway_instance_id or None,
         )
         if bool(getattr(self._config, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)):
             self._mark_template_envd_baked(template_id)
-        logger.info("Template %s rebuilt missing runtime image: %s", template_id, effective_ref)
-        self.sync_warm_pool_default_segment(template_id, effective_ref)
-        return effective_ref
+        logger.info("Template %s rebuilt missing runtime image: %s registry=%s", template_id, rebuilt, registry_ref or "-")
+        self.sync_warm_pool_default_segment(template_id, rebuilt)
+        return rebuilt
 
     def _ensure_template_runtime_image(self, template_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
         warm_ref = (row.get("warm_snapshot_image") or "").strip()
-        if warm_ref and self._image_exists_for_row(row, warm_ref):
-            return row
+        registry_ref = (row.get("registry_image_ref") or "").strip()
+        owner_instance = (row.get("materialized_gateway_instance_id") or "").strip()
         base_image = (row.get("base_image") or "").strip()
-        if warm_ref:
-            logger.warning("Template %s references missing warm image %s", template_id, warm_ref)
-        rebuilt = self._repair_missing_template_image(template_id, row)
-        if rebuilt:
-            return self.db.get_sandbox_template(template_id) or row
-        if base_image and base_image != warm_ref and self._image_exists_for_row(row, base_image):
-            self.db.set_template_warm_snapshot(
-                template_id,
-                base_image,
-                None,
-                registry_image_ref=(str(row.get("registry_image_ref") or "").strip() or None),
-                materialized_gateway_instance_id=(
-                    str(row.get("materialized_gateway_instance_id") or "").strip() or None
-                ),
-            )
-            logger.warning(
-                "Template %s missing warm image %s; falling back to existing base_image %s",
-                template_id,
+
+        owner_target = target_for_instance(self._gateway_targets(), owner_instance)
+        local_target = (
+            self._find_gateway_with_image(
                 warm_ref,
-                base_image,
+                preferred_instance_id=owner_instance or None,
+                force_refresh=True,
+            )
+            if warm_ref
+            else None
+        )
+
+        if registry_ref and self._registry_image_exists_from_gateway(owner_target or local_target, registry_ref):
+            if local_target is None and warm_ref:
+                self.db.set_template_image_refs(
+                    template_id,
+                    warm_snapshot_image=None,
+                    registry_image_ref=registry_ref,
+                    materialized_gateway_instance_id=None,
+                    build_error=None,
+                )
+                logger.warning(
+                    "Template %s warm image %s missing from live gateways; registry image still available: %s",
+                    template_id,
+                    warm_ref,
+                    registry_ref,
+                )
+                return self.db.get_sandbox_template(template_id) or row
+            if local_target is not None and local_target.instance_id != owner_instance:
+                self.db.set_template_image_refs(
+                    template_id,
+                    warm_snapshot_image=warm_ref,
+                    registry_image_ref=registry_ref,
+                    materialized_gateway_instance_id=local_target.instance_id,
+                    build_error=None,
+                )
+                return self.db.get_sandbox_template(template_id) or row
+            return self.db.get_sandbox_template(template_id) or row
+
+        if local_target is not None:
+            restored_ref = self._push_gateway_image_to_registry(
+                template_id=template_id,
+                image_ref=warm_ref,
+                source_target=local_target,
+            )
+            self.db.set_template_image_refs(
+                template_id,
+                warm_snapshot_image=warm_ref,
+                registry_image_ref=restored_ref,
+                materialized_gateway_instance_id=local_target.instance_id,
+                build_error=None if restored_ref else "registry image unavailable; warm image exists only on one runtime shard",
             )
             return self.db.get_sandbox_template(template_id) or row
-        if not warm_ref and base_image and self._image_exists_for_row(row, base_image):
-            return row
-        if not warm_ref and not self._image_exists_for_row(row, base_image):
+
+        missing_ref = warm_ref or registry_ref
+        if missing_ref:
+            logger.warning(
+                "Template %s image unavailable warm=%s registry=%s; attempting rebuild",
+                template_id,
+                warm_ref or "-",
+                registry_ref or "-",
+            )
+            self.db.set_template_image_refs(
+                template_id,
+                warm_snapshot_image=None,
+                registry_image_ref=None,
+                materialized_gateway_instance_id=None,
+                build_error=f"template image unavailable: {missing_ref}; rebuild required",
+            )
+            row = self.db.get_sandbox_template(template_id) or row
             rebuilt = self._repair_missing_template_image(template_id, row)
             if rebuilt:
                 return self.db.get_sandbox_template(template_id) or row
-        if warm_ref:
-            self.db.set_template_build_error(
-                template_id,
-                f"Template image missing from runtime: {warm_ref}. Rebuild the template.",
-            )
-        elif base_image:
-            self.db.set_template_build_error(
-                template_id,
-                f"Template base image missing from runtime: {base_image}. Rebuild the template.",
-            )
+        if not warm_ref and registry_ref:
+            return row
+        if not warm_ref and base_image:
+            return row
         return self.db.get_sandbox_template(template_id) or row
+
+    def _image_for_gateway_target(
+        self,
+        *,
+        template_id: str,
+        row: Optional[Dict[str, Any]],
+        requested_image: str,
+        target: Optional[GatewayTarget],
+    ) -> str:
+        image = (requested_image or "").strip()
+        if not image or target is None or not row:
+            return image
+        warm_ref = str(row.get("warm_snapshot_image") or "").strip()
+        registry_ref = str(row.get("registry_image_ref") or "").strip()
+        if image and self._gateway_has_image(target, image, force_refresh=True):
+            return image
+        if registry_ref and registry_ref != image and self._registry_image_exists_from_gateway(target, registry_ref):
+            logger.info(
+                "Template %s using registry image on gateway=%s because local warm image is absent: warm=%s registry=%s",
+                template_id,
+                target.instance_id,
+                warm_ref or image,
+                registry_ref,
+            )
+            return registry_ref
+        if warm_ref:
+            local_target = self._find_gateway_with_image(
+                warm_ref,
+                preferred_instance_id=str(row.get("materialized_gateway_instance_id") or "").strip() or None,
+                force_refresh=True,
+            )
+            if local_target is not None:
+                restored_ref = self._push_gateway_image_to_registry(
+                    template_id=template_id,
+                    image_ref=warm_ref,
+                    source_target=local_target,
+                )
+                if restored_ref:
+                    self.db.set_template_image_refs(
+                        template_id,
+                        warm_snapshot_image=warm_ref,
+                        registry_image_ref=restored_ref,
+                        materialized_gateway_instance_id=local_target.instance_id,
+                        build_error=None,
+                    )
+                    return restored_ref
+        return image
 
     def _resolve_template_alias_for_create(
         self,
@@ -2520,7 +2749,7 @@ class SandboxManager:
                 logger.warning(self._last_create_error)
                 return None
             tpl = self._ensure_template_runtime_image(tid, tpl)
-            if not tpl.get("warm_snapshot_image"):
+            if not (tpl.get("warm_snapshot_image") or tpl.get("registry_image_ref")):
                 if not self._build_registered_template_snapshot(tid):
                     self._last_create_error = str(
                         (self.db.get_sandbox_template(tid) or {}).get("build_error")
@@ -2528,7 +2757,7 @@ class SandboxManager:
                     )
                     return None
                 tpl = self.db.get_sandbox_template(tid) or tpl
-            warm_img = (tpl.get("warm_snapshot_image") or "").strip()
+            warm_img = (tpl.get("warm_snapshot_image") or tpl.get("registry_image_ref") or "").strip()
             # Parsed Dockerfile builds store the committed OCI ref as ``base_image`` and should mirror
             # ``warm_snapshot_image``. If the snapshot column is still empty (e.g. failed UPDATE),
             # using ``_resolve_sandbox_image(template_id)`` would start ``newp1`` as a literal image
@@ -2738,23 +2967,22 @@ class SandboxManager:
                 image_ref = str(result.get("image_ref") or "").strip()
                 registry_ref = str(result.get("registry_image_ref") or "").strip()
                 gateway_instance_id = str(result.get("gateway_instance_id") or "").strip()
-                effective_ref = registry_ref or image_ref
-                if not effective_ref:
+                if not image_ref:
                     self.db.set_template_build_error(
                         template_id, "runtime-gateway template snapshot produced no image"
                     )
                     return False
                 self.db.set_template_warm_snapshot(
                     template_id,
-                    effective_ref,
+                    image_ref,
                     None,
                     registry_image_ref=registry_ref or None,
                     materialized_gateway_instance_id=gateway_instance_id or None,
                 )
                 if bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)):
                     self._mark_template_envd_baked(template_id)
-                logger.info("Template %s warm snapshot (runtime-gateway): %s", template_id, effective_ref)
-                self.sync_warm_pool_default_segment(template_id, effective_ref)
+                logger.info("Template %s warm snapshot (runtime-gateway): %s registry=%s", template_id, image_ref, registry_ref or "-")
+                self.sync_warm_pool_default_segment(template_id, image_ref)
                 return True
 
             name = f"tpl-build-{uuid.uuid4().hex[:10]}"
@@ -3100,6 +3328,13 @@ class SandboxManager:
             )
             logger.error(self._last_create_error)
             return None
+        if runtime in ("docker", "gvisor") and tpl and chosen_target is not None:
+            image = self._image_for_gateway_target(
+                template_id=(template_id or "").strip(),
+                row=tpl,
+                requested_image=image,
+                target=chosen_target,
+            )
         execution = self._execution_for_gateway_target(chosen_target) if chosen_target else self.execution
         logger.info(
             "Creating sandbox %s runtime=%s template_id=%r image=%r (from_snapshot=%s gateway=%s)",

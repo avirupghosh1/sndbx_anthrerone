@@ -52,7 +52,7 @@ from my_sdk import (  # noqa: E402
 from my_sdk.api import APIEndpoints  # noqa: E402
 from my_sdk.async_sdk.commands import AsyncCommands  # noqa: E402
 from my_sdk.async_sdk.filesystem import AsyncFilesystem  # noqa: E402
-from my_sdk.models import BuildInfo  # noqa: E402
+from my_sdk.models import BuildInfo, SandboxInfo, SandboxLifecycle  # noqa: E402
 from my_sdk.sync.commands import Commands  # noqa: E402
 from my_sdk.sync.filesystem import Filesystem  # noqa: E402
 
@@ -373,6 +373,14 @@ def ok_sandbox(value: Any) -> bool:
     return isinstance(value, Sandbox) and bool(value.sandbox_id)
 
 
+def ok_sandbox_info(value: Any) -> bool:
+    return isinstance(value, SandboxInfo) and bool(value.sandbox_id)
+
+
+def ok_sandbox_lifecycle(value: Any) -> bool:
+    return isinstance(value, SandboxLifecycle) and bool(value.sandbox_id)
+
+
 def ok_command_success(value: Any) -> bool:
     return getattr(value, "exit_code", 1) == 0
 
@@ -443,9 +451,16 @@ def exercise_template_methods(api_url: str, api_key: str | None, request_timeout
         dockerfile = tmpdir / "Dockerfile"
         dockerfile.write_text("FROM python:3.11\n", encoding="utf-8")
 
-        dsl = Template(file_context_path=str(tmpdir))
+        context_dsl = Template()
+        step(
+            "template.dsl.set_file_context_path",
+            lambda: context_dsl.set_file_context_path(str(tmpdir)),
+            lambda value: value is context_dsl,
+            "same_builder",
+        )
+
+        dsl = Template()
         returns_builder = lambda value: value is dsl
-        step("template.dsl.set_file_context_path", lambda: dsl.set_file_context_path(str(tmpdir)), returns_builder, "same_builder")
         step("template.dsl.from_base_image", lambda: dsl.from_base_image(), returns_builder, "same_builder")
         step("template.dsl.from_python_image", lambda: dsl.from_python_image("3.11"), returns_builder, "same_builder")
         step("template.dsl.from_ubuntu_image", lambda: dsl.from_ubuntu_image("22.04"), returns_builder, "same_builder")
@@ -453,8 +468,8 @@ def exercise_template_methods(api_url: str, api_key: str | None, request_timeout
         step("template.dsl.set_workdir", lambda: dsl.set_workdir("/tmp"), returns_builder, "same_builder")
         step("template.dsl.set_user", lambda: dsl.set_user("root"), returns_builder, "same_builder")
         step("template.dsl.set_envs", lambda: dsl.set_envs({"GENERIC_SDK_SMOKE": "1"}), returns_builder, "same_builder")
-        # step("template.dsl.set_env", lambda: dsl.set_env("GENERIC_SDK_ONE", "yes"), returns_builder, "same_builder")
-        # step("template.dsl.copy", lambda: dsl.copy(str(src_file), "/tmp/copy.txt"), returns_builder, "same_builder")
+        step("template.dsl.set_env", lambda: dsl.set_env("GENERIC_SDK_ONE", "yes"), returns_builder, "same_builder")
+        step("template.dsl.copy", lambda: dsl.copy(str(src_file), "/tmp/copy.txt"), returns_builder, "same_builder")
         step("template.dsl.run_cmd", lambda: dsl.run_cmd("true"), returns_builder, "same_builder")
         step("template.dsl.apt_install", lambda: dsl.apt_install(["git"]), returns_builder, "same_builder")
         step("template.dsl.pip_install", lambda: dsl.pip_install(["pytest"]), returns_builder, "same_builder")
@@ -517,8 +532,8 @@ async def exercise_async_surface(api_url: str, api_key: str | None, request_time
     await async_step("AsyncSandbox.ready", lambda: AsyncSandbox.ready(api_url=api_url, api_key=api_key, request_timeout=request_timeout), ok_dict, "dict")
     await async_step("AsyncSandbox.diagnostics", lambda: AsyncSandbox.diagnostics(api_url=api_url, api_key=api_key, request_timeout=request_timeout), ok_dict, "dict")
     await async_step("AsyncSandbox.list", lambda: AsyncSandbox.list(api_url=api_url, api_key=api_key, request_timeout=request_timeout), ok_list, "list")
-    await async_step("AsyncSandbox.info", lambda: async_sandbox.info(), ok_dict, "dict")
-    await async_step("AsyncSandbox.lifecycle", lambda: async_sandbox.lifecycle(), ok_dict, "dict")
+    await async_step("AsyncSandbox.info", lambda: async_sandbox.info(), ok_sandbox_info, "SandboxInfo")
+    await async_step("AsyncSandbox.lifecycle", lambda: async_sandbox.lifecycle(), ok_sandbox_lifecycle, "SandboxLifecycle")
     await async_step(
         "AsyncCommands.run",
         lambda: async_sandbox.commands.run("echo async-command-ok", timeout=30),
@@ -697,11 +712,11 @@ def exercise_agent(sandbox: Sandbox) -> None:
     agent_id = str(agent.get("agent_id") or "")
     if not agent_id:
         raise AssertionError(f"spawn_agent response missing agent_id: {agent}")
-    step("agents.list_agents", lambda: sandbox.list_agents(), ok_list, "list")
+    step("agents.list_agents", lambda: sandbox.list_agents(), ok_dict, "dict")
     step("agents.get_agent", lambda: sandbox.get_agent(agent_id), ok_dict, "dict")
     step("agents.send_agent_message", lambda: sandbox.send_agent_message(agent_id, {"hello": "world"}), ok_dict, "dict")
-    step("agents.get_agent_messages", lambda: sandbox.get_agent_messages(agent_id, limit=10), ok_list, "list")
-    step("agents.kill_agent", lambda: sandbox.kill_agent(agent_id, force=True))
+    step("agents.get_agent_messages", lambda: sandbox.get_agent_messages(agent_id, limit=10), ok_dict, "dict")
+    step("agents.kill_agent", lambda: sandbox.kill_agent(agent_id, force=True), ok_dict, "dict")
 
 
 def exercise_sandbox(api_url: str, api_key: str | None, request_timeout: float, template_id: str) -> None:
@@ -729,8 +744,8 @@ def exercise_sandbox(api_url: str, api_key: str | None, request_timeout: float, 
         print(f"sandbox_id={sandbox.sandbox_id}")
         step("Sandbox.attach", lambda: Sandbox.attach(sandbox.sandbox_id, api_url, api_key, request_timeout=request_timeout), ok_sandbox, "Sandbox.sandbox_id")
         step("Sandbox.connect.without_e2b", lambda: Sandbox.connect(sandbox.sandbox_id, api_url=api_url, api_key=api_key, with_e2b=False, request_timeout=request_timeout), ok_sandbox, "Sandbox.sandbox_id")
-        step("Sandbox.info", lambda: sandbox.info(), ok_dict, "dict")
-        step("Sandbox.lifecycle", lambda: sandbox.lifecycle(), ok_dict, "dict")
+        step("Sandbox.info", lambda: sandbox.info(), ok_sandbox_info, "SandboxInfo")
+        step("Sandbox.lifecycle", lambda: sandbox.lifecycle(), ok_sandbox_lifecycle, "SandboxLifecycle")
         step("Sandbox.is_running", lambda: sandbox.is_running(), ok_true, "true")
         step("Sandbox.set_timeout", lambda: sandbox.set_timeout(900), lambda value: value is None, "none")
         step("Sandbox.refresh_envd_connection", lambda: sandbox.refresh_envd_connection())
@@ -764,7 +779,7 @@ def exercise_sandbox(api_url: str, api_key: str | None, request_timeout: float, 
         step("Sandbox.set_labels", lambda: sandbox.set_labels({"generic-sdk-smoke": "true"}), ok_dict, "dict")
         step("Sandbox.set_network_settings", lambda: sandbox.set_network_settings(networkBlockAll=False, networkAllowList=[], domainAllowList=[]), ok_dict, "dict")
         step("Sandbox.set_public.false", lambda: sandbox.set_public(False), ok_dict, "dict")
-        step("Sandbox.preview_url", lambda: sandbox.preview_url(49983), ok_str, "url")
+        step("Sandbox.preview_url", lambda: sandbox.preview_url(49983), ok_dict, "dict")
         signed = step("Sandbox.signed_preview_url", lambda: sandbox.signed_preview_url(49983, expires_in_seconds=60), ok_dict, "dict")
         signed_token = str(signed.get("token") or "")
         if signed_token:

@@ -96,7 +96,7 @@ def _replace_credential_placeholders(database_url: str, username: str, password:
 def _inject_url_credentials(database_url: str, username: str, password: str) -> str:
     url = _replace_credential_placeholders(database_url, username, password)
     parts = urlsplit(url)
-    if not parts.netloc: 
+    if not parts.netloc:
         return url
     if "@" not in parts.netloc:
         if not username:
@@ -104,7 +104,7 @@ def _inject_url_credentials(database_url: str, username: str, password: str) -> 
         userinfo = quote(username, safe="")
         if password:
             userinfo = f"{userinfo}:{quote(password, safe='')}"
-        
+
         return urlunsplit((parts.scheme, f"{userinfo}@{parts.netloc}", parts.path, parts.query, parts.fragment)) #should go to this case
 
     userinfo, hosts = parts.netloc.rsplit("@", 1)
@@ -2273,6 +2273,40 @@ class _PostgresDatabase:
             conn.close()
         return n > 0
 
+    def set_template_image_refs(
+        self,
+        template_id: str,
+        *,
+        warm_snapshot_image: Optional[str],
+        registry_image_ref: Optional[str],
+        materialized_gateway_instance_id: Optional[str],
+        build_error: Optional[str] = None,
+    ) -> bool:
+        now = _utc_now_iso()
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE sandbox_templates
+                SET warm_snapshot_image = ?, registry_image_ref = ?, materialized_gateway_instance_id = ?,
+                    build_error = ?, updated_at = ?
+                WHERE template_id = ?
+                """,
+                (
+                    (warm_snapshot_image or "").strip() or None,
+                    (registry_image_ref or "").strip() or None,
+                    (materialized_gateway_instance_id or "").strip() or None,
+                    build_error,
+                    now,
+                    template_id,
+                ),
+            )
+            n = cursor.rowcount
+            conn.commit()
+            conn.close()
+        return n > 0
+
     def set_template_build_error(self, template_id: str, message: str) -> bool:
         now = _utc_now_iso()
         with self._lock:
@@ -2357,6 +2391,21 @@ class _PostgresDatabase:
                     ORDER BY template_id
                     """
                 )
+            rows = cursor.fetchall()
+            out = [self._template_dict_from_row(cursor, r) for r in rows]
+            conn.close()
+        return out
+
+    def list_all_sandbox_templates(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            cursor = conn.cursor()
+            sql = "SELECT * FROM sandbox_templates ORDER BY updated_at DESC"
+            params: tuple[Any, ...] = ()
+            if limit is not None:
+                sql += " LIMIT ?"
+                params = (max(1, int(limit)),)
+            cursor.execute(sql, params)
             rows = cursor.fetchall()
             out = [self._template_dict_from_row(cursor, r) for r in rows]
             conn.close()
@@ -3999,6 +4048,30 @@ class _MongoDatabase:
         )
         return res.matched_count > 0
 
+    def set_template_image_refs(
+        self,
+        template_id: str,
+        *,
+        warm_snapshot_image: Optional[str],
+        registry_image_ref: Optional[str],
+        materialized_gateway_instance_id: Optional[str],
+        build_error: Optional[str] = None,
+    ) -> bool:
+        now = _utc_now_iso()
+        res = self.db.sandbox_templates.update_one(
+            {"_id": template_id},
+            {
+                "$set": {
+                    "warm_snapshot_image": (warm_snapshot_image or "").strip() or None,
+                    "registry_image_ref": (registry_image_ref or "").strip() or None,
+                    "materialized_gateway_instance_id": (materialized_gateway_instance_id or "").strip() or None,
+                    "build_error": build_error,
+                    "updated_at": now,
+                }
+            },
+        )
+        return int(getattr(res, "matched_count", 0) or 0) > 0
+
     def set_template_build_error(self, template_id: str, message: str) -> bool:
         now = _utc_now_iso()
         res = self.db.sandbox_templates.update_one(
@@ -4051,6 +4124,12 @@ class _MongoDatabase:
             self._template_dict_from_doc(doc)
             for doc in self.db.sandbox_templates.find(query).sort(sort_key, 1)
         ]
+
+    def list_all_sandbox_templates(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        cursor = self.db.sandbox_templates.find({}).sort("updated_at", -1)
+        if limit is not None:
+            cursor = cursor.limit(max(1, int(limit)))
+        return [self._template_dict_from_doc(doc) for doc in cursor]
 
     def create_template_build(
         self,

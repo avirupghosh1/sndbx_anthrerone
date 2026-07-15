@@ -12,7 +12,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from config import get_config
 from internal_auth import internal_api_key_valid, unauthorized_response
 from runtime_container_manager import ContainerConfig, ContainerManager
-from template_builder import LocalDockerExecution, push_image_to_registry
+from template_builder import LocalDockerExecution, push_image_to_registry, registry_image_exists
 
 logger = logging.getLogger(__name__)
 _manager: ContainerManager | None = None
@@ -85,6 +85,49 @@ async def image_exists(request: Request) -> JSONResponse:
     image = str(payload.get("image") or "").strip()
     exists = await run_in_threadpool(_runtime_manager().image_exists, image)
     return JSONResponse({"ok": True, "exists": bool(exists)})
+
+
+async def image_push(request: Request) -> JSONResponse:
+    denied = _auth(request)
+    if denied:
+        return denied
+    payload = await _json_payload(request)
+    image = str(payload.get("image") or payload.get("local_ref") or "").strip()
+    template_id = str(payload.get("template_id") or "").strip() or image
+    if not image:
+        return JSONResponse({"ok": False, "detail": "image is required"}, status_code=400)
+    cfg = get_config()
+    try:
+        registry_ref = await run_in_threadpool(
+            push_image_to_registry,
+            local_ref=image,
+            template_id=template_id,
+            repo_prefix=str(getattr(cfg, "TEMPLATE_REGISTRY_REPO_PREFIX", "") or ""),
+            timeout=int(payload.get("timeout") or 600),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Runtime image push failed image=%s template=%s: %s", image, template_id, exc)
+        return JSONResponse(
+            {"ok": False, "image": image, "detail": f"{type(exc).__name__}: {exc}"},
+            status_code=502,
+        )
+    return JSONResponse({"ok": True, "image": image, "registry_image_ref": registry_ref})
+
+
+async def image_registry_exists(request: Request) -> JSONResponse:
+    denied = _auth(request)
+    if denied:
+        return denied
+    payload = await _json_payload(request)
+    image = str(payload.get("image") or "").strip()
+    if not image:
+        return JSONResponse({"ok": False, "exists": False, "detail": "image is required"}, status_code=400)
+    exists = await run_in_threadpool(
+        registry_image_exists,
+        image_ref=image,
+        timeout=int(payload.get("timeout") or 60),
+    )
+    return JSONResponse({"ok": True, "image": image, "exists": bool(exists)})
 
 
 async def image_metadata(request: Request) -> JSONResponse:
