@@ -266,7 +266,7 @@ class WarmSandboxPool:
             row = self._manager.db.get_sandbox_template(self._logical_template_id)
             if row:
                 row = self._manager._ensure_template_runtime_image(self._logical_template_id, row)
-                fresh = (row.get("warm_snapshot_image") or "").strip() or None
+                fresh = (row.get("warm_snapshot_image") or row.get("registry_image_ref") or "").strip() or None
                 if fresh != self._from_snapshot:
                     self._from_snapshot = fresh
         except Exception:
@@ -484,22 +484,12 @@ class MultiWarmSandboxPool:
         self._sync_stop.clear()
         if self._size > 0:
             tid = (self._cfg.SANDBOX_WARM_POOL_TEMPLATE_ID or self._cfg.DEFAULT_TEMPLATE).strip()
-            snap: Optional[str] = None
-            try:
-                row = self._manager.db.get_sandbox_template(tid)
-                if row:
-                    row = self._manager._ensure_template_runtime_image(tid, row)
-                    wi = (row.get("warm_snapshot_image") or "").strip()
-                    if wi:
-                        snap = wi
-            except Exception:
-                logger.debug("warm pool: could not read warm_snapshot for %r", tid, exc_info=True)
             self.ensure_pool_for(
                 tid,
                 self._cfg.SANDBOX_WARM_POOL_CPU or self._cfg.DEFAULT_CPU_LIMIT,
                 self._cfg.SANDBOX_WARM_POOL_MEMORY or self._cfg.DEFAULT_MEMORY_LIMIT,
                 int(self._cfg.SANDBOX_WARM_POOL_TIMEOUT or self._cfg.DEFAULT_TIMEOUT),
-                snap,
+                self._current_template_image_ref(tid),
             )
         self._sync_persisted_segments()
         self._sync_thread = threading.Thread(
@@ -508,6 +498,20 @@ class MultiWarmSandboxPool:
             daemon=True,
         )
         self._sync_thread.start()
+
+    def _current_template_image_ref(self, template_id: str) -> Optional[str]:
+        tid = (template_id or "").strip()
+        if not tid:
+            return None
+        try:
+            row = self._manager.db.get_sandbox_template(tid)
+            if row:
+                row = self._manager._ensure_template_runtime_image(tid, row)
+                ref = (row.get("warm_snapshot_image") or row.get("registry_image_ref") or "").strip()
+                return ref or None
+        except Exception:
+            logger.debug("warm pool: could not read template image for %r", tid, exc_info=True)
+        return None
 
     def ensure_pool_for(
         self,
@@ -545,7 +549,6 @@ class MultiWarmSandboxPool:
                             memory_limit=key[2],
                             timeout=int(timeout),
                             desired_size=effective_size,
-                            ready_image_ref=snap,
                         )
                         cur.resize(effective_size)
                         self._manager.trim_warm_pool_to_size(cur.pool_key_string, effective_size)
@@ -561,7 +564,6 @@ class MultiWarmSandboxPool:
                         memory_limit=key[2],
                         timeout=int(timeout),
                         desired_size=0,
-                        ready_image_ref=snap,
                     )
                     self._manager.trim_warm_pool_to_size(key_string, 0)
                     return
@@ -585,7 +587,6 @@ class MultiWarmSandboxPool:
                 memory_limit=key[2],
                 timeout=int(timeout),
                 desired_size=effective_size,
-                ready_image_ref=snap,
             )
 
             if effective_size <= 0:
@@ -697,7 +698,7 @@ class MultiWarmSandboxPool:
             return
 
         selected: Dict[tuple[str, str, str], Dict[str, Any]] = {}
-        selected_rank: Dict[tuple[str, str, str], tuple[int, str, int]] = {}
+        selected_rank: Dict[tuple[str, str, str], tuple[int, str]] = {}
         for segment in persisted:
             if int(segment.get("desired_size") or 0) <= 0:
                 continue
@@ -717,7 +718,6 @@ class MultiWarmSandboxPool:
             rank = (
                 1 if str(segment.get("warm_pool_key") or "").strip() == canonical_key else 0,
                 str(segment.get("updated_at") or ""),
-                1 if str(segment.get("ready_image_ref") or "").strip() else 0,
             )
             if shape not in selected_rank or rank > selected_rank[shape]:
                 selected[shape] = segment
@@ -729,7 +729,7 @@ class MultiWarmSandboxPool:
                 str(segment.get("cpu_limit") or self._cfg.DEFAULT_CPU_LIMIT),
                 str(segment.get("memory_limit") or self._cfg.DEFAULT_MEMORY_LIMIT),
                 int(segment.get("timeout") or self._cfg.DEFAULT_TIMEOUT),
-                (str(segment.get("ready_image_ref") or "").strip() or None),
+                self._current_template_image_ref(str(segment.get("template_id") or "").strip()),
                 desired_size=int(segment.get("desired_size") or 0),
             )
 

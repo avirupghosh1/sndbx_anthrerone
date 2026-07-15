@@ -343,7 +343,12 @@ class SandboxManager:
         out: List[Dict[str, Any]] = []
         for segment in self.db.list_warm_pool_segments():
             key = str(segment.get("warm_pool_key") or "")
-            rows = self.db.list_warm_pool_sandboxes(warm_pool_key=key)
+            image_refs = self._warm_pool_current_image_refs(key)
+            rows = [
+                row
+                for row in self.db.list_warm_pool_sandboxes(warm_pool_key=key)
+                if self._warm_pool_row_matches_image(row, image_refs)
+            ]
             by_gateway: Dict[str, int] = {}
             for row in rows:
                 gid = str(row.get("gateway_instance_id") or "").strip() or "unassigned"
@@ -514,25 +519,43 @@ class SandboxManager:
                 )
         return live
 
-    def _warm_pool_ready_image_ref(self, warm_pool_key: str) -> str:
+    def _warm_pool_current_image_refs(self, warm_pool_key: str) -> tuple[str, ...]:
         segment = self.db.get_warm_pool_segment((warm_pool_key or "").strip())
-        return str((segment or {}).get("ready_image_ref") or "").strip()
+        template_id = str((segment or {}).get("template_id") or "").strip()
+        if not template_id:
+            template_id = str(warm_pool_key or "").split("|", 1)[0].strip()
+        if not template_id:
+            return ()
+        row = self.db.get_sandbox_template(template_id)
+        if not row:
+            return ()
+        refs: list[str] = []
+        for value in (row.get("warm_snapshot_image"), row.get("registry_image_ref")):
+            ref = str(value or "").strip()
+            if ref and ref not in refs:
+                refs.append(ref)
+        return tuple(refs)
+
+    def _warm_pool_current_image_ref(self, warm_pool_key: str) -> str:
+        refs = self._warm_pool_current_image_refs(warm_pool_key)
+        return refs[0] if refs else ""
 
     @staticmethod
-    def _warm_pool_row_matches_image(row: Dict[str, Any], ready_image_ref: str) -> bool:
-        ref = (ready_image_ref or "").strip()
-        if not ref:
+    def _warm_pool_row_matches_image(row: Dict[str, Any], image_refs: tuple[str, ...]) -> bool:
+        refs = tuple(ref for ref in image_refs if ref)
+        if not refs:
             return True
         md = row.get("metadata") if isinstance(row, dict) else {}
         md = md if isinstance(md, dict) else {}
-        return str(md.get("warm_pool_snapshot_image") or "").strip() == ref
+        return str(md.get("warm_pool_snapshot_image") or "").strip() in refs
 
-    def _discard_stale_warm_pool_rows(self, warm_pool_key: str, ready_image_ref: str) -> int:
-        if not (ready_image_ref or "").strip():
+    def _discard_stale_warm_pool_rows(self, warm_pool_key: str, image_refs: tuple[str, ...]) -> int:
+        refs = tuple(ref for ref in image_refs if ref)
+        if not refs:
             return 0
         removed = 0
         for row in self.db.list_warm_pool_sandboxes(warm_pool_key=warm_pool_key):
-            if self._warm_pool_row_matches_image(row, ready_image_ref):
+            if self._warm_pool_row_matches_image(row, refs):
                 continue
             sid = str(row.get("sandbox_id") or "").strip()
             if not sid:
@@ -544,20 +567,20 @@ class SandboxManager:
                 logger.warning("Warm pool stale row discard failed sandbox=%s: %s", sid, ex)
         if removed:
             logger.info(
-                "Warm pool stale image drain: removed %s sandbox(es) key=%s ready_image_ref=%s",
+                "Warm pool stale image drain: removed %s sandbox(es) key=%s image_refs=%s",
                 removed,
                 warm_pool_key,
-                ready_image_ref,
+                ",".join(refs),
             )
         return removed
 
     def warm_pool_ready_count(self, warm_pool_key: str) -> int:
-        ready_ref = self._warm_pool_ready_image_ref(warm_pool_key)
+        image_refs = self._warm_pool_current_image_refs(warm_pool_key)
         return len(
             [
                 row
                 for row in self.db.list_warm_pool_sandboxes(warm_pool_key=warm_pool_key)
-                if self._warm_pool_row_matches_image(row, ready_ref)
+                if self._warm_pool_row_matches_image(row, image_refs)
             ]
         )
 
@@ -595,7 +618,6 @@ class SandboxManager:
         memory_limit: str,
         timeout: int,
         desired_size: int,
-        ready_image_ref: Optional[str],
         preferred_gateway_instance_id: Optional[str] = None,
         last_error: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -607,11 +629,10 @@ class SandboxManager:
             memory_limit=memory_limit,
             timeout=int(timeout),
             desired_size=int(desired_size),
-            ready_image_ref=ready_image_ref,
             preferred_gateway_instance_id=preferred_gateway_instance_id,
             last_error=last_error,
         )
-        ref = (ready_image_ref or "").strip()
+        ref = self._warm_pool_current_image_ref(key)
         if ref:
             self._schedule_gateway_image_prefetch(ref)
         return row
@@ -917,6 +938,7 @@ class SandboxManager:
         if not targets:
             return None
         row = template_row or {}
+        warm_ref = str(row.get("warm_snapshot_image") or "").strip()
         registry_ref = str(row.get("registry_image_ref") or "").strip()
         owner_instance = str(row.get("materialized_gateway_instance_id") or "").strip()
         if owner_instance and not registry_ref:
@@ -939,10 +961,7 @@ class SandboxManager:
         preferred_instance = str((segment or {}).get("preferred_gateway_instance_id") or "").strip()
         inventory = self._warm_pool_rows_by_gateway(warm_key)
         candidate_targets = targets if registry_ref or not owner_instance else []
-        preferred_image_ref = (
-            str((segment or {}).get("ready_image_ref") or "").strip()
-            or registry_ref
-        )
+        preferred_image_ref = warm_ref or registry_ref
         candidates: list[tuple[Any, ...]] = []
         scale_down_aware = self._statefulset_scale_down_aware()
         for target in candidate_targets:
@@ -1028,11 +1047,11 @@ class SandboxManager:
         handoff_timeout: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         key = self.warm_pool_key(template_id, cpu_limit, memory_limit, int(timeout))
-        ready_ref = self._warm_pool_ready_image_ref(key)
-        self._discard_stale_warm_pool_rows(key, ready_ref)
+        image_refs = self._warm_pool_current_image_refs(key)
+        self._discard_stale_warm_pool_rows(key, image_refs)
         inventory: Dict[str, List[Dict[str, Any]]] = {}
         for row in self.db.list_warm_pool_sandboxes(warm_pool_key=key):
-            if not self._warm_pool_row_matches_image(row, ready_ref):
+            if not self._warm_pool_row_matches_image(row, image_refs):
                 continue
             instance_id = str(row.get("gateway_instance_id") or "").strip()
             if not instance_id:
@@ -1063,13 +1082,13 @@ class SandboxManager:
                 timeout_seconds=handoff_timeout,
             )
             if claimed:
-                if not self._warm_pool_row_matches_image(claimed, ready_ref):
+                if not self._warm_pool_row_matches_image(claimed, image_refs):
                     sid = str(claimed.get("sandbox_id") or "").strip()
                     logger.warning(
-                        "Warm pool claim returned stale image sandbox=%s key=%s ready_image_ref=%s",
+                        "Warm pool claim returned stale image sandbox=%s key=%s image_refs=%s",
                         sid,
                         key,
-                        ready_ref,
+                        ",".join(image_refs),
                     )
                     if sid:
                         self.kill_sandbox(sid, force=True)
@@ -1085,13 +1104,13 @@ class SandboxManager:
             timeout_seconds=handoff_timeout,
         )
         if claimed:
-            if not self._warm_pool_row_matches_image(claimed, ready_ref):
+            if not self._warm_pool_row_matches_image(claimed, image_refs):
                 sid = str(claimed.get("sandbox_id") or "").strip()
                 logger.warning(
-                    "Warm pool fallback claim returned stale image sandbox=%s key=%s ready_image_ref=%s",
+                    "Warm pool fallback claim returned stale image sandbox=%s key=%s image_refs=%s",
                     sid,
                     key,
-                    ready_ref,
+                    ",".join(image_refs),
                 )
                 if sid:
                     self.kill_sandbox(sid, force=True)
@@ -2807,7 +2826,6 @@ class SandboxManager:
                             memory_limit=memory_limit,
                             timeout=int(timeout),
                             desired_size=int(desired_warm_pool_size),
-                            ready_image_ref=warm_img,
                             preferred_gateway_instance_id=seed_target.instance_id,
                         )
                 if not first_pool_request:

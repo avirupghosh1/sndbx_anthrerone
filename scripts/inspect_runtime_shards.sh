@@ -77,6 +77,7 @@ if is_mongo_url; then
   require_tool mongosh "Install MongoDB Shell or set DB_URL to a PostgreSQL DSN for Postgres inspection."
   run_mongo '
     const rows = db.warm_pool_segments.find({}).sort({template_id: 1}).toArray().map((w) => {
+      const t = db.sandbox_templates.findOne({template_id: w.template_id}) || {};
       const ready = db.sandboxes.countDocuments({
         warm_pool_key: w.warm_pool_key,
         state: "running",
@@ -97,7 +98,7 @@ if is_mongo_url; then
         preferred_gateway: w.preferred_gateway_instance_id || "",
         ready_running: ready,
         earliest_warm_lease: earliest ? earliest.lease_expires_at : null,
-        ready_image_ref: w.ready_image_ref || "",
+        template_image_ref: t.warm_snapshot_image || t.registry_image_ref || "",
         last_error: w.last_error || "",
       };
     });
@@ -115,9 +116,10 @@ select
   coalesce(w.preferred_gateway_instance_id, '') as preferred_gateway,
   count(s.sandbox_id) filter (where s.state = 'running' and s.is_warm_pool = 1) as ready_running,
   min(s.lease_expires_at) filter (where s.state = 'running' and s.is_warm_pool = 1) as earliest_warm_lease,
-  coalesce(w.ready_image_ref, '') as ready_image_ref,
+  coalesce(t.warm_snapshot_image, t.registry_image_ref, '') as template_image_ref,
   coalesce(w.last_error, '') as last_error
 from warm_pool_segments w
+left join sandbox_templates t on t.template_id = w.template_id
 left join sandboxes s on s.warm_pool_key = w.warm_pool_key
 group by
   w.template_id,
@@ -127,7 +129,8 @@ group by
   w.desired_size,
   w.inflight_count,
   w.preferred_gateway_instance_id,
-  w.ready_image_ref,
+  t.warm_snapshot_image,
+  t.registry_image_ref,
   w.last_error
 order by w.template_id;
 "

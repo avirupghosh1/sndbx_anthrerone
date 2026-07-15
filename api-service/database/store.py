@@ -713,6 +713,8 @@ class _PostgresDatabase:
             cursor.execute("ALTER TABLE warm_pool_segments ADD COLUMN last_handoff_at TEXT")
         if cols and "last_refill_at" not in cols:
             cursor.execute("ALTER TABLE warm_pool_segments ADD COLUMN last_refill_at TEXT")
+        if cols and "ready_image_ref" in cols:
+            cursor.execute("UPDATE warm_pool_segments SET ready_image_ref = NULL WHERE ready_image_ref IS NOT NULL")
 
     def create_client(
         self,
@@ -1272,7 +1274,6 @@ class _PostgresDatabase:
         memory_limit: str,
         timeout: int,
         desired_size: int,
-        ready_image_ref: Optional[str] = None,
         preferred_gateway_instance_id: Optional[str] = None,
         last_error: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -1304,7 +1305,7 @@ class _PostgresDatabase:
                         str(memory_limit),
                         int(timeout),
                         max(0, int(desired_size)),
-                        (ready_image_ref or "").strip() or None,
+                        None,
                         (preferred_gateway_instance_id or "").strip() or None,
                         last_error,
                         now,
@@ -1333,7 +1334,7 @@ class _PostgresDatabase:
                         0,
                         None,
                         None,
-                        (ready_image_ref or "").strip() or None,
+                        None,
                         (preferred_gateway_instance_id or "").strip() or None,
                         last_error,
                         now,
@@ -1372,7 +1373,7 @@ class _PostgresDatabase:
             "failed_count": int(src.get("failed_count") or 0),
             "last_handoff_at": src.get("last_handoff_at"),
             "last_refill_at": src.get("last_refill_at"),
-            "ready_image_ref": src.get("ready_image_ref"),
+            "ready_image_ref": None,
             "preferred_gateway_instance_id": src.get("preferred_gateway_instance_id"),
             "last_error": src.get("last_error"),
             "created_at": src.get("created_at"),
@@ -1410,7 +1411,7 @@ class _PostgresDatabase:
                     "failed_count": int(src.get("failed_count") or 0),
                     "last_handoff_at": src.get("last_handoff_at"),
                     "last_refill_at": src.get("last_refill_at"),
-                    "ready_image_ref": src.get("ready_image_ref"),
+                    "ready_image_ref": None,
                     "preferred_gateway_instance_id": src.get("preferred_gateway_instance_id"),
                     "last_error": src.get("last_error"),
                     "created_at": src.get("created_at"),
@@ -2978,6 +2979,10 @@ class _MongoDatabase:
         )
         self.db.template_build_upload_chunks.create_index([("upload_id", 1), ("idx", 1)])
         self.db.warm_pool_segments.create_index([("desired_size", 1), ("updated_at", -1)])
+        self.db.warm_pool_segments.update_many(
+            {"ready_image_ref": {"$exists": True}},
+            {"$unset": {"ready_image_ref": ""}},
+        )
         self.db.service_leases.create_index("expires_at")
         self.db.distributed_locks.create_index("expires_at")
 
@@ -3059,7 +3064,7 @@ class _MongoDatabase:
             "failed_count": int(d.get("failed_count") or 0),
             "last_handoff_at": d.get("last_handoff_at"),
             "last_refill_at": d.get("last_refill_at"),
-            "ready_image_ref": d.get("ready_image_ref"),
+            "ready_image_ref": None,
             "preferred_gateway_instance_id": d.get("preferred_gateway_instance_id"),
             "last_error": d.get("last_error"),
             "created_at": d.get("created_at"),
@@ -3512,7 +3517,6 @@ class _MongoDatabase:
         memory_limit: str,
         timeout: int,
         desired_size: int,
-        ready_image_ref: Optional[str] = None,
         preferred_gateway_instance_id: Optional[str] = None,
         last_error: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -3527,7 +3531,6 @@ class _MongoDatabase:
             "memory_limit": str(memory_limit),
             "timeout": int(timeout),
             "desired_size": max(0, int(desired_size)),
-            "ready_image_ref": (ready_image_ref or "").strip() or None,
             "last_error": last_error,
             "updated_at": now,
         }
@@ -3550,6 +3553,7 @@ class _MongoDatabase:
             {
                 "$set": set_values,
                 "$setOnInsert": set_on_insert,
+                "$unset": {"ready_image_ref": ""},
             },
             upsert=True,
         )
