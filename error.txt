@@ -1,27 +1,10 @@
-obstore.exceptions.GenericError: Generic S3 error: Error performing HEAD http://api.sndbx.example.com/daytona-volume-builds/cl-763f2834d1e2c696/7621e8c242925657a7dcad68e98f0ee8/context.tar in 9.976789ms - HTTP error: builder error
 
-Debug source:
-Generic {
-    store: "S3",
-    source: RetryError(
-        RetryErrorImpl {
-            method: HEAD,
-            uri: Some(
-                http://api.sndbx.example.com/daytona-volume-builds/cl-763f2834d1e2c696/7621e8c242925657a7dcad68e98f0ee8/context.tar,
-            ),
-            retries: 0,
-            max_retries: 10,
-            elapsed: 9.976789ms,
-            retry_timeout: 180s,
-            inner: Http(
-                HttpError {
-                    kind: Unknown,
-                    source: reqwest::Error {
-                        kind: Builder,
-                        source: BadScheme,
-                    },
-                },
-            ),
-        },
-    ),
-}
+
+
+
+ValueError: Template.copy() cannot be used together with from_dockerfile() / with_build_context() / set_file_context_path() / Template(file_context_path=...); use a full directory context or per-file .copy(), not both.
+
+
+
+AssertionError: Sandbox.info validation failed (dict): SandboxInfo(sandbox_id='sb-5cff1d8014dd4c23afce52', state=<SandboxState.RUNNING: 'running'>, created_at='2026-07-15T12:41:11.016099Z', updated_at='2026-07-15T12:41:12.958708Z', metadata={'guest_ports': [8765, 49983], 'smoke': 'generic-client', 'allow_public_traffic': False, 'sandbox_allocation_source': 'cold_create', 'sandbox_bootstrap_pending': True, 'sandbox_bootstrap_error': 'guest bootstrap still starting', 'sandbox_bootstrap_seconds': None, 'sandbox_create_seconds': 2.816, 'guest_routing': {'8765': {'scheme': 'http', 'host': '172.17.0.4', 'port': 8765, 'guest_port': 8765, 'kind': 'bridge', 'upstream_http': 'http://172.17.0.4:8765'}, '49983': {'scheme': 'http', 'host': '172.17.0.4', 'port': 49983, 'guest_port': 49983, 'kind': 'bridge', 'upstream_http': 'http://172.17.0.4:49983'}}})
+(base) avirup@avirup-Victus-by-HP-Gaming-Laptop-15-fa0xxx:~/final_valid/sndbx_anthrerone$ 
