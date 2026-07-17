@@ -3,6 +3,7 @@
 import base64
 import json
 import re
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,11 +17,10 @@ from models.responses import TemplateDefinitionResponse
 from middleware import ApiKeyPrincipal, ensure_template_access, public_template_id_for_row, validate_api_key
 from orchestrator import SandboxManager
 from orchestrator.runtime_gateway_templates import (
-    build_dockerfile_template_via_gateway,
     gateway_template_build_enabled,
     stream_dockerfile_template_via_gateway,
 )
-from orchestrator.sandbox_manager import ENVD_TEMPLATE_BAKED_ENV
+from orchestrator.sandbox_constants import ENVD_TEMPLATE_BAKED_ENV
 from orchestrator.template_docker_build import build_image_from_dockerfile
 
 router = APIRouter(prefix="/templates", tags=["templates"])
@@ -132,6 +132,58 @@ async def _finish_build_record(
     )
 
 
+class _BuildLogRecorder:
+    def __init__(
+        self,
+        sandbox_manager: SandboxManager,
+        build_id: str,
+        *,
+        effective_mode: str,
+        min_interval_sec: float = 0.75,
+    ) -> None:
+        self.sandbox_manager = sandbox_manager
+        self.build_id = build_id
+        self.effective_mode = effective_mode
+        self.min_interval_sec = min_interval_sec
+        self.parts: list[str] = []
+        self._last_flush = 0.0
+
+    def append_sync(self, chunk: object, *, force: bool = False) -> None:
+        text = str(chunk or "").rstrip("\n")
+        if text:
+            self.parts.append(text)
+        now = time.monotonic()
+        if not force and now - self._last_flush < self.min_interval_sec:
+            return
+        self._last_flush = now
+        self.sandbox_manager.db.update_template_build(
+            self.build_id,
+            status="running",
+            effective_mode=self.effective_mode,
+            build_log=self.text,
+        )
+
+    async def append(self, chunk: object, *, force: bool = False) -> None:
+        text = str(chunk or "").rstrip("\n")
+        if text:
+            self.parts.append(text)
+        now = time.monotonic()
+        if not force and now - self._last_flush < self.min_interval_sec:
+            return
+        self._last_flush = now
+        await run_io(
+            self.sandbox_manager.db.update_template_build,
+            self.build_id,
+            status="running",
+            effective_mode=self.effective_mode,
+            build_log=self.text,
+        )
+
+    @property
+    def text(self) -> str:
+        return "\n".join(part for part in self.parts if part)
+
+
 @router.post("", response_model=TemplateDefinitionResponse)
 async def register_template(
     request: RegisterTemplateRequest,
@@ -202,9 +254,11 @@ async def register_template_from_dockerfile(
     if gateway_template_build_enabled(cfg):
         existing_template = await run_io(sandbox_manager.db.get_sandbox_template, tid)
         gateway_target = sandbox_manager._gateway_target_for_template_row(existing_template)
+        recorder = _BuildLogRecorder(sandbox_manager, build_id, effective_mode="runtime_gateway")
+        await recorder.append("Starting runtime-gateway Docker build", force=True)
+        build_res: dict = {}
         try:
-            build_res = await run_io(
-                build_dockerfile_template_via_gateway,
+            async for event in stream_dockerfile_template_via_gateway(
                 cfg,
                 template_id=tid,
                 dockerfile=request.dockerfile,
@@ -214,17 +268,53 @@ async def register_template_from_dockerfile(
                 build_mode=mode,
                 embed_envd=bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)),
                 gateway_api_base=(gateway_target.api_base if gateway_target else None),
-            )
+            ):
+                typ = str(event.get("type") or "")
+                if typ == "log":
+                    await recorder.append(str(event.get("line") or ""))
+                elif typ == "error":
+                    detail = str(event.get("detail") or "build failed")
+                    await recorder.append(detail, force=True)
+                    build_res = event
+                    break
+                elif typ == "result":
+                    build_log = str(event.get("build_log") or "")
+                    if build_log and len(recorder.parts) <= 1:
+                        await recorder.append(build_log, force=True)
+                    build_res = event
+                    break
         except RuntimeError as ex:
             await _finish_build_record(
                 sandbox_manager,
                 build_id,
                 status="failed",
                 effective_mode="runtime_gateway",
-                build_log="",
+                build_log=recorder.text,
                 error_text=str(ex),
             )
             raise HTTPException(status_code=400, detail=str(ex)) from ex
+        if str(build_res.get("type") or "") == "error":
+            detail = str(build_res.get("detail") or "build failed")
+            await _finish_build_record(
+                sandbox_manager,
+                build_id,
+                status="failed",
+                effective_mode=str(build_res.get("effective_mode") or "runtime_gateway"),
+                build_log=recorder.text,
+                error_text=detail,
+            )
+            raise HTTPException(status_code=400, detail=detail)
+        if not build_res:
+            detail = "runtime-gateway build stream ended without a result"
+            await _finish_build_record(
+                sandbox_manager,
+                build_id,
+                status="failed",
+                effective_mode="runtime_gateway",
+                build_log=recorder.text,
+                error_text=detail,
+            )
+            raise HTTPException(status_code=400, detail=detail)
 
         tag = str(build_res.get("image_tag") or "").strip()
         registry_ref = str(build_res.get("registry_image_ref") or "").strip()
@@ -235,10 +325,11 @@ async def register_template_from_dockerfile(
                 build_id,
                 status="failed",
                 effective_mode="runtime_gateway",
-                build_log=str(build_res.get("build_log") or ""),
+                build_log=recorder.text or str(build_res.get("build_log") or ""),
                 error_text="runtime-gateway build produced no image tag",
             )
             raise HTTPException(status_code=400, detail="runtime-gateway build produced no image tag")
+        await recorder.append("Docker build finished; registering template", force=True)
         reg_env, reg_start = _fields_from_dockerfile_request(
             request.dockerfile,
             request.env,
@@ -262,7 +353,7 @@ async def register_template_from_dockerfile(
             sandbox_manager.db.set_template_build_source,
             tid,
             source_kind="dockerfile",
-            source_build_mode="docker_cli",
+            source_build_mode=mode,
             dockerfile_text=request.dockerfile,
             build_args=request.build_args or {},
             context_tar_gzip_base64=request.context_tar_gzip_base64,
@@ -285,7 +376,7 @@ async def register_template_from_dockerfile(
             image_tag=tag,
             registry_image_ref=registry_ref or None,
             gateway_instance_id=gateway_instance_id or None,
-            build_log=str(build_res.get("build_log") or ""),
+            build_log=recorder.text or str(build_res.get("build_log") or ""),
         )
         return TemplateDefinitionResponse(**_row_to_response(row))
 
@@ -293,13 +384,25 @@ async def register_template_from_dockerfile(
         if re.search(r"^\s*COPY\s", request.dockerfile, re.I | re.M) or re.search(
             r"^\s*ADD\s+(?!https?://)", request.dockerfile, re.I | re.M
         ):
+            detail = "Parsed Dockerfile build: COPY/ADD (local) requires context_tar_gzip_base64."
+            await _finish_build_record(
+                sandbox_manager,
+                build_id,
+                status="failed",
+                effective_mode="parsed",
+                build_log=detail,
+                error_text=detail,
+            )
             raise HTTPException(
                 status_code=400,
-                detail="Parsed Dockerfile build: COPY/ADD (local) requires context_tar_gzip_base64.",
+                detail=detail,
             )
 
     if mode == "docker_cli":
+        recorder = _BuildLogRecorder(sandbox_manager, build_id, effective_mode="docker_cli")
+
         def _do_build() -> tuple[str, str]:
+            recorder.append_sync("Starting local Docker build", force=True)
             return build_image_from_dockerfile(
                 dockerfile=request.dockerfile,
                 image_tag=request.image_tag,
@@ -308,17 +411,19 @@ async def register_template_from_dockerfile(
                 context_tar_gzip=ctx,
                 build_timeout_sec=cfg.TEMPLATE_DOCKER_BUILD_TIMEOUT_SEC,
                 embed_envd=bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)),
+                log_callback=lambda chunk: recorder.append_sync(chunk),
             )
 
         try:
             tag, build_log = await run_io(_do_build)
+            await recorder.append("Docker build finished; registering template", force=True)
         except RuntimeError as ex:
             await _finish_build_record(
                 sandbox_manager,
                 build_id,
                 status="failed",
                 effective_mode="docker_cli",
-                build_log="",
+                build_log=recorder.text,
                 error_text=str(ex),
             )
             raise HTTPException(status_code=400, detail=str(ex)) from ex
@@ -361,10 +466,12 @@ async def register_template_from_dockerfile(
             status="success",
             effective_mode=mode,
             image_tag=tag,
-            build_log=build_log,
+            build_log=recorder.text or build_log,
         )
         return TemplateDefinitionResponse(**_row_to_response(row))
 
+    parsed_recorder = _BuildLogRecorder(sandbox_manager, build_id, effective_mode="parsed")
+    await parsed_recorder.append("Starting parsed Dockerfile build", force=True)
     try:
         sm = sandbox_manager
         row = await run_io(
@@ -389,17 +496,18 @@ async def register_template_from_dockerfile(
             build_id,
             status="failed",
             effective_mode="parsed",
-            build_log="",
+            build_log=parsed_recorder.text,
             error_text=str(ex),
         )
         raise HTTPException(status_code=400, detail=str(ex)) from ex
+    await parsed_recorder.append("Parsed Dockerfile build finished; syncing warm pool", force=True)
     await _finish_build_record(
         sandbox_manager,
         build_id,
         status="success",
         effective_mode="parsed",
         image_tag=str(row.get("warm_snapshot_image") or row.get("base_image") or ""),
-        build_log="parsed Dockerfile build completed",
+        build_log=parsed_recorder.text or "parsed Dockerfile build completed",
     )
     return TemplateDefinitionResponse(**_row_to_response(row))
 
@@ -429,7 +537,8 @@ async def register_template_from_dockerfile_stream(
     )
 
     async def _events():
-        log_parts: list[str] = []
+        recorder = _BuildLogRecorder(sandbox_manager, build_id, effective_mode="runtime_gateway")
+        await recorder.append("Starting runtime-gateway Docker build", force=True)
         existing_template = await run_io(sandbox_manager.db.get_sandbox_template, tid)
         gateway_target = sandbox_manager._gateway_target_for_template_row(existing_template)
         try:
@@ -444,15 +553,17 @@ async def register_template_from_dockerfile_stream(
                 embed_envd=bool(getattr(cfg, "ENVD_EMBED_AT_TEMPLATE_BUILD", True)),
                 gateway_api_base=(gateway_target.api_base if gateway_target else None),
             ):
+                if event.get("type") == "log":
+                    await recorder.append(str(event.get("line") or ""))
                 if event.get("type") == "error":
                     detail = str(event.get("detail") or "build failed")
-                    log_parts.append(detail)
+                    await recorder.append(detail, force=True)
                     await _finish_build_record(
                         sandbox_manager,
                         build_id,
                         status="failed",
                         effective_mode=str(event.get("effective_mode") or "runtime_gateway"),
-                        build_log="\n".join(log_parts),
+                        build_log=recorder.text,
                         error_text=detail,
                     )
                 if event.get("type") == "result":
@@ -460,8 +571,9 @@ async def register_template_from_dockerfile_stream(
                     registry_ref = str(event.get("registry_image_ref") or "").strip()
                     gateway_instance_id = str(event.get("gateway_instance_id") or "").strip()
                     build_log = str(event.get("build_log") or "")
-                    if build_log:
-                        log_parts.append(build_log)
+                    if build_log and len(recorder.parts) <= 1:
+                        await recorder.append(build_log, force=True)
+                    await recorder.append("Docker build finished; registering template", force=True)
                     reg_env, reg_start = _fields_from_dockerfile_request(
                         request.dockerfile,
                         request.env,
@@ -508,7 +620,7 @@ async def register_template_from_dockerfile_stream(
                         image_tag=tag,
                         registry_image_ref=registry_ref or None,
                         gateway_instance_id=gateway_instance_id or None,
-                        build_log="\n".join(part for part in log_parts if part),
+                        build_log=recorder.text,
                     )
                     event = {
                         "type": "registered",
@@ -522,7 +634,7 @@ async def register_template_from_dockerfile_stream(
                 build_id,
                 status="failed",
                 effective_mode="runtime_gateway",
-                build_log="\n".join(log_parts),
+                build_log=recorder.text,
                 error_text=str(ex),
             )
             yield f"data: {json.dumps({'type': 'error', 'detail': str(ex)}, ensure_ascii=True)}\n\n"

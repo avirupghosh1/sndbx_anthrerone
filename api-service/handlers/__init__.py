@@ -11,7 +11,9 @@ from . import sandbox_extensions
 from . import guest_connection
 from . import sandbox_envd
 from . import internal_routing
+from . import docs_portal
 from . import portal
+from . import admin_observability
 
 __all__ = [
     "sandboxes",
@@ -25,5 +27,7 @@ __all__ = [
     "guest_connection",
     "sandbox_envd",
     "internal_routing",
+    "docs_portal",
     "portal",
+    "admin_observability",
 ]

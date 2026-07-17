@@ -14,6 +14,7 @@ import tarfile
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Callable
 
 import docker
 
@@ -61,6 +62,7 @@ def build_image_from_dockerfile(
     context_tar_gzip: bytes | None,
     build_timeout_sec: int,
     embed_envd: bool = False,
+    log_callback: Callable[[str], None] | None = None,
 ) -> tuple[str, str]:
     """Build an image on the configured Docker Engine from a temp context directory.
 
@@ -101,7 +103,7 @@ def build_image_from_dockerfile(
         )
         try:
             client = docker.from_env(timeout=client_timeout)
-            _image, build_logs = client.images.build(
+            build_logs = client.api.build(
                 path=str(tmp),
                 dockerfile="Dockerfile",
                 tag=tag,
@@ -109,8 +111,19 @@ def build_image_from_dockerfile(
                 forcerm=True,
                 pull=False,
                 buildargs=clean_build_args or None,
+                decode=True,
             )
-            log = _stringify_build_logs(build_logs)
+            log_parts: list[str] = []
+            for entry in build_logs:
+                chunk = _stringify_build_logs([entry])
+                if not chunk:
+                    continue
+                log_parts.append(chunk)
+                if log_callback is not None:
+                    log_callback(chunk)
+                if isinstance(entry, dict) and entry.get("error"):
+                    raise RuntimeError(f"docker build failed: {''.join(log_parts)[-12000:]}")
+            log = "".join(log_parts)
         except docker.errors.BuildError as ex:
             log = _stringify_build_logs(getattr(ex, "build_log", None))
             detail = (str(ex) or log or "docker build failed").strip()

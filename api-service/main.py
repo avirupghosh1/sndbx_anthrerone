@@ -25,7 +25,7 @@ from middleware import (
     APIException,
     ensure_bootstrap_client_and_key,
 )
-from handlers import sandboxes, commands, files, agents, templates, compat_dispatch, e2b_compat, daytona_compat, sandbox_extensions, guest_connection, sandbox_envd, internal_routing, portal
+from handlers import auth, sandboxes, commands, files, agents, templates, compat_dispatch, e2b_compat, daytona_compat, sandbox_extensions, guest_connection, sandbox_envd, internal_routing, docs_portal, portal, admin_observability
 from handlers.daytona_ssh_gateway import start_daytona_ssh_gateway, stop_daytona_ssh_gateway
 from handlers.modal_compat_gateway import start_modal_compat_gateway, stop_modal_compat_gateway
 
@@ -45,13 +45,38 @@ app = FastAPI(
     version=config.API_VERSION,
     description=config.API_DESCRIPTION,
     debug=config.DEBUG,
+    docs_url=None,
+    redoc_url=None,
 )
+
+_PORTAL_SECURITY_HEADERS = {
+    "Cache-Control": "no-store",
+    "Pragma": "no-cache",
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Content-Security-Policy": (
+        "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "
+        "object-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'"
+    ),
+}
+
+
+@app.middleware("http")
+async def add_portal_security_headers(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith(("/portal", "/docs")):
+        for name, value in _PORTAL_SECURITY_HEADERS.items():
+            if name not in response.headers:
+                response.headers[name] = value
+    return response
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=config.CORS_ALLOWED_ORIGINS,
+    allow_credentials=config.CORS_ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -85,6 +110,7 @@ app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
 # Include routers
+app.include_router(auth.router)
 app.include_router(compat_dispatch.router)
 app.include_router(e2b_compat.router)
 app.include_router(daytona_compat.router)
@@ -97,7 +123,9 @@ app.include_router(templates.router)
 app.include_router(guest_connection.router)
 app.include_router(sandbox_envd.router)
 app.include_router(internal_routing.router)
+app.include_router(docs_portal.router)
 app.include_router(portal.router)
+app.include_router(admin_observability.router)
 
 
 @app.get("/health")
@@ -191,6 +219,14 @@ async def startup_event():
         reconcile = sandbox_manager.reconcile_persisted_state()
         logger.info("Sandbox state reconcile: %s", reconcile)
     except Exception as ex:  # noqa: BLE001
+        sandbox_manager._record_observability_event(
+            severity="error",
+            category="reconcile",
+            action="startup_state_reconcile_failed",
+            entity_type="control_plane",
+            message="Sandbox state reconcile failed during startup",
+            metadata={"error": str(ex)},
+        )
         logger.warning("Sandbox state reconcile failed during startup: %s", ex)
     await start_daytona_ssh_gateway(sandbox_manager)
     await start_modal_compat_gateway(sandbox_manager)

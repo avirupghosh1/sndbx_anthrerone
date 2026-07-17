@@ -18,6 +18,29 @@ def _env_bool(name: str, default: bool) -> bool:
     return default
 
 
+def _env_csv(name: str, default: str = "") -> list[str]:
+    raw = os.getenv(name, default)
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _is_production_environment(value: str) -> bool:
+    return (value or "").strip().lower() in ("prod", "production")
+
+
+def _weak_secret(value: str) -> bool:
+    raw = (value or "").strip()
+    if len(raw) < 32:
+        return True
+    return raw in {
+        "test-key-12345",
+        "sbx-local-dev-key",
+        "admin-local-dev-key",
+        "internal-local-dev-key",
+        "local-dev-portal-session-secret-change-me",
+        "dev-secret",
+    }
+
+
 def _default_ingress_auto_publish_upstream() -> bool:
     """Docker Desktop (macOS/Windows) cannot reach container bridge IPs from the API host."""
     return sys.platform in ("darwin", "win32")
@@ -72,7 +95,74 @@ class Config:
     DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
     
     # API
+    ENVIRONMENT: str = (
+        os.getenv("ENVIRONMENT")
+        or os.getenv("APP_ENV")
+        or os.getenv("NODE_ENV")
+        or "development"
+    ).strip().lower()
+    IS_PRODUCTION: bool = _is_production_environment(ENVIRONMENT)
     API_KEY: str = os.getenv("API_KEY", "test-key-12345")
+    INTERNAL_API_KEY: str = (
+        os.getenv("INTERNAL_API_KEY") or os.getenv("CONTROL_PLANE_API_KEY") or ""
+    ).strip()
+    ADMIN_API_KEY: str = (os.getenv("ADMIN_API_KEY") or "").strip()
+    AUTH_JWT_SECRET: str = (
+        os.getenv("AUTH_JWT_SECRET")
+        or os.getenv("JWT_SECRET")
+        or ("" if IS_PRODUCTION else API_KEY)
+    ).strip()
+    AUTH_JWT_PREVIOUS_SECRETS: list[str] = _env_csv("AUTH_JWT_PREVIOUS_SECRETS")
+    AUTH_JWT_ISSUER: str = (os.getenv("AUTH_JWT_ISSUER") or "agent-sandbox").strip()
+    AUTH_JWT_AUDIENCE: str = (os.getenv("AUTH_JWT_AUDIENCE") or "agent-sandbox-api").strip()
+    AUTH_JWT_ACCESS_TTL_SEC: int = max(
+        60,
+        min(86400, int(os.getenv("AUTH_JWT_ACCESS_TTL_SEC", "3600") or "3600")),
+    )
+    AUTH_JWT_LEEWAY_SEC: int = max(0, min(300, int(os.getenv("AUTH_JWT_LEEWAY_SEC", "30") or "30")))
+    AUTH_API_KEYS_ENABLED: bool = _env_bool("AUTH_API_KEYS_ENABLED", True)
+    # Keep Bearer API keys enabled for E2B/Daytona/Modal SDK compatibility.
+    # Bearer values that look like JWTs are validated as JWTs first.
+    AUTH_BEARER_API_KEYS_ENABLED: bool = _env_bool("AUTH_BEARER_API_KEYS_ENABLED", True)
+    PORTAL_SESSION_SECRET: str = (
+        os.getenv("PORTAL_SESSION_SECRET")
+        or ("" if IS_PRODUCTION else API_KEY)
+    ).strip()
+    PORTAL_SESSION_COOKIE_SECURE: bool = _env_bool("PORTAL_SESSION_COOKIE_SECURE", IS_PRODUCTION)
+    PORTAL_SESSION_TTL_HOURS: int = max(
+        1,
+        min(720, int(os.getenv("PORTAL_SESSION_TTL_HOURS", "12" if IS_PRODUCTION else "720") or "12")),
+    )
+    PORTAL_REGISTRATION_ENABLED: bool = _env_bool("PORTAL_REGISTRATION_ENABLED", not IS_PRODUCTION)
+    CORS_ALLOWED_ORIGINS: list[str] = _env_csv(
+        "CORS_ALLOWED_ORIGINS",
+        os.getenv("ALLOWED_ORIGINS", "*"),
+    )
+    CORS_ALLOW_CREDENTIALS: bool = _env_bool("CORS_ALLOW_CREDENTIALS", True)
+    if ADMIN_API_KEY and ADMIN_API_KEY in {API_KEY, INTERNAL_API_KEY}:
+        raise RuntimeError("ADMIN_API_KEY must be independent from API_KEY and INTERNAL_API_KEY")
+    if IS_PRODUCTION:
+        _weak_auth = [
+            name
+            for name, value in (
+                ("API_KEY", API_KEY),
+                ("INTERNAL_API_KEY", INTERNAL_API_KEY),
+                ("ADMIN_API_KEY", ADMIN_API_KEY),
+                ("AUTH_JWT_SECRET", AUTH_JWT_SECRET),
+                ("PORTAL_SESSION_SECRET", PORTAL_SESSION_SECRET),
+            )
+            if _weak_secret(value)
+        ]
+        if _weak_auth:
+            raise RuntimeError(
+                "production auth requires strong independent secrets (32+ chars): "
+                + ", ".join(_weak_auth)
+            )
+        if CORS_ALLOW_CREDENTIALS and "*" in CORS_ALLOWED_ORIGINS:
+            raise RuntimeError(
+                "production CORS cannot use '*' while CORS_ALLOW_CREDENTIALS=true; "
+                "set CORS_ALLOWED_ORIGINS to explicit trusted origins"
+            )
     API_TITLE: str = "Sandbox API Server"
     API_VERSION: str = "1.0.0"
     API_DESCRIPTION: str = "REST API server for managing sandboxes and agents"
@@ -120,6 +210,15 @@ class Config:
         300,
         int(os.getenv("TEMPLATE_IMAGE_RETENTION_SEC", "172800")),
     )
+    OBSERVABILITY_RETENTION_HOURS: int = max(
+        1,
+        min(168, int(os.getenv("OBSERVABILITY_RETENTION_HOURS", "24") or "24")),
+    )
+    OBSERVABILITY_SAMPLE_INTERVAL_SEC: float = max(
+        5.0,
+        float(os.getenv("OBSERVABILITY_SAMPLE_INTERVAL_SEC", "30.0") or "30.0"),
+    )
+    OBSERVABILITY_SAMPLER_ENABLED: bool = _env_bool("OBSERVABILITY_SAMPLER_ENABLED", True)
     # Optional S3-backed object storage for SDK template build context archives.
     # When disabled, uploads stay in the configured application database.
     IMAGE_BUILDING_AUTH_REQUIRED: bool = _env_bool("IMAGE_BUILDING_AUTH_REQUIRED", False)
@@ -270,15 +369,10 @@ class Config:
     WARM_POOL_COORDINATOR_LEASE_TTL_SEC: int = max(
         5, int(os.getenv("WARM_POOL_COORDINATOR_LEASE_TTL_SEC", "15"))
     )
-    RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO: float = min(
-        0.99,
-        max(0.10, float(os.getenv("RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO", "0.80"))),
-    )
     RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC: float = max(
         0.2,
         float(os.getenv("RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC", "2.0")),
     )
-    WARM_POOL_IMAGE_PREFETCH_ENABLED: bool = _env_bool("WARM_POOL_IMAGE_PREFETCH_ENABLED", True)
     # Per-``RUN`` exec timeout during parsed Dockerfile builds.
     TEMPLATE_DOCKERFILE_RUN_TIMEOUT_SEC: float = float(os.getenv("TEMPLATE_DOCKERFILE_RUN_TIMEOUT_SEC", "7200"))
     # Docker SDK HTTP timeout (``docker commit`` on large images can exceed 60s default).

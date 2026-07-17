@@ -58,6 +58,7 @@ Required secret keys:
 
 - `API_KEY`
 - `INTERNAL_API_KEY`
+- `ADMIN_API_KEY`
 - `PORTAL_SESSION_SECRET`
 - `DATABASE_TYPE`
 - `DATABASE_URL`

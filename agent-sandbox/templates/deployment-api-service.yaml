@@ -70,11 +70,21 @@ spec:
                 secretKeyRef:
                   name: {{ include "sndbx.secretName" . }}
                   key: INTERNAL_API_KEY
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sndbx.secretName" . }}
+                  key: ADMIN_API_KEY
             - name: RUNTIME_GATEWAY_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "sndbx.secretName" . }}
                   key: INTERNAL_API_KEY
+            - name: AUTH_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sndbx.secretName" . }}
+                  key: AUTH_JWT_SECRET
             - name: PORTAL_SESSION_SECRET
               valueFrom:
                 secretKeyRef:

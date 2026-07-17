@@ -4,12 +4,19 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Sandbox Console Login</title>
+    <script src="/portal/static/portal_theme.js"></script>
     <link rel="stylesheet" href="/portal/static/portal.css" />
   </head>
   <body class="portal-auth-body">
+    <button type="button" class="theme-toggle auth-theme-toggle" data-theme-toggle aria-label="Toggle dark mode" aria-pressed="false">
+      <span class="theme-toggle-mark" aria-hidden="true"></span>
+      <span class="theme-toggle-text">Dark</span>
+    </button>
     <main class="portal-auth-card">
       <div class="brand-block">
-        <div class="brand-mark">SNDBX</div>
+        <div class="brand-mark">
+          <img class="brand-logo" src="/portal/static/cxm_big.svg" alt="Sprinklr CXM" />
+        </div>
         <div class="brand-subtitle">Sandbox Operations</div>
       </div>
       <h1>{{ "Client Login" if mode == "login" else "Register Client" }}</h1>
@@ -17,6 +24,7 @@
       <div class="notice error">{{ error }}</div>
       {% endif %}
       <form method="post" action="{{ '/portal/login' if mode == 'login' else '/portal/register' }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <label>Email</label>
         <input type="email" name="email" required />
         {% if mode == "register" %}
@@ -24,16 +32,21 @@
         <input type="text" name="display_name" placeholder="Team or owner name" />
         {% endif %}
         <label>Password</label>
-        <input type="password" name="password" minlength="8" required />
+        <input type="password" name="password" {% if mode == "register" %}minlength="{{ password_min_length }}"{% endif %} required />
+        {% if mode == "login" and admin_login_enabled %}
+        <label>Admin API Key</label>
+        <input type="password" name="admin_api_key" autocomplete="off" />
+        {% endif %}
         <button type="submit">{{ "Login" if mode == "login" else "Create Client" }}</button>
       </form>
       <div class="switch-copy">
-        {% if mode == "login" %}
+        {% if mode == "login" and registration_enabled %}
         <a href="/portal/register">Need an account?</a>
-        {% else %}
+        {% elif mode != "login" %}
         <a href="/portal/login">Already registered?</a>
         {% endif %}
       </div>
     </main>
+    <script src="/portal/static/portal.js"></script>
   </body>
 </html>

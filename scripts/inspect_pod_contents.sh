@@ -14,9 +14,6 @@ set -euo pipefail
 #   GATEWAY_CONTAINER gateway (app) container name     (default: runtime-gateway; falls back to gateway)
 #   IMAGE_FILTER      optional grep -E filter for images (default: none)
 #   ALL_CONTAINERS    1 = include stopped sandboxes too  (default: 1)
-#   LIMIT_RATIO       disk usage limit ratio; if unset, read from the
-#                     live api-service env RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO
-#                     (fallback 0.80)
 
 NAMESPACE="${NAMESPACE:-sandboxes}"
 SELECTOR="${SELECTOR:-app=runtime-gateway}"
@@ -24,21 +21,9 @@ DOCKER_HOST_IN_POD="${DOCKER_HOST_IN_POD:-tcp://127.0.0.1:2375}"
 GATEWAY_CONTAINER="${GATEWAY_CONTAINER:-runtime-gateway}"
 IMAGE_FILTER="${IMAGE_FILTER:-}"
 ALL_CONTAINERS="${ALL_CONTAINERS:-1}"
-LIMIT_RATIO="${LIMIT_RATIO:-}"
 
 section() { printf '\n===== %s =====\n' "$1"; }
 
-# Resolve the disk usage limit ratio from the live api-service if not given.
-if [ -z "$LIMIT_RATIO" ]; then
-  api_pod="$(kubectl -n "$NAMESPACE" get pods -l app=api-service \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-  if [ -n "$api_pod" ]; then
-    LIMIT_RATIO="$(kubectl -n "$NAMESPACE" exec "$api_pod" -c api-service -- \
-      printenv RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO 2>/dev/null || true)"
-  fi
-fi
-LIMIT_RATIO="${LIMIT_RATIO:-0.80}"
-echo "RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO = ${LIMIT_RATIO}"
 echo "Docker endpoint inside dockerd sidecars = ${DOCKER_HOST_IN_POD}"
 
 fmt() {

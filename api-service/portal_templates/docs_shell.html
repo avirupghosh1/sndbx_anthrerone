@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ page.title }} - Sprinklr CXM Docs</title>
+    <script src="/portal/static/portal_theme.js"></script>
+    <link rel="stylesheet" href="/portal/static/portal.css" />
+    <script src="/portal/static/portal.js" defer></script>
+  </head>
+  <body class="portal-shell docs-shell">
+    <aside class="sidebar docs-sidebar">
+      <a class="logo-row docs-logo" href="/docs">
+        <img class="brand-logo" src="/portal/static/cxm_big.svg" alt="Sprinklr CXM" />
+      </a>
+      <div class="team-card">
+        <div class="team-label">DOC PORTAL</div>
+        <div class="team-name">{{ active_section.label }}</div>
+        <div class="docs-sidebar-note">{{ active_section.description|inline_code }}</div>
+      </div>
+
+      <nav class="docs-side-nav" aria-label="Documentation navigation">
+        {% for group in sidebar_groups %}
+        <section class="docs-nav-group">
+          {% if group.collapsible %}
+          <details class="docs-nav-disclosure" {% if group.open %}open{% endif %}>
+            <summary class="docs-nav-label docs-nav-toggle">
+              <span>{{ group.label }}</span>
+              <span class="docs-nav-caret" aria-hidden="true"></span>
+            </summary>
+            <div class="nav-block docs-nav-items">
+              {% for item in group.pages %}
+              <a class="nav-link {% if item.active %}active{% endif %}" href="{{ item.href }}">{{ item.title }}</a>
+              {% endfor %}
+            </div>
+          </details>
+          {% else %}
+          <div class="docs-nav-label">{{ group.label }}</div>
+          <div class="nav-block">
+            {% for item in group.pages %}
+            <a class="nav-link {% if item.active %}active{% endif %}" href="{{ item.href }}">{{ item.title }}</a>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </section>
+        {% endfor %}
+      </nav>
+
+      <div class="sidebar-footer docs-sidebar-actions">
+        <a class="ghost-button" href="/portal">Portal</a>
+      </div>
+    </aside>
+
+    <main class="content docs-content">
+      <header class="content-head docs-head">
+        <div>
+          <h1>CXM DOCS</h1>
+          <div class="meta-row">
+            <span class="live-pill">PUBLIC</span>
+            <span>API service reference</span>
+          </div>
+        </div>
+        <button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle dark mode" aria-pressed="false">
+          <span class="theme-toggle-mark" aria-hidden="true"></span>
+          <span class="theme-toggle-text">Dark</span>
+        </button>
+      </header>
+
+      <nav class="subtabs docs-tabs" aria-label="Documentation sections">
+        {% for item in top_nav %}
+        <a class="subtab {% if item.active %}active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+        {% endfor %}
+      </nav>
+
+      <div class="docs-layout">
+        <article class="docs-article">
+          <header class="docs-hero">
+            <div class="team-label">{{ active_section.label }}</div>
+            <h2>{{ page.title }}</h2>
+            <p>{{ page.description|inline_code }}</p>
+            {% if page.badges %}
+            <div class="docs-badges">
+              {% for badge in page.badges %}
+              <span class="status-pill success">{{ badge }}</span>
+              {% endfor %}
+            </div>
+            {% endif %}
+          </header>
+
+          {% for block in page.blocks %}
+            {% if block.type == "heading" %}
+            <h3 id="{{ block.id }}" class="docs-heading">{{ block.title }}</h3>
+            {% elif block.type == "paragraph" %}
+            <p>{{ block.text|inline_code }}</p>
+            {% elif block.type == "list" %}
+            <ul class="docs-list">
+              {% for item in block["items"] %}
+              <li>{{ item|inline_code }}</li>
+              {% endfor %}
+            </ul>
+            {% elif block.type == "cards" %}
+            <div class="docs-card-grid">
+              {% for card in block.cards %}
+              <a class="docs-card" href="{{ card.href }}">
+                <strong>{{ card.title }}</strong>
+                <span>{{ card.text|inline_code }}</span>
+              </a>
+              {% endfor %}
+            </div>
+            {% elif block.type == "code" %}
+            <section class="docs-code">
+              <div class="docs-code-head">
+                <span>{{ block.title }}</span>
+                <button type="button" class="ghost-button docs-copy" data-copy-text="{{ block.code }}">Copy</button>
+              </div>
+              <pre><code>{{ block.code }}</code></pre>
+            </section>
+            {% elif block.type == "table" %}
+            <div class="docs-table-wrap">
+              <table class="docs-table">
+                <thead>
+                  <tr>
+                    {% for header in block.headers %}
+                    <th>{{ header }}</th>
+                    {% endfor %}
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for row in block.rows %}
+                  <tr>
+                    {% for cell in row %}
+                    <td>{{ cell|inline_code }}</td>
+                    {% endfor %}
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% elif block.type == "methods" %}
+            <div class="docs-method-list">
+              {% for method in block.methods %}
+              <section class="docs-method">
+                <div>
+                  <strong>{{ method.name }}</strong>
+                  <code>{{ method.signature }}</code>
+                </div>
+                <p>{{ method.text|inline_code }}</p>
+              </section>
+              {% endfor %}
+            </div>
+            {% elif block.type == "endpoints" %}
+            <section id="{{ block.id }}" class="docs-endpoint-group">
+              <h3 class="docs-heading">{{ block.title }}</h3>
+              <div class="docs-endpoints">
+                {% for endpoint in block["items"] %}
+                <article class="docs-endpoint">
+                  <div class="docs-endpoint-main">
+                    <span class="method-chip method-{{ endpoint.method|lower|replace('/', '-')|replace(' ', '-') }}">{{ endpoint.method }}</span>
+                    {% if endpoint.href %}
+                    <a href="{{ endpoint.href }}"><code>{{ endpoint.path }}</code></a>
+                    {% else %}
+                    <code>{{ endpoint.path }}</code>
+                    {% endif %}
+                  </div>
+                  <p>{{ endpoint.summary|inline_code }}</p>
+                  <dl>
+                    <div>
+                      <dt>Auth</dt>
+                      <dd>{{ endpoint.auth|inline_code }}</dd>
+                    </div>
+                    {% if endpoint.request %}
+                    <div>
+                      <dt>Request</dt>
+                      <dd>{{ endpoint.request|inline_code }}</dd>
+                    </div>
+                    {% endif %}
+                    {% if endpoint.response %}
+                    <div>
+                      <dt>Response</dt>
+                      <dd>{{ endpoint.response|inline_code }}</dd>
+                    </div>
+                    {% endif %}
+                  </dl>
+                  {% if endpoint.example %}
+                  <section class="docs-code compact">
+                    <div class="docs-code-head">
+                      <span>Example</span>
+                      <button type="button" class="ghost-button docs-copy" data-copy-text="{{ endpoint.example }}">Copy</button>
+                    </div>
+                    <pre><code>{{ endpoint.example }}</code></pre>
+                  </section>
+                  {% endif %}
+                </article>
+                {% endfor %}
+              </div>
+            </section>
+            {% elif block.type == "api_detail" %}
+            {% set endpoint = block.endpoint %}
+            <section class="api-detail">
+              <div class="api-route-strip">
+                <div>
+                  <span class="method-chip method-{{ endpoint.method|lower|replace('/', '-')|replace(' ', '-') }}">{{ endpoint.method }}</span>
+                  <code>{{ endpoint.path }}</code>
+                </div>
+              </div>
+
+              <section class="docs-code api-curl-box">
+                <div class="docs-code-head">
+                  <span>cURL</span>
+                  <button type="button" class="ghost-button docs-copy" data-copy-text="{{ endpoint.curl }}">Copy</button>
+                </div>
+                <pre><code>{{ endpoint.curl }}</code></pre>
+              </section>
+
+              <section class="api-response-box">
+                <div class="api-response-tabs" role="tablist" aria-label="Response status codes">
+                  {% for response in endpoint.responses %}
+                  <button type="button" class="api-response-tab {% if loop.first %}active{% endif %}" data-response-target="{{ endpoint.dom_id }}-{{ loop.index }}">{{ response.code }}</button>
+                  {% endfor %}
+                </div>
+                <div class="api-response-panels">
+                  {% for response in endpoint.responses %}
+                  <article class="api-response-panel {% if loop.first %}active{% endif %}" data-response-panel="{{ endpoint.dom_id }}-{{ loop.index }}">
+                    <div class="api-response-head">
+                      <strong>{{ response.code }} {{ response.title }}</strong>
+                      <span>{{ response.description|inline_code }}</span>
+                    </div>
+                    <pre><code>{{ response.schema }}</code></pre>
+                    {% if response.fields %}
+                    <div class="api-field-table-wrap compact">
+                      <table class="api-field-table">
+                        <thead>
+                          <tr>
+                            <th>Field</th>
+                            <th>Type</th>
+                            <th>Required</th>
+                            <th>Description</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% for field in response.fields %}
+                          <tr>
+                            <td><code>{{ field.name }}</code></td>
+                            <td>{{ field.type|inline_code }}</td>
+                            <td>{{ "Yes" if field.required else "No" }}</td>
+                            <td>{{ field.description|inline_code }}</td>
+                          </tr>
+                          {% endfor %}
+                        </tbody>
+                      </table>
+                    </div>
+                    {% endif %}
+                  </article>
+                  {% endfor %}
+                </div>
+              </section>
+
+              <section class="api-doc-section">
+                <h3 id="authorization" class="docs-heading">Authorization</h3>
+                {% if endpoint.auth %}
+                <div class="api-field-table-wrap">
+                  <table class="api-field-table">
+                    <thead>
+                      <tr>
+                        <th>Header</th>
+                        <th>Type</th>
+                        <th>Required</th>
+                        <th>Description</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for field in endpoint.auth %}
+                      <tr>
+                        <td><code>{{ field.name }}</code></td>
+                        <td>{{ field.type|inline_code }}</td>
+                        <td>{{ "Yes" if field.required else "No" }}</td>
+                        <td>{{ field.description|inline_code }}{% if field.default %}<div class="api-field-default">Default: <code>{{ field.default }}</code></div>{% endif %}</td>
+                      </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+                {% else %}
+                <p>No authorization header is required for this endpoint.</p>
+                {% endif %}
+              </section>
+
+              {% if endpoint.path_params %}
+              <section class="api-doc-section">
+                <h3 id="path-parameters" class="docs-heading">Path Parameters</h3>
+                <div class="api-field-table-wrap">
+                  <table class="api-field-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Required</th>
+                        <th>Description</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for field in endpoint.path_params %}
+                      <tr>
+                        <td><code>{{ field.name }}</code></td>
+                        <td>{{ field.type|inline_code }}</td>
+                        <td>{{ "Yes" if field.required else "No" }}</td>
+                        <td>{{ field.description|inline_code }}</td>
+                      </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+              {% endif %}
+
+              {% if endpoint.query_params %}
+              <section class="api-doc-section">
+                <h3 id="query-parameters" class="docs-heading">Query Parameters</h3>
+                <div class="api-field-table-wrap">
+                  <table class="api-field-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Required</th>
+                        <th>Description</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for field in endpoint.query_params %}
+                      <tr>
+                        <td><code>{{ field.name }}</code></td>
+                        <td>{{ field.type|inline_code }}</td>
+                        <td>{{ "Yes" if field.required else "No" }}</td>
+                        <td>{{ field.description|inline_code }}{% if field.default %}<div class="api-field-default">Default: <code>{{ field.default }}</code></div>{% endif %}</td>
+                      </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+              {% endif %}
+
+              {% if endpoint.body_params %}
+              <section class="api-doc-section">
+                <h3 id="body" class="docs-heading">Body</h3>
+                <div class="api-field-table-wrap">
+                  <table class="api-field-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Required</th>
+                        <th>Description</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for field in endpoint.body_params %}
+                      <tr>
+                        <td><code>{{ field.name }}</code></td>
+                        <td>{{ field.type|inline_code }}</td>
+                        <td>{{ "Yes" if field.required else "No" }}</td>
+                        <td>{{ field.description|inline_code }}{% if field.default %}<div class="api-field-default">Default: <code>{{ field.default }}</code></div>{% endif %}</td>
+                      </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+                {% if endpoint.body_example %}
+                <section class="docs-code compact">
+                  <div class="docs-code-head">
+                    <span>Body example</span>
+                    <button type="button" class="ghost-button docs-copy" data-copy-text="{{ endpoint.body_example }}">Copy</button>
+                  </div>
+                  <pre><code>{{ endpoint.body_example }}</code></pre>
+                </section>
+                {% endif %}
+              </section>
+              {% endif %}
+
+              <section class="api-doc-section">
+                <h3 id="responses" class="docs-heading">Responses</h3>
+                <p>Use the status tabs above for exact response examples. Successful responses show operation-specific fields; error responses use the API-service error envelope with `detail`, and compatibility helpers may also include `code` or `message`.</p>
+              </section>
+            </section>
+            {% endif %}
+          {% endfor %}
+        </article>
+
+        <aside class="docs-toc" aria-label="On this page">
+          <div class="rail-label">ON THIS PAGE</div>
+          {% if toc %}
+          <nav>
+            {% for item in toc %}
+            <a href="#{{ item.id }}">{{ item.title }}</a>
+            {% endfor %}
+          </nav>
+          {% else %}
+          <p>No sections.</p>
+          {% endif %}
+        </aside>
+      </div>
+    </main>
+  </body>
+</html>

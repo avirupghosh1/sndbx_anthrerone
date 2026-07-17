@@ -29,11 +29,7 @@ TEMPLATE_ALIAS = "python:3.11"
 
 def resolve_template_id(env_name: str) -> str:
     env_name = env_name.strip().lower()
-    template_id = f"{TEMPLATE_ALIAS}-{env_name}"
-    if env_name == "dev":
-        username = re.sub(r"[^a-z0-9-]", "-", getpass.getuser().lower()).strip("-")
-        if username:
-            template_id = f"{template_id}-{username}"
+    template_id = TEMPLATE_ALIAS
     return template_id
 
 
@@ -174,7 +170,7 @@ async def main() -> int:
     )
     parser.add_argument(
         "--local-api-key",
-        default="sbx_Ns2qdbDAOYtN8ckESsTmCQ0Y285DnWzO",
+        default="sbx_nUW4EzXAiklLtsb01vMmHUesT1mJtbc9",
         help="Local sandbox API key.",
     )
     parser.add_argument(

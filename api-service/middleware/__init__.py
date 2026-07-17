@@ -2,12 +2,19 @@
 
 from .auth import (
     ApiKeyPrincipal,
+    ClientAuthError,
     add_api_key,
+    admin_api_key_is_valid,
     api_key_prefix,
+    authenticate_api_key_value,
+    authenticate_client_credential,
+    authenticate_jwt_value,
     ensure_bootstrap_client_and_key,
     hash_api_key,
+    issue_access_token,
     remove_api_key,
     validate_api_key,
+    validate_admin_api_key,
     validate_internal_api_key,
 )
 from .errors import (
@@ -28,10 +35,17 @@ from .tenant import ensure_sandbox_access, ensure_template_access, public_templa
 
 __all__ = [
     "validate_api_key",
+    "validate_admin_api_key",
     "validate_internal_api_key",
+    "admin_api_key_is_valid",
     "ApiKeyPrincipal",
+    "ClientAuthError",
     "hash_api_key",
     "api_key_prefix",
+    "authenticate_api_key_value",
+    "authenticate_client_credential",
+    "authenticate_jwt_value",
+    "issue_access_token",
     "ensure_bootstrap_client_and_key",
     "ensure_sandbox_access",
     "ensure_template_access",

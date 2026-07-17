@@ -18,8 +18,14 @@
 {{- if and (not .Values.secrets.create) (eq $secretName "") -}}
 {{- fail "set secrets.name to an existing Kubernetes Secret or enable secrets.create" -}}
 {{- end -}}
-{{- if and .Values.secrets.create (or (eq (default "" .Values.secrets.data.apiKey) "") (eq (default "" .Values.secrets.data.internalApiKey) "") (eq (default "" .Values.secrets.data.portalSessionSecret) "") (eq (default "" .Values.secrets.data.databaseUrl) "") (eq (default "" .Values.secrets.data.databaseType) "") (eq (default "" .Values.secrets.data.databasePassword) "")) -}}
-{{- fail "secrets.create=true requires non-empty api/internal/portal and database url/type/password secret values" -}}
+{{- if and .Values.secrets.create (or (eq (default "" .Values.secrets.data.apiKey) "") (eq (default "" .Values.secrets.data.internalApiKey) "") (eq (default "" .Values.secrets.data.adminApiKey) "") (eq (default "" .Values.secrets.data.authJwtSecret) "") (eq (default "" .Values.secrets.data.portalSessionSecret) "") (eq (default "" .Values.secrets.data.databaseUrl) "") (eq (default "" .Values.secrets.data.databaseType) "") (eq (default "" .Values.secrets.data.databasePassword) "")) -}}
+{{- fail "secrets.create=true requires non-empty api/internal/admin/jwt/portal and database url/type/password secret values" -}}
+{{- end -}}
+{{- if and .Values.secrets.create (or (lt (len (default "" .Values.secrets.data.apiKey)) 32) (lt (len (default "" .Values.secrets.data.internalApiKey)) 32) (lt (len (default "" .Values.secrets.data.adminApiKey)) 32) (lt (len (default "" .Values.secrets.data.authJwtSecret)) 32) (lt (len (default "" .Values.secrets.data.portalSessionSecret)) 32)) -}}
+{{- fail "secrets.create=true requires API_KEY, INTERNAL_API_KEY, ADMIN_API_KEY, AUTH_JWT_SECRET, and PORTAL_SESSION_SECRET to be at least 32 characters" -}}
+{{- end -}}
+{{- if and .Values.secrets.create (or (eq (default "" .Values.secrets.data.adminApiKey) (default "" .Values.secrets.data.apiKey)) (eq (default "" .Values.secrets.data.adminApiKey) (default "" .Values.secrets.data.internalApiKey))) -}}
+{{- fail "ADMIN_API_KEY must be independent from API_KEY and INTERNAL_API_KEY" -}}
 {{- end -}}
 {{- if eq (len .Values.ingress.apiHosts) 0 -}}
 {{- fail "ingress.apiHosts must contain at least one host" -}}

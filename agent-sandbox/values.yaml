@@ -151,6 +151,11 @@ runtimeGateway:
 
 config:
   apiService:
+    ENVIRONMENT: "production"
+    CORS_ALLOW_CREDENTIALS: "false"
+    AUTH_BEARER_API_KEYS_ENABLED: "true"
+    PORTAL_REGISTRATION_ENABLED: "false"
+    PORTAL_SESSION_TTL_HOURS: "12"
     API_SERVICE_ROLE: "control"
     SANDBOX_ENGINE: "docker"
     SANDBOX_RUNTIME: "docker"
@@ -180,6 +185,9 @@ config:
     SANDBOX_LOST_RETENTION_SEC: "86400"
     RUNTIME_EXITED_CONTAINER_RETENTION_SEC: "1800"
     TEMPLATE_IMAGE_RETENTION_SEC: "172800"
+    OBSERVABILITY_RETENTION_HOURS: "24"
+    OBSERVABILITY_SAMPLE_INTERVAL_SEC: "30.0"
+    OBSERVABILITY_SAMPLER_ENABLED: "true"
     # Isolation defaults to plain Docker (runc). gVisor is opt-in per release:
     # set SANDBOX_ISOLATION=gvisor (or SANDBOX_DOCKER_OCI_RUNTIME=runsc). The
     # images.dockerDind image is gVisor-capable either way (runsc unused under runc).
@@ -216,9 +224,7 @@ config:
     API_SERVICE_INSTANCE_ID: ""
     WARM_POOL_COORDINATOR_LEASE_NAME: "warm-pool-coordinator"
     WARM_POOL_COORDINATOR_LEASE_TTL_SEC: "15"
-    RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO: "0.80"
     RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC: "2.0"
-    WARM_POOL_IMAGE_PREFETCH_ENABLED: "true"
     IMAGE_BUILDING_AUTH_REQUIRED: "{{ .Values.imageBuilding.authRequired }}"
     IMAGE_BUILDING_S3_PREFIX: "{{ .Values.imageBuilding.s3.prefix }}"
     IMAGE_BUILDING_S3_ENDPOINT_URL: "{{ .Values.imageBuilding.s3.endpointUrl }}"
@@ -301,6 +307,8 @@ secrets:
   data:
     apiKey: ""
     internalApiKey: ""
+    adminApiKey: ""
+    authJwtSecret: ""
     portalSessionSecret: ""
     databaseType: ""
     databaseUrl: ""

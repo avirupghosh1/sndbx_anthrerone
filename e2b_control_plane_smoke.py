@@ -19,7 +19,7 @@ os.environ["E2B_API_KEY"] = API_KEY
 os.environ["E2B_VALIDATE_API_KEY"] = "false"
 
 RUN_ID = os.environ.get("SMOKE_RUN_ID") or str(int(time.time()))
-TEMPLATE_NAME = os.environ.get("TEMPLATE_NAME", "e2b-python-1783")
+TEMPLATE_NAME = os.environ.get("TEMPLATE_NAME", "e2b-python-template-smoke-1784208305-copy-unsupported")
 SANDBOX_TIMEOUT = int(os.environ.get("SANDBOX_TIMEOUT", "900"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "300"))
 

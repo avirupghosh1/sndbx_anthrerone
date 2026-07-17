@@ -4,12 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Sandbox Console</title>
+    <script src="/portal/static/portal_theme.js"></script>
     <link rel="stylesheet" href="/portal/static/portal.css" />
   </head>
   <body class="portal-shell">
     {% macro popover(text, class_name='truncate-text', code_style=false) -%}
       <details class="value-popover {{ 'code-popover' if code_style else '' }}">
-        <summary class="{{ class_name }}" title="Click to expand">{{ text or '-' }}</summary>
+        <summary class="{{ class_name }}" title="Click to expand">{{ (text or '-')|portal_clip }}</summary>
         <div class="popover-overlay">
           <label class="popover-backdrop" for=""></label>
           <div class="popover-card" role="dialog" aria-modal="true">
@@ -24,7 +25,9 @@
     {%- endmacro %}
 
     <aside class="sidebar">
-      <div class="logo-row">SNDBX</div>
+      <div class="logo-row">
+        <img class="brand-logo" src="/portal/static/cxm_big.svg" alt="Sprinklr CXM" />
+      </div>
       <div class="team-card">
         <div class="team-label">TEAM</div>
         <div class="team-name">{{ client.display_name or client.email }}</div>
@@ -36,6 +39,7 @@
       </nav>
       <div class="sidebar-footer">
         <form method="post" action="/portal/logout">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
           <button class="ghost-button" type="submit">Logout</button>
         </form>
       </div>
@@ -45,13 +49,17 @@
       <header class="content-head">
         <div>
           <h1>
-            {% if active_section == "sandboxes" %}SANDBOXES{% elif active_section == "api_keys" %}API KEYS{% else %}TEMPLATES{% endif %}
+            {% if active_section == "sandboxes" %}SANDBOXES{% elif active_section == "api_keys" %}API KEYS{% elif active_section == "observability" %}OBSERVABILITY{% else %}TEMPLATES{% endif %}
           </h1>
           <div class="meta-row">
-            <span class="live-pill">LIVE</span>
+            <span class="live-pill">{{ observability.summary.status|upper if active_section == "observability" else "LIVE" }}</span>
             <span>{{ running_count }} concurrent sandboxes</span>
           </div>
         </div>
+        <button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle dark mode" aria-pressed="false">
+          <span class="theme-toggle-mark" aria-hidden="true"></span>
+          <span class="theme-toggle-text">Dark</span>
+        </button>
       </header>
 
       {% if active_section == "templates" %}
@@ -62,14 +70,373 @@
       {% endif %}
 
       {% if new_api_key %}
-      <section class="notice success">
-        <strong>New API Key</strong>
-        <code>{{ new_api_key }}</code>
-        <div>This value is only shown once. Use it as the client `X-API-Key` for `api-service`.</div>
-      </section>
+      <div class="portal-modal auto-open-modal" data-modal="api-key" aria-hidden="false">
+        <div class="modal-backdrop" data-modal-close></div>
+        <section class="modal-card api-key-modal" role="dialog" aria-modal="true" aria-labelledby="api-key-title">
+          <div class="modal-head">
+            <div>
+              <h2 id="api-key-title">New API Key</h2>
+              <p>This value is shown once.</p>
+            </div>
+            <button type="button" class="modal-close" data-modal-close aria-label="Close">Close</button>
+          </div>
+          <div class="one-time-key">
+            <code>{{ new_api_key }}</code>
+            <button type="button" class="ghost-button copy-button" data-copy-text="{{ new_api_key }}">Copy</button>
+          </div>
+        </section>
+      </div>
       {% endif %}
 
-      {% if active_section == "sandboxes" %}
+      {% if active_section == "observability" %}
+      <div class="subtabs observability-subtabs">
+        <a class="subtab {% if observability.active_tab == 'gateways' %}active{% endif %}" href="/portal/admin/observability/gateways">Gateways</a>
+        <a class="subtab {% if observability.active_tab == 'health' %}active{% endif %}" href="/portal/admin/observability/health">Health</a>
+        <a class="subtab {% if observability.active_tab == 'events' %}active{% endif %}" href="/portal/admin/observability/events">Events</a>
+      </div>
+      {% if observability.active_tab == "gateways" %}
+      <section class="observability-section">
+        <div class="section-head">
+          <h2>Gateway Load</h2>
+          <span>{{ observability.gateways|length }} RUNTIME PODS</span>
+        </div>
+        <div class="gateway-grid gateway-grid-large">
+          {% for gateway in observability.gateways %}
+          <button type="button" class="gateway-tile gateway-action" data-gateway-detail="gateway-{{ loop.index }}">
+            <div class="gateway-tile-layout">
+              <div class="metric-grid gateway-metric-rail">
+                <div><span>CPU</span><strong>{{ gateway.cpu_millicores }}m</strong></div>
+                <div><span>MEM</span><strong>{{ gateway.memory_display }}</strong></div>
+                <div><span>RUN</span><strong>{{ gateway.running_sandbox_count }}</strong></div>
+                <div><span>WARM</span><strong>{{ gateway.warm_sandbox_count }}</strong></div>
+              </div>
+              <div class="gateway-tile-main">
+                <div class="tile-head">
+                  <div>
+                    <div class="tile-title">{{ gateway.gateway_instance_id or 'gateway' }}</div>
+                    <div class="tile-sub">ordinal {{ gateway.ordinal }} · {{ gateway.phase }}</div>
+                  </div>
+                  <span class="status-pill {{ gateway.status_class }}">{{ gateway.status }}</span>
+                </div>
+                <div class="gateway-chart-grid">
+                  <div class="sparkline-row gateway-chart">
+                    <span>cpu</span>
+                    <svg class="sparkline" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+                      <polyline points="{{ gateway.cpu_sparkline }}"></polyline>
+                    </svg>
+                  </div>
+                  <div class="sparkline-row gateway-chart">
+                    <span>memory</span>
+                    <svg class="sparkline" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+                      <polyline points="{{ gateway.memory_sparkline }}"></polyline>
+                    </svg>
+                  </div>
+                </div>
+                <div class="gateway-disk-row">
+                  <div class="disk-line">
+                    <span>docker graph</span>
+                    <strong>{{ gateway.disk_percent }}%</strong>
+                  </div>
+                  <meter class="meter" min="0" max="100" value="{{ gateway.disk_percent }}"></meter>
+                  <div class="tile-foot">
+                    <span>{{ gateway.disk_display }}</span>
+                    <span>delete cost {{ gateway.deletion_cost }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </button>
+          <div class="portal-modal" data-modal="gateway-{{ loop.index }}" aria-hidden="true">
+            <div class="modal-backdrop" data-modal-close></div>
+            <section class="modal-card gateway-modal" role="dialog" aria-modal="true">
+              <div class="modal-head">
+                <div>
+                  <h2>{{ gateway.gateway_instance_id or 'gateway' }}</h2>
+                  <p>{{ gateway.phase }} · {{ gateway.pod_ip or 'no pod IP' }}</p>
+                </div>
+                <button type="button" class="modal-close" data-modal-close aria-label="Close">Close</button>
+              </div>
+              <div class="modal-metrics">
+                <div><span>Status</span><strong>{{ gateway.status }}</strong></div>
+                <div><span>CPU</span><strong>{{ gateway.cpu_millicores }}m</strong></div>
+                <div><span>Memory</span><strong>{{ gateway.memory_display }}</strong></div>
+                <div><span>Disk</span><strong>{{ gateway.disk_display }}</strong></div>
+                <div><span>Running</span><strong>{{ gateway.running_sandbox_count }}</strong></div>
+                <div><span>Warm</span><strong>{{ gateway.warm_sandbox_count }}</strong></div>
+                <div><span>Ordinal</span><strong>{{ gateway.ordinal }}</strong></div>
+                <div><span>Delete Cost</span><strong>{{ gateway.deletion_cost }}</strong></div>
+                <div><span>Docker Graph</span><strong>{{ gateway.disk_percent }}%</strong></div>
+              </div>
+              <div class="gateway-detail-grid">
+                <div>
+                  <span>Gateway ID</span>
+                  <strong>{{ gateway.gateway_instance_id or '-' }}</strong>
+                </div>
+                <div>
+                  <span>Pod IP</span>
+                  <strong>{{ gateway.pod_ip or '-' }}</strong>
+                </div>
+                <div>
+                  <span>Phase</span>
+                  <strong>{{ gateway.phase or '-' }}</strong>
+                </div>
+                <div>
+                  <span>Deletion Timestamp</span>
+                  <strong>{{ gateway.deletion_timestamp or '-' }}</strong>
+                </div>
+              </div>
+              <div class="gateway-sandbox-section">
+                <div class="section-head compact">
+                  <h2>Sandboxes</h2>
+                  <span>{{ gateway.sandboxes|length }} INSIDE</span>
+                </div>
+                {% if gateway.sandboxes %}
+                <div class="gateway-sandbox-scroll">
+                  <table class="ops-table gateway-sandbox-table">
+                    <thead>
+                      <tr>
+                        <th>Sandbox</th>
+                        <th>Template</th>
+                        <th>State</th>
+                        <th>Runtime</th>
+                        <th>CPU</th>
+                        <th>Mem</th>
+                        <th>TTL</th>
+                        <th>Placement</th>
+                        <th>Flag</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for sandbox in gateway.sandboxes %}
+                      <tr>
+                        <td>{{ popover(sandbox.sandbox_id, 'id-text', true) }}</td>
+                        <td>{{ popover(sandbox.template_id or '-') }}</td>
+                        <td><span class="status-pill">{{ sandbox.state }}</span></td>
+                        <td>{{ sandbox.runtime or '-' }}</td>
+                        <td>{{ sandbox.cpu_limit }}</td>
+                        <td>{{ sandbox.memory_limit }}</td>
+                        <td class="mono-cell" title="{{ sandbox.lease_expires_at }}">{{ sandbox.ttl_remaining }}</td>
+                        <td>{{ popover(sandbox.placement or '-', 'id-text', true) }}</td>
+                        <td><span class="status-pill sandbox-flag {{ sandbox.flag_class }}">{{ sandbox.flag }}</span></td>
+                      </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+                {% else %}
+                <div class="empty-state">No running sandboxes are assigned to this gateway.</div>
+                {% endif %}
+              </div>
+            </section>
+          </div>
+          {% endfor %}
+        </div>
+      </section>
+      {% elif observability.active_tab == "health" %}
+      <section class="observability-layout">
+        <aside class="observability-rail">
+          <div class="rail-block">
+            <div class="rail-label">GLOBAL HEALTH</div>
+            <span class="status-pill {{ 'success' if observability.summary.status == 'healthy' else 'neutral' }}">{{ observability.summary.status }}</span>
+          </div>
+          <div class="rail-block">
+            <div class="rail-label">CONTROL PLANE</div>
+            <div class="rail-value">{{ observability.summary.control_plane.execution_kind }}</div>
+            <div class="rail-note">{{ observability.summary.control_plane.api_service_role }}</div>
+          </div>
+          <div class="rail-block">
+            <div class="rail-label">GATEWAYS</div>
+            <div class="rail-value">{{ observability.summary.gateways.reachable }} / {{ observability.summary.gateways.total }}</div>
+            <div class="rail-note">reachable</div>
+          </div>
+          <div class="rail-block">
+            <div class="rail-label">REGISTRY</div>
+            <span class="status-pill {{ 'success' if observability.summary.registry.status == 'healthy' else 'neutral' }}">{{ observability.summary.registry.status }}</span>
+            <div class="rail-note">{{ observability.summary.registry.unavailable }} unavailable refs</div>
+          </div>
+          <div class="rail-block">
+            <div class="rail-label">WARM POOLS</div>
+            <div class="rail-value">{{ observability.summary.warm_pools.total_deficit }}</div>
+            <div class="rail-note">total deficit</div>
+          </div>
+          <div class="rail-block">
+            <div class="rail-label">IMAGES</div>
+            <div class="rail-value">{{ observability.summary.image_repair.missing }}</div>
+            <div class="rail-note">missing image refs</div>
+          </div>
+          <div class="rail-block">
+            <div class="rail-label">RECENT ERRORS</div>
+            <div class="rail-value">{{ observability.summary.recent_errors|length }}</div>
+            <div class="rail-note">last hour</div>
+          </div>
+        </aside>
+
+        <div class="observability-main health-main">
+          <section class="observability-section split-section health-stack">
+            <div class="obs-panel">
+              <div class="section-head">
+                <h2>Warm Pools</h2>
+                <span>{{ observability.warm_pools|length }} SEGMENTS</span>
+              </div>
+              <div class="table-wrap">
+                <table class="ops-table obs-table warm-pool-table">
+                  <thead>
+                    <tr>
+                      <th>Pool</th>
+                      <th>Status</th>
+                      <th>Ready</th>
+                      <th>Inflight</th>
+                      <th>Deficit</th>
+                      <th>Preferred</th>
+                      <th>Oldest Lease</th>
+                      <th>Error</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for pool in observability.warm_pools %}
+                    <tr>
+                      <td>{{ popover(pool.warm_pool_key, 'id-text', true) }}</td>
+                      <td><span class="status-pill {{ pool.status_class }}">{{ pool.status }}</span></td>
+                      <td>{{ pool.ready_count }} / {{ pool.desired_size }}</td>
+                      <td>{{ pool.inflight_count }}</td>
+                      <td>
+                        <span>{{ pool.deficit }}</span>
+                        <svg class="sparkline mini" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+                          <polyline points="{{ pool.deficit_sparkline }}"></polyline>
+                        </svg>
+                      </td>
+                      <td>{{ popover(pool.preferred_gateway_instance_id or '-', 'id-text', true) }}</td>
+                      <td title="{{ pool.oldest_warm_lease or '-' }}">{{ pool.oldest_warm_lease or '-' }}</td>
+                      <td>{{ popover(pool.last_error or '-', 'table-action') }}</td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="obs-panel">
+              <div class="section-head">
+                <h2>Template Images</h2>
+                <span>{{ observability.templates|length }} TEMPLATES</span>
+              </div>
+              <div class="table-wrap">
+                <table class="ops-table obs-table image-table">
+                  <thead>
+                    <tr>
+                      <th>Template</th>
+                      <th>Status</th>
+                      <th>Registry</th>
+                      <th>Gateway</th>
+                      <th>Live Owners</th>
+                      <th>Error</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for template in observability.templates %}
+                    <tr>
+                      <td>{{ popover(template.template_alias or template.template_id) }}</td>
+                      <td><span class="status-pill {{ template.status_class }}">{{ template.status }}</span></td>
+                      <td>{{ popover(template.registry_image_ref or '-', 'id-text', true) }}</td>
+                      <td>{{ popover(template.materialized_gateway_instance_id or '-', 'id-text', true) }}</td>
+                      <td>{{ popover(template.live_gateways|join(', ') or '-', 'id-text', true) }}</td>
+                      <td>{{ popover(template.build_error or '-', 'table-action') }}</td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+      {% else %}
+      <section class="observability-section">
+            <div class="section-head">
+              <h2>Event Timeline</h2>
+              <span>{{ observability.events|length }} EVENTS</span>
+            </div>
+            <form class="event-filters" method="get" action="/portal/admin/observability/events">
+              <label class="search-box">
+                <input class="event-search" name="q" value="{{ observability.events_filters.search }}" type="search" placeholder="Search events..." autocomplete="off" aria-label="Search observability events" />
+                <kbd>/</kbd>
+              </label>
+              <select class="event-filter" name="severity" data-event-filter="severity" aria-label="Filter severity">
+                <option value="">All severities</option>
+                <option value="error" {% if observability.events_filters.severity == 'error' %}selected{% endif %}>Error</option>
+                <option value="warning" {% if observability.events_filters.severity == 'warning' %}selected{% endif %}>Warning</option>
+                <option value="info" {% if observability.events_filters.severity == 'info' %}selected{% endif %}>Info</option>
+              </select>
+              <select class="event-filter" name="category" data-event-filter="category" aria-label="Filter category">
+                <option value="">All categories</option>
+                <option value="scheduler" {% if observability.events_filters.category == 'scheduler' %}selected{% endif %}>Scheduler</option>
+                <option value="warm_pool" {% if observability.events_filters.category == 'warm_pool' %}selected{% endif %}>Warm Pool</option>
+                <option value="sandbox" {% if observability.events_filters.category == 'sandbox' %}selected{% endif %}>Sandbox</option>
+                <option value="image" {% if observability.events_filters.category == 'image' %}selected{% endif %}>Image</option>
+                <option value="reconcile" {% if observability.events_filters.category == 'reconcile' %}selected{% endif %}>Reconcile</option>
+              </select>
+              <label class="toggle-field">
+                <input type="checkbox" name="error_only" value="true" {% if observability.events_filters.error_only %}checked{% endif %} />
+                <span>Error only</span>
+              </label>
+              <button type="submit">Apply</button>
+            </form>
+            <div class="table-wrap">
+              <table class="ops-table obs-table event-table" data-event-table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Severity</th>
+                    <th>Category</th>
+                    <th>Action</th>
+                    <th>Entity</th>
+                    <th>Gateway</th>
+                    <th>Template</th>
+                    <th>Sandbox</th>
+                    <th>Message</th>
+                    <th>Metadata</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for event in observability.events %}
+                  <tr data-severity="{{ event.severity }}" data-category="{{ event.category }}">
+                    <td title="{{ event.timestamp }}">{{ event.timestamp_display }}</td>
+                    <td><span class="status-pill {{ event.status_class }}">{{ event.severity }}</span></td>
+                    <td>{{ event.category }}</td>
+                    <td>{{ event.action }}</td>
+                    <td>{{ popover((event.entity_type ~ ':' ~ event.entity_id) if event.entity_id else event.entity_type, 'id-text', true) }}</td>
+                    <td>{{ popover(event.gateway_instance_id or '-', 'id-text', true) }}</td>
+                    <td>{{ popover(event.template_id or '-', 'id-text', true) }}</td>
+                    <td>{{ popover(event.sandbox_id or '-', 'id-text', true) }}</td>
+                    <td>{{ popover(event.message or '-') }}</td>
+                    <td><button type="button" class="table-action button-reset" data-event-metadata="{{ event.metadata_pretty|e }}">view</button></td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            <div class="pagination-row">
+              {% if observability.events_filters.page > 1 %}
+              <a class="ghost-button" href="/portal/admin/observability/events?page={{ observability.events_filters.page - 1 }}&q={{ observability.events_filters.search }}&severity={{ observability.events_filters.severity }}&category={{ observability.events_filters.category }}{% if observability.events_filters.error_only %}&error_only=true{% endif %}">Previous</a>
+              {% endif %}
+              <span>Page {{ observability.events_filters.page }}</span>
+              {% if observability.events_filters.has_next %}
+              <a class="ghost-button" href="/portal/admin/observability/events?page={{ observability.events_filters.page + 1 }}&q={{ observability.events_filters.search }}&severity={{ observability.events_filters.severity }}&category={{ observability.events_filters.category }}{% if observability.events_filters.error_only %}&error_only=true{% endif %}">Next</a>
+              {% endif %}
+            </div>
+          </section>
+      <div class="portal-modal" data-modal="event-metadata" aria-hidden="true">
+        <div class="modal-backdrop" data-modal-close></div>
+        <section class="modal-card" role="dialog" aria-modal="true">
+          <div class="modal-head">
+            <div><h2>Event Metadata</h2></div>
+            <button type="button" class="modal-close" data-modal-close aria-label="Close">Close</button>
+          </div>
+          <pre class="metadata-view"></pre>
+        </section>
+      </div>
+      {% endif %}
+      {% elif active_section == "sandboxes" %}
       <section class="table-panel">
         <div class="list-toolbar">
           <label class="search-box">
@@ -123,6 +490,9 @@
       </section>
       {% elif active_section == "api_keys" %}
       <section class="table-panel">
+        {% if api_key_error %}
+        <div class="notice error compact">{{ api_key_error }}</div>
+        {% endif %}
         <div class="list-toolbar split">
           <label class="search-box">
             <input class="table-search" type="search" placeholder="Search by name or prefix..." autocomplete="off" aria-label="Search API keys" />
@@ -130,6 +500,7 @@
           </label>
           <div class="row-count">{{ api_keys|length }} API KEYS</div>
           <form class="create-form" method="post" action="/portal/api-keys">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <input type="text" name="name" placeholder="Key name" required />
             <button type="submit">Create API Key</button>
           </form>
@@ -157,6 +528,7 @@
                 <td>
                   {% if not key.revoked_at %}
                   <form method="post" action="/portal/api-keys/{{ key.key_id }}/revoke">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                     <button class="ghost-button" type="submit">Revoke</button>
                   </form>
                   {% endif %}
@@ -180,6 +552,7 @@
           <table class="ops-table build-table" data-filter-table>
             <thead>
               <tr>
+                <th>Actions</th>
                 <th>Template</th>
                 <th>Build ID</th>
                 <th>Status</th>
@@ -192,7 +565,13 @@
             </thead>
             <tbody>
               {% for row in build_rows %}
-              <tr class="build-click-row" tabindex="0" aria-expanded="false">
+              <tr>
+                <td class="build-actions-cell">
+                  <div class="action-strip build-actions">
+                    <button type="button" class="ghost-button build-action" data-build-id="{{ row.build_id }}" data-build-modal="progress">Progress</button>
+                    <button type="button" class="ghost-button build-action" data-build-id="{{ row.build_id }}" data-build-modal="logs">Logs</button>
+                  </div>
+                </td>
                 <td>{{ popover(row.template_id) }}</td>
                 <td>{{ popover(row.build_id, 'id-text', true) }}</td>
                 <td><span class="status-pill {% if row.status == 'failed' %}danger{% elif row.status == 'success' %}success{% endif %}">{{ row.status }}</span></td>
@@ -202,23 +581,44 @@
                 <td title="{{ row.created_at }}">{{ row.created_at_display }}</td>
                 <td title="{{ row.completed_at or '-' }}">{{ row.completed_at_display }}</td>
               </tr>
-              <tr class="build-detail-row" hidden>
-                <td colspan="8">
-                  <div class="build-detail">
-                    <div class="build-detail-head">
-                      <span>Build details</span>
-                      <span class="muted-code">{{ row.build_id }}</span>
-                    </div>
-                    {% if row.error_text %}
-                    <div class="notice error compact">{{ row.error_text }}</div>
-                    {% endif %}
-                    <pre>{{ row.build_log or "No build log captured." }}</pre>
-                  </div>
-                </td>
-              </tr>
               {% endfor %}
             </tbody>
           </table>
+        </div>
+        <div class="portal-modal" data-modal="build-progress" aria-hidden="true">
+          <div class="modal-backdrop" data-modal-close></div>
+          <section class="modal-card build-progress-modal" role="dialog" aria-modal="true">
+            <div class="modal-head">
+              <div>
+                <h2 data-build-title>Build progress</h2>
+                <p data-build-subtitle></p>
+              </div>
+              <button type="button" class="modal-close" data-modal-close aria-label="Close">Close</button>
+            </div>
+            <div class="progress-summary">
+              <span class="status-pill" data-build-status>loading</span>
+              <strong data-build-phase>Loading</strong>
+            </div>
+            <progress class="progress-meter" data-build-progress max="100" value="0"></progress>
+            <div class="progress-percent" data-build-percent>0%</div>
+            <div class="latest-comment" data-build-comment></div>
+          </section>
+        </div>
+        <div class="portal-modal" data-modal="build-logs" aria-hidden="true">
+          <div class="modal-backdrop" data-modal-close></div>
+          <section class="modal-card build-logs-modal" role="dialog" aria-modal="true">
+            <div class="modal-head">
+              <div>
+                <h2 data-build-title>Build logs</h2>
+                <p data-build-subtitle></p>
+              </div>
+              <div class="modal-actions">
+                <button type="button" class="ghost-button copy-logs-button">Copy</button>
+                <button type="button" class="modal-close" data-modal-close aria-label="Close">Close</button>
+              </div>
+            </div>
+            <div class="log-viewer" data-log-viewer></div>
+          </section>
         </div>
       </section>
       {% else %}
@@ -239,8 +639,8 @@
                 <th>Base Image</th>
                 <th>Snapshot</th>
                 <th>Registry</th>
-                <th>Start</th>
-                <th>Ready</th>
+                <th>Start cmd</th>
+                <th>Ready cmd</th>
                 <th>Created</th>
                 <th>Updated</th>
                 <th>Visibility</th>
@@ -269,68 +669,6 @@
       </section>
       {% endif %}
     </main>
-    <script>
-      document.addEventListener("click", function (event) {
-        const closeButton = event.target.closest(".popover-close");
-        if (closeButton) {
-          const details = closeButton.closest(".value-popover");
-          if (details) details.removeAttribute("open");
-          return;
-        }
-        const backdrop = event.target.closest(".popover-backdrop");
-        if (backdrop) {
-          const details = backdrop.closest(".value-popover");
-          if (details) details.removeAttribute("open");
-        }
-      });
-      document.addEventListener("toggle", function (event) {
-        const current = event.target;
-        if (!current.matches(".value-popover") || !current.open) return;
-        document.querySelectorAll(".value-popover[open]").forEach(function (details) {
-          if (details !== current) details.removeAttribute("open");
-        });
-      }, true);
-      document.querySelectorAll(".table-panel").forEach(function (panel) {
-        const input = panel.querySelector(".table-search");
-        const table = panel.querySelector("[data-filter-table]");
-        if (!input || !table) return;
-        const rows = Array.from(table.querySelectorAll("tbody tr:not(.build-detail-row)"));
-        input.addEventListener("input", function () {
-          const needle = input.value.trim().toLowerCase();
-          rows.forEach(function (row) {
-            const detail = row.nextElementSibling && row.nextElementSibling.classList.contains("build-detail-row")
-              ? row.nextElementSibling
-              : null;
-            const haystack = ((row.textContent || "") + " " + (detail ? detail.textContent || "" : "")).toLowerCase();
-            const shouldHide = needle !== "" && !haystack.includes(needle);
-            row.hidden = shouldHide;
-            if (detail) detail.hidden = shouldHide || row.getAttribute("aria-expanded") !== "true";
-          });
-        });
-      });
-      document.querySelectorAll(".build-click-row").forEach(function (row) {
-        function toggleBuildRow(event) {
-          if (event && event.target.closest(".value-popover")) return;
-          const detail = row.nextElementSibling;
-          if (!detail || !detail.classList.contains("build-detail-row")) return;
-          const nextOpen = row.getAttribute("aria-expanded") !== "true";
-          row.setAttribute("aria-expanded", String(nextOpen));
-          detail.hidden = !nextOpen;
-        }
-        row.addEventListener("click", toggleBuildRow);
-        row.addEventListener("keydown", function (event) {
-          if (event.key !== "Enter" && event.key !== " ") return;
-          event.preventDefault();
-          toggleBuildRow(event);
-        });
-      });
-      document.addEventListener("keydown", function (event) {
-        if (event.key !== "/" || event.target.matches("input, textarea")) return;
-        const input = document.querySelector(".table-search");
-        if (!input) return;
-        event.preventDefault();
-        input.focus();
-      });
-    </script>
+    <script src="/portal/static/portal.js"></script>
   </body>
 </html>

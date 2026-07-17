@@ -106,11 +106,21 @@ spec:
                 secretKeyRef:
                   name: sandbox-secrets
                   key: INTERNAL_API_KEY
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: ADMIN_API_KEY
             - name: RUNTIME_GATEWAY_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: sandbox-secrets
                   key: INTERNAL_API_KEY
+            - name: AUTH_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-secrets
+                  key: AUTH_JWT_SECRET
             - name: PORTAL_SESSION_SECRET
               valueFrom:
                 secretKeyRef:
@@ -174,6 +184,11 @@ metadata:
   name: api-service-config
   namespace: sandboxes
 data:
+  ENVIRONMENT: "development"
+  CORS_ALLOW_CREDENTIALS: "false"
+  AUTH_BEARER_API_KEYS_ENABLED: "true"
+  PORTAL_REGISTRATION_ENABLED: "true"
+  PORTAL_SESSION_TTL_HOURS: "720"
   API_SERVICE_ROLE: "control"
   SANDBOX_ENGINE: "docker"
   SANDBOX_RUNTIME: "docker"
@@ -202,6 +217,9 @@ data:
   SANDBOX_LOST_RETENTION_SEC: "86400"
   RUNTIME_EXITED_CONTAINER_RETENTION_SEC: "1800"
   TEMPLATE_IMAGE_RETENTION_SEC: "172800"
+  OBSERVABILITY_RETENTION_HOURS: "24"
+  OBSERVABILITY_SAMPLE_INTERVAL_SEC: "30.0"
+  OBSERVABILITY_SAMPLER_ENABLED: "true"
   SANDBOX_ISOLATION: "docker"
   SANDBOX_DOCKER_OCI_RUNTIME: ""
   SANDBOX_WARM_POOL_SIZE: "2"
@@ -239,9 +257,7 @@ data:
   API_SERVICE_INSTANCE_ID: ""
   WARM_POOL_COORDINATOR_LEASE_NAME: "warm-pool-coordinator"
   WARM_POOL_COORDINATOR_LEASE_TTL_SEC: "15"
-  RUNTIME_GATEWAY_DISK_USAGE_LIMIT_RATIO: "0.80"
   RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC: "2.0"
-  WARM_POOL_IMAGE_PREFETCH_ENABLED: "true"
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
