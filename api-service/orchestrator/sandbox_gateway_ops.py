@@ -27,6 +27,12 @@ def _clamp_pod_deletion_cost(value: int) -> int:
 
 
 class SandboxGatewayOpsMixin:
+    def _runtime_gateway_targets_authoritative(self) -> bool:
+        mode = str(
+            getattr(self._config, "RUNTIME_GATEWAY_TARGET_DISCOVERY_MODE", "static") or "static"
+        ).strip().lower()
+        return mode in ("kubernetes", "k8s")
+
     def _statefulset_scale_down_aware(self) -> bool:
         return bool(getattr(self._config, "RUNTIME_GATEWAY_STATEFULSET_SCALE_DOWN_AWARE", False))
 
@@ -156,19 +162,44 @@ class SandboxGatewayOpsMixin:
     def warm_pool_key(self, template_id: str, cpu_limit: str, memory_limit: str, timeout: int) -> str:
         return warm_pool_key_string(template_id, cpu_limit, memory_limit, int(timeout))
 
-    def is_warm_pool_leader(self) -> bool:
+    def is_warm_pool_leader(self, *, force_refresh: bool = False) -> bool:
         cfg = self._config
         lease_name = str(getattr(cfg, "WARM_POOL_COORDINATOR_LEASE_NAME", "warm-pool-coordinator"))
-        if bool(getattr(cfg, "WARM_POOL_USE_K8S_LEASE", True)):
-            try:
-                from .k8s_leader_election import KubernetesLeaseClient
+        ttl = max(5.0, float(getattr(cfg, "WARM_POOL_COORDINATOR_LEASE_TTL_SEC", 15) or 15))
+        leader_refresh = max(1.0, min(ttl / 3.0, ttl - 1.0))
+        follower_refresh = max(1.0, min(leader_refresh, 2.0))
+        now = time.monotonic()
+        with self._warm_pool_leader_lock:
+            if not force_refresh and now < self._warm_pool_leader_next_check_at:
+                return bool(self._warm_pool_leader_value)
 
-                client = KubernetesLeaseClient(cfg)
-                if client.available():
-                    return client.try_acquire_or_renew(lease_name)
-            except Exception:
-                logger.debug("Kubernetes Lease warm-pool leadership failed; falling back to DB lock", exc_info=True)
-        return self.db.acquire_advisory_lock(lease_name)
+            is_leader = False
+            next_check = now + follower_refresh
+            if bool(getattr(cfg, "WARM_POOL_USE_K8S_LEASE", True)):
+                try:
+                    from .k8s_leader_election import KubernetesLeaseClient
+
+                    client = self._warm_pool_lease_client
+                    if client is None:
+                        client = KubernetesLeaseClient(cfg)
+                        self._warm_pool_lease_client = client
+                    if client.available():
+                        is_leader = bool(client.try_acquire_or_renew(lease_name))
+                        next_check = now + (leader_refresh if is_leader else follower_refresh)
+                    else:
+                        is_leader = bool(self.db.acquire_advisory_lock(lease_name))
+                        next_check = now + (leader_refresh if is_leader else follower_refresh)
+                except Exception:
+                    logger.debug("Kubernetes Lease warm-pool leadership failed; falling back to DB lock", exc_info=True)
+                    is_leader = bool(self.db.acquire_advisory_lock(lease_name))
+                    next_check = now + (leader_refresh if is_leader else follower_refresh)
+            else:
+                is_leader = bool(self.db.acquire_advisory_lock(lease_name))
+                next_check = now + (leader_refresh if is_leader else follower_refresh)
+
+            self._warm_pool_leader_value = is_leader
+            self._warm_pool_leader_next_check_at = next_check
+            return is_leader
 
     def _gateway_headers(self) -> Dict[str, str]:
         key = (getattr(self._config, "RUNTIME_GATEWAY_API_KEY", None) or "").strip()
@@ -683,6 +714,7 @@ class SandboxGatewayOpsMixin:
         template_row: Optional[Dict[str, Any]],
         extra_warm_counts_by_gateway: Optional[Dict[str, int]] = None,
         force_refresh: bool = True,
+        require_reachable: bool = True,
     ) -> Optional[GatewayTarget]:
         targets = self._gateway_targets()
         if not targets:
@@ -693,7 +725,10 @@ class SandboxGatewayOpsMixin:
         owner_instance = str(row.get("materialized_gateway_instance_id") or "").strip()
         if owner_instance and not registry_ref:
             pinned = target_for_instance(targets, owner_instance)
-            if pinned is not None and self._gateway_can_accept_new_usage(pinned, force_refresh=force_refresh):
+            if pinned is not None and (
+                not require_reachable
+                or self._gateway_can_accept_new_usage(pinned, force_refresh=force_refresh)
+            ):
                 logger.info(
                     "Scheduler decision: reason=template_owner gateway=%s template=%s",
                     pinned.instance_id,
@@ -742,16 +777,17 @@ class SandboxGatewayOpsMixin:
         candidate_details: list[dict[str, Any]] = []
         scale_down_aware = self._statefulset_scale_down_aware()
         for target in candidate_targets:
-            status = self._gateway_runtime_status(target, force_refresh=force_refresh)
-            if not status.get("reachable"):
-                candidate_details.append(
-                    {
-                        "gateway_instance_id": target.instance_id,
-                        "reachable": False,
-                        "reason": status.get("error") or "unreachable",
-                    }
-                )
-                continue
+            if require_reachable:
+                status = self._gateway_runtime_status(target, force_refresh=force_refresh)
+                if not status.get("reachable"):
+                    candidate_details.append(
+                        {
+                            "gateway_instance_id": target.instance_id,
+                            "reachable": False,
+                            "reason": status.get("error") or "unreachable",
+                        }
+                    )
+                    continue
             warm_count = len(inventory.get(target.instance_id, [])) + int(
                 (extra_warm_counts_by_gateway or {}).get(target.instance_id) or 0
             )

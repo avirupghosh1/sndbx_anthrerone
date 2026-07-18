@@ -1,7 +1,9 @@
 """FastAPI application."""
 
+import asyncio
 import logging
 from pathlib import Path
+import time
 
 from dotenv import load_dotenv
 
@@ -25,7 +27,7 @@ from middleware import (
     APIException,
     ensure_bootstrap_client_and_key,
 )
-from handlers import auth, sandboxes, commands, files, agents, templates, compat_dispatch, e2b_compat, daytona_compat, sandbox_extensions, guest_connection, sandbox_envd, internal_routing, docs_portal, portal, admin_observability
+from handlers import auth, sandboxes, commands, files, agents, templates, compat_dispatch, e2b_compat, daytona_compat, sandbox_extensions, guest_connection, guest_proxy, sandbox_envd, internal_routing, docs_portal, portal, admin_observability
 from handlers.daytona_ssh_gateway import start_daytona_ssh_gateway, stop_daytona_ssh_gateway
 from handlers.modal_compat_gateway import start_modal_compat_gateway, stop_modal_compat_gateway
 
@@ -121,6 +123,7 @@ app.include_router(sandbox_extensions.router)
 app.include_router(agents.router)
 app.include_router(templates.router)
 app.include_router(guest_connection.router)
+app.include_router(guest_proxy.router)
 app.include_router(sandbox_envd.router)
 app.include_router(internal_routing.router)
 app.include_router(docs_portal.router)
@@ -145,7 +148,19 @@ async def health_check():
 
 @app.get("/ready")
 async def readiness_check():
-    """Cheap readiness endpoint for service endpoints."""
+    """Readiness endpoint for service endpoints.
+
+    This stays independent of runtime-gateway and database-heavy diagnostics, but
+    it verifies that the asyncio thread executor can accept work. Sandbox creates
+    run through that executor; if it is wedged, the pod must leave Service
+    endpoints instead of accepting requests that will sit forever.
+    """
+    ready_timeout = float(getattr(config, "API_READY_EXECUTOR_TIMEOUT_SEC", 0.75) or 0.75)
+    try:
+        await asyncio.wait_for(asyncio.to_thread(time.monotonic), timeout=ready_timeout)
+    except asyncio.TimeoutError as ex:
+        logger.error("API readiness failed: executor heartbeat timed out after %.3fs", ready_timeout)
+        raise HTTPException(status_code=503, detail="API executor is not accepting work") from ex
     return {
         "status": "ready",
         "version": config.API_VERSION,

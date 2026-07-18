@@ -9,6 +9,7 @@ from . import e2b_compat
 from . import daytona_compat
 from . import sandbox_extensions
 from . import guest_connection
+from . import guest_proxy
 from . import sandbox_envd
 from . import internal_routing
 from . import docs_portal
@@ -25,6 +26,7 @@ __all__ = [
     "daytona_compat",
     "sandbox_extensions",
     "guest_connection",
+    "guest_proxy",
     "sandbox_envd",
     "internal_routing",
     "docs_portal",

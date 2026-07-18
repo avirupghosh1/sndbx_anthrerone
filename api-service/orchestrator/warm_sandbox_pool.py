@@ -195,6 +195,7 @@ class WarmSandboxPool:
         timeout: int,
         owner_client_id: Optional[str] = None,
         owner_api_key_id: Optional[str] = None,
+        wait_for_ready: bool = True,
     ) -> Optional[str]:
         if self._size <= 0:
             return None
@@ -202,7 +203,11 @@ class WarmSandboxPool:
             return None
         if _compatible_pool_shape(template_id, cpu_limit, memory_limit) != self.pool_key:
             return None
-        wait_sec = float(getattr(self._manager._config, "SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC", 0.0) or 0.0)
+        wait_sec = (
+            float(getattr(self._manager._config, "SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC", 0.0) or 0.0)
+            if wait_for_ready
+            else 0.0
+        )
         deadline = time.monotonic() + wait_sec
         claimed = None
         waited_for_ready = False
@@ -713,6 +718,7 @@ class MultiWarmSandboxPool:
         timeout: int,
         owner_client_id: Optional[str] = None,
         owner_api_key_id: Optional[str] = None,
+        wait_for_ready: bool = True,
     ) -> Optional[str]:
         key: PoolKey = _compatible_pool_shape(template_id, cpu_limit, memory_limit)
         with self._pools_lock:
@@ -756,6 +762,7 @@ class MultiWarmSandboxPool:
             timeout,
             owner_client_id=owner_client_id,
             owner_api_key_id=owner_api_key_id,
+            wait_for_ready=wait_for_ready,
         )
 
     def discard(self, sandbox_id: str) -> None:

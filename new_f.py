@@ -16,15 +16,15 @@ try:
 except Exception:  # noqa: BLE001
     E2BAsyncSandbox = None
 
-ROOT = Path(__file__).resolve().parent
-MY_SDK_ROOT = ROOT / "intern_1strepo" / "my_sandbox_sdk"
+ROOT = Path(__file__).resolve().parent.parent
+MY_SDK_ROOT = ROOT / "my_sandbox_sdk"
 if (MY_SDK_ROOT / "my_sdk").is_dir():
     sys.path.insert(0, str(MY_SDK_ROOT))
 
 from my_sdk.api import APIEndpoints
 from my_sdk.api.async_client import AsyncAPIClient
 
-TEMPLATE_ALIAS = "python:3.11"
+TEMPLATE_ALIAS = "custodian-agentlib-sandbox-dev-avirup-ghosh"
 
 
 def resolve_template_id(env_name: str) -> str:
@@ -84,7 +84,6 @@ async def probe_local_ready(
     if not sid:
         return
     api = AsyncAPIClient(api_url.rstrip("/"), api_key, request_timeout=request_timeout)
-    internal = AsyncAPIClient(api_url.rstrip("/"), internal_api_key, request_timeout=request_timeout)
     started = time.perf_counter()
     try:
         envd = await api.get(f"/sandboxes/{sid}/envd-connection")
@@ -102,15 +101,15 @@ async def probe_local_ready(
     for port in (49983, 8765):
         started = time.perf_counter()
         try:
-            route = await internal.get(f"/internal/sandboxes/{sid}/route", params={"port": port})
+            route = await api.get(f"/sandboxes/{sid}/connection", params={"port": port, "scheme": "ws"})
             print(
-                f"local_probe sandbox_id={sid} probe=route port={port} "
-                f"seconds={time.perf_counter() - started:.3f} ok=true upstream={route.get('upstream_http', '-')}",
+                f"local_probe sandbox_id={sid} probe=connection port={port} "
+                f"seconds={time.perf_counter() - started:.3f} ok=true host={route.get('data_plane_host', '-')}",
                 flush=True,
             )
         except Exception as ex:  # noqa: BLE001
             print(
-                f"local_probe sandbox_id={sid} probe=route port={port} "
+                f"local_probe sandbox_id={sid} probe=connection port={port} "
                 f"seconds={time.perf_counter() - started:.3f} ok=false error={type(ex).__name__}:{ex}",
                 flush=True,
             )

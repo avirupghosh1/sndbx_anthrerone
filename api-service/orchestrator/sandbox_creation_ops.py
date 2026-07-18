@@ -251,12 +251,15 @@ class SandboxCreationOpsMixin:
                 valid_ready_count = self.warm_pool_ready_count(warm_key)
                 first_pool_request = valid_ready_count <= 0
                 if first_pool_request and self.execution.get_backend_kind() in ("docker", "gvisor"):
+                    trust_gateway_targets = self._runtime_gateway_targets_authoritative()
                     seed_target = self._select_gateway_target_for_pool(
                         template_id=tid,
                         cpu_limit=cpu_limit,
                         memory_limit=memory_limit,
                         timeout=int(timeout),
                         template_row=tpl,
+                        force_refresh=not trust_gateway_targets,
+                        require_reachable=not trust_gateway_targets,
                     )
                     if seed_target is not None:
                         self.note_warm_pool_segment(
@@ -288,6 +291,7 @@ class SandboxCreationOpsMixin:
                             desired_size=int(desired_warm_pool_size),
                         )
             if pool_managed_template and not first_pool_request:
+                wait_for_warm_pool = requested_warm_pool_size is None
                 sid = pool.try_acquire(
                     tid,
                     metadata,
@@ -296,18 +300,26 @@ class SandboxCreationOpsMixin:
                     int(timeout),
                     owner_client_id=owner_client_id,
                     owner_api_key_id=owner_api_key_id,
+                    wait_for_ready=wait_for_warm_pool,
                 )
                 if sid:
                     return sid
-                wait_sec = float(getattr(cfg, "SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC", 0.0) or 0.0)
-                segment_after = self.db.get_warm_pool_segment(warm_key) if warm_key else None
-                err = str((segment_after or {}).get("last_error") or "").strip()
-                self._last_create_error = (
-                    f"Timed out after {wait_sec:.1f}s waiting for a warm sandbox for template {tid!r}"
-                    + (f": {err}" if err else "")
-                )
-                logger.warning(self._last_create_error)
-                return None
+                if not wait_for_warm_pool:
+                    logger.info(
+                        "Warm pool empty for template %r after desired_size=%s update; falling back to cold create",
+                        tid,
+                        desired_warm_pool_size,
+                    )
+                else:
+                    wait_sec = float(getattr(cfg, "SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC", 0.0) or 0.0)
+                    segment_after = self.db.get_warm_pool_segment(warm_key) if warm_key else None
+                    err = str((segment_after or {}).get("last_error") or "").strip()
+                    self._last_create_error = (
+                        f"Timed out after {wait_sec:.1f}s waiting for a warm sandbox for template {tid!r}"
+                        + (f": {err}" if err else "")
+                    )
+                    logger.warning(self._last_create_error)
+                    return None
             sid = self._create_sandbox_fresh(
                 template_id=tid,
                 metadata=metadata,
@@ -364,6 +376,7 @@ class SandboxCreationOpsMixin:
                 int(timeout),
                 owner_client_id=owner_client_id,
                 owner_api_key_id=owner_api_key_id,
+                wait_for_ready=requested_warm_pool_size is None,
             )
             if sid:
                 return sid
@@ -429,12 +442,15 @@ class SandboxCreationOpsMixin:
                 template_row=tpl,
             )
         elif runtime in ("docker", "gvisor") and int(getattr(self._config, "SANDBOX_WARM_POOL_SIZE", 0) or 0) > 0:
+            trust_gateway_targets = self._runtime_gateway_targets_authoritative()
             chosen_target = self._select_gateway_target_for_pool(
                 template_id=(template_id or "").strip(),
                 cpu_limit=cpu_limit,
                 memory_limit=memory_limit,
                 timeout=int(timeout),
                 template_row=tpl,
+                force_refresh=not trust_gateway_targets,
+                require_reachable=not trust_gateway_targets,
             )
         elif runtime in ("docker", "gvisor") and tpl:
             chosen_target = self._gateway_target_for_template_row(tpl)

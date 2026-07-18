@@ -213,8 +213,14 @@ class SandboxMaintenanceOpsMixin:
     def _repair_missing_template_image(self, template_id: str, row: Dict[str, Any]) -> Optional[str]:
         return self._template_images.repair_missing_image(template_id, row)
 
-    def _ensure_template_runtime_image(self, template_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
-        return self._template_images.ensure(template_id, row)
+    def _ensure_template_runtime_image(
+        self,
+        template_id: str,
+        row: Dict[str, Any],
+        *,
+        verify_live: bool = False,
+    ) -> Dict[str, Any]:
+        return self._template_images.ensure(template_id, row, verify_live=verify_live)
 
     def _image_for_gateway_target(
         self,

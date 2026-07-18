@@ -1,5 +1,9 @@
 """Generic sandbox endpoints used by the local SDK."""
 
+import asyncio
+import logging
+import threading
+import time
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,6 +30,7 @@ from orchestrator import SandboxManager
 from orchestrator.sandbox_connections import enrich_sandbox_response
 
 router = APIRouter(prefix="/sandboxes", tags=["sandboxes"])
+logger = logging.getLogger(__name__)
 
 
 def strip_secret_metadata(metadata: Any) -> dict:
@@ -141,18 +146,90 @@ async def create_sandbox_row(
         principal,
         request.template_id,
     )
-    sandbox_id = await run_io(
-        sandbox_manager.create_sandbox,
-        resolved_template_id,
-        metadata,
-        request.cpu_limit,
-        request.memory_limit,
-        request.timeout,
-        from_snapshot_image,
-        principal.client_id,
-        principal.key_id,
-        request.warmpool_size,
+    queue_timeout = float(
+        getattr(sandbox_manager._config, "SANDBOX_CREATE_QUEUE_TIMEOUT_SEC", 2.0) or 2.0
     )
+    request_timeout = float(
+        getattr(sandbox_manager._config, "SANDBOX_CREATE_REQUEST_TIMEOUT_SEC", 120.0) or 0.0
+    )
+    create_started = threading.Event()
+    create_started_at = time.monotonic()
+
+    def _create() -> Optional[str]:
+        create_started.set()
+        return sandbox_manager.create_sandbox(
+            resolved_template_id,
+            metadata,
+            request.cpu_limit,
+            request.memory_limit,
+            request.timeout,
+            from_snapshot_image,
+            principal.client_id,
+            principal.key_id,
+            request.warmpool_size,
+        )
+
+    logger.info(
+        "Sandbox create requested template_id=%r resolved_template_id=%r owner_client_id=%r warm_pool_size=%r timeout=%s",
+        request.template_id,
+        resolved_template_id,
+        principal.client_id,
+        request.warmpool_size,
+        request.timeout,
+    )
+    create_task = asyncio.create_task(run_io(_create))
+    try:
+        if queue_timeout > 0:
+            sandbox_id = await asyncio.wait_for(asyncio.shield(create_task), timeout=queue_timeout)
+        else:
+            sandbox_id = await asyncio.shield(create_task)
+    except asyncio.TimeoutError:
+        if not create_started.is_set():
+            create_task.cancel()
+            logger.error(
+                "Sandbox create rejected because worker queue did not start within %.3fs template_id=%r owner_client_id=%r",
+                queue_timeout,
+                resolved_template_id,
+                principal.client_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Sandbox create capacity is temporarily unavailable; retry shortly.",
+            ) from None
+
+        if request_timeout <= 0:
+            sandbox_id = await create_task
+        else:
+            remaining = max(0.1, request_timeout - queue_timeout)
+            try:
+                sandbox_id = await asyncio.wait_for(asyncio.shield(create_task), timeout=remaining)
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - create_started_at
+
+                def _log_late_completion(task: asyncio.Task) -> None:
+                    try:
+                        late_sid = task.result()
+                    except Exception as ex:  # noqa: BLE001
+                        logger.error("Late sandbox create failed after HTTP timeout: %s", ex)
+                        return
+                    logger.warning(
+                        "Late sandbox create completed after HTTP timeout sandbox_id=%s template_id=%r elapsed=%.3fs",
+                        late_sid or "-",
+                        resolved_template_id,
+                        time.monotonic() - create_started_at,
+                    )
+
+                create_task.add_done_callback(_log_late_completion)
+                logger.error(
+                    "Sandbox create timed out after %.3fs template_id=%r owner_client_id=%r",
+                    elapsed,
+                    resolved_template_id,
+                    principal.client_id,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="Sandbox create did not complete before the API timeout; retry shortly.",
+                ) from None
 
     if not sandbox_id:
         hint = sandbox_manager.describe_docker_workload_blocker()

@@ -64,6 +64,10 @@ class SandboxManager(
         self._gateway_status_lock = threading.Lock()
         self._gateway_image_cache: Dict[tuple[str, str], tuple[float, bool]] = {}
         self._gateway_image_cache_lock = threading.Lock()
+        self._warm_pool_leader_lock = threading.Lock()
+        self._warm_pool_leader_value = False
+        self._warm_pool_leader_next_check_at = 0.0
+        self._warm_pool_lease_client: Optional[Any] = None
         self._recent_created_rows: Dict[str, Dict[str, Any]] = {}
         self._recent_created_rows_lock = threading.Lock()
         self._lease_reaper_stop = threading.Event()

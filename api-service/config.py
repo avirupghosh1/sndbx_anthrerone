@@ -281,7 +281,7 @@ class Config:
     )
     SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC: float = max(
         0.0,
-        float(os.getenv("SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC", "12.0")),
+        float(os.getenv("SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC", "0.0")),
     )
     SANDBOX_WARM_POOL_INFLIGHT_STALE_SEC: float = max(
         30.0,
@@ -363,6 +363,10 @@ class Config:
     RUNTIME_GATEWAY_SERVICE_PORT: int = int(os.getenv("RUNTIME_GATEWAY_SERVICE_PORT", "8080"))
     RUNTIME_GATEWAY_TARGETS_JSON: str = (os.getenv("RUNTIME_GATEWAY_TARGETS_JSON") or "").strip()
     API_SERVICE_INSTANCE_ID: str = (os.getenv("API_SERVICE_INSTANCE_ID") or os.getenv("HOSTNAME") or "api-service").strip()
+    API_READY_EXECUTOR_TIMEOUT_SEC: float = max(
+        0.05,
+        min(5.0, float(os.getenv("API_READY_EXECUTOR_TIMEOUT_SEC", "0.75") or "0.75")),
+    )
     WARM_POOL_COORDINATOR_LEASE_NAME: str = (
         os.getenv("WARM_POOL_COORDINATOR_LEASE_NAME") or "warm-pool-coordinator"
     ).strip()
@@ -552,7 +556,13 @@ class Config:
     # Docker/gVisor cold creates get a short create-time readiness budget; if the guest is still
     # booting, data-plane route lookup continues waiting so the first client request does not fail.
     SANDBOX_COLD_CREATE_READY_WAIT_SEC: float = max(
-        0.0, float(os.getenv("SANDBOX_COLD_CREATE_READY_WAIT_SEC", "0.5") or "0.5")
+        0.0, float(os.getenv("SANDBOX_COLD_CREATE_READY_WAIT_SEC", "0.0") or "0.0")
+    )
+    SANDBOX_CREATE_QUEUE_TIMEOUT_SEC: float = max(
+        0.1, float(os.getenv("SANDBOX_CREATE_QUEUE_TIMEOUT_SEC", "2.0") or "2.0")
+    )
+    SANDBOX_CREATE_REQUEST_TIMEOUT_SEC: float = max(
+        0.0, float(os.getenv("SANDBOX_CREATE_REQUEST_TIMEOUT_SEC", "120.0") or "120.0")
     )
     SANDBOX_ROUTE_READY_WAIT_SEC: float = max(
         0.0, float(os.getenv("SANDBOX_ROUTE_READY_WAIT_SEC", "12.0") or "12.0")

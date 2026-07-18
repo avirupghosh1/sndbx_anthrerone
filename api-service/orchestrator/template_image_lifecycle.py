@@ -405,11 +405,14 @@ class TemplateImageLifecycle:
         self.manager.sync_warm_pool_default_segment(template_id, rebuilt)
         return rebuilt
 
-    def ensure(self, template_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    def ensure(self, template_id: str, row: Dict[str, Any], *, verify_live: bool = True) -> Dict[str, Any]:
         warm_ref = (row.get("warm_snapshot_image") or "").strip()
         registry_ref = (row.get("registry_image_ref") or "").strip()
         owner_instance = (row.get("materialized_gateway_instance_id") or "").strip()
         source_kind = (row.get("source_kind") or "").strip().lower()
+
+        if registry_ref and not verify_live:
+            return row
 
         owner_target = target_for_instance(self.manager._gateway_targets(), owner_instance)
         local_target = (
@@ -545,6 +548,17 @@ class TemplateImageLifecycle:
             return image
         warm_ref = str(row.get("warm_snapshot_image") or "").strip()
         registry_ref = str(row.get("registry_image_ref") or "").strip()
+        if image == registry_ref:
+            return image
+        if registry_ref:
+            logger.info(
+                "Template %s using registry image on gateway=%s for request-time create: requested=%s registry=%s",
+                template_id,
+                target.instance_id,
+                image or "-",
+                registry_ref,
+            )
+            return registry_ref
         if image and self.manager._gateway_has_image(target, image, force_refresh=True):
             return image
         if registry_ref and registry_ref != image and self.registry_image_exists(target, registry_ref):
