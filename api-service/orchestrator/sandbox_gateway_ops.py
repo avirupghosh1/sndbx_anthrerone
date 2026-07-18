@@ -159,6 +159,15 @@ class SandboxGatewayOpsMixin:
     def is_warm_pool_leader(self) -> bool:
         cfg = self._config
         lease_name = str(getattr(cfg, "WARM_POOL_COORDINATOR_LEASE_NAME", "warm-pool-coordinator"))
+        if bool(getattr(cfg, "WARM_POOL_USE_K8S_LEASE", True)):
+            try:
+                from .k8s_leader_election import KubernetesLeaseClient
+
+                client = KubernetesLeaseClient(cfg)
+                if client.available():
+                    return client.try_acquire_or_renew(lease_name)
+            except Exception:
+                logger.debug("Kubernetes Lease warm-pool leadership failed; falling back to DB lock", exc_info=True)
         return self.db.acquire_advisory_lock(lease_name)
 
     def _gateway_headers(self) -> Dict[str, str]:

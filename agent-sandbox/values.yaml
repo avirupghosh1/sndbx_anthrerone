@@ -223,6 +223,7 @@ config:
     RUNTIME_GATEWAY_SERVICE_PORT: "{{ .Values.service.runtimeGateway.httpPort }}"
     API_SERVICE_INSTANCE_ID: ""
     WARM_POOL_COORDINATOR_LEASE_NAME: "warm-pool-coordinator"
+    WARM_POOL_USE_K8S_LEASE: "true"
     WARM_POOL_COORDINATOR_LEASE_TTL_SEC: "15"
     RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC: "2.0"
     IMAGE_BUILDING_AUTH_REQUIRED: "{{ .Values.imageBuilding.authRequired }}"

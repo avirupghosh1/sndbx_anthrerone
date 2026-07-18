@@ -366,6 +366,10 @@ class Config:
     WARM_POOL_COORDINATOR_LEASE_NAME: str = (
         os.getenv("WARM_POOL_COORDINATOR_LEASE_NAME") or "warm-pool-coordinator"
     ).strip()
+    WARM_POOL_USE_K8S_LEASE: bool = _env_bool("WARM_POOL_USE_K8S_LEASE", True)
+    WARM_POOL_COORDINATOR_LEASE_NAMESPACE: str = (
+        os.getenv("WARM_POOL_COORDINATOR_LEASE_NAMESPACE") or ""
+    ).strip()
     WARM_POOL_COORDINATOR_LEASE_TTL_SEC: int = max(
         5, int(os.getenv("WARM_POOL_COORDINATOR_LEASE_TTL_SEC", "15"))
     )
