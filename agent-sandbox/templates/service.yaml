@@ -1,10 +1,10 @@
 apiVersion: {{ .Values.api.service | quote }}
 kind: Service
 metadata:
-  name: {{ include "sndbx.apiServiceName" . }}
+  name: {{ include "agent-sandbox.apiServiceName" . }}
   namespace: {{ .Values.namespace }}
   labels:
-{{ include "sndbx.labels" . | indent 4 }}
+{{ include "agent-sandbox.labels" . | indent 4 }}
 spec:
   type: ClusterIP
   selector:
@@ -28,10 +28,10 @@ spec:
 apiVersion: {{ .Values.api.service | quote }}
 kind: Service
 metadata:
-  name: {{ include "sndbx.runtimeGatewayName" . }}
+  name: {{ include "agent-sandbox.runtimeGatewayName" . }}
   namespace: {{ .Values.namespace }}
   labels:
-{{ include "sndbx.labels" . | indent 4 }}
+{{ include "agent-sandbox.labels" . | indent 4 }}
 spec:
   type: ClusterIP
   selector:
@@ -47,10 +47,10 @@ spec:
 apiVersion: {{ .Values.api.service | quote }}
 kind: Service
 metadata:
-  name: {{ include "sndbx.runtimeGatewayHeadlessName" . }}
+  name: {{ include "agent-sandbox.runtimeGatewayHeadlessName" . }}
   namespace: {{ .Values.namespace }}
   labels:
-{{ include "sndbx.labels" . | indent 4 }}
+{{ include "agent-sandbox.labels" . | indent 4 }}
 spec:
   clusterIP: None
   selector:

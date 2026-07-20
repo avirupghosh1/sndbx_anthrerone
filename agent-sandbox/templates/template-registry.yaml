@@ -1,11 +1,11 @@
-{{- if eq (include "sndbx.templateRegistryInternalEnabled" .) "true" }}
+{{- if eq (include "agent-sandbox.templateRegistryInternalEnabled" .) "true" }}
 apiVersion: {{ .Values.api.service | quote }}
 kind: Service
 metadata:
-  name: {{ include "sndbx.templateRegistryName" . }}
+  name: {{ include "agent-sandbox.templateRegistryName" . }}
   namespace: {{ .Values.namespace }}
   labels:
-{{ include "sndbx.labels" . | indent 4 }}
+{{ include "agent-sandbox.labels" . | indent 4 }}
     component: template-registry
 spec:
   type: ClusterIP
@@ -22,10 +22,10 @@ spec:
 apiVersion: {{ .Values.api.deployment | quote }}
 kind: Deployment
 metadata:
-  name: {{ include "sndbx.templateRegistryName" . }}
+  name: {{ include "agent-sandbox.templateRegistryName" . }}
   namespace: {{ .Values.namespace }}
   labels:
-{{ include "sndbx.labels" . | indent 4 }}
+{{ include "agent-sandbox.labels" . | indent 4 }}
     component: template-registry
 spec:
   replicas: 1
@@ -49,7 +49,7 @@ spec:
       {{- end }}
       containers:
         - name: registry
-          image: {{ include "sndbx.templateRegistryImage" . | quote }}
+          image: {{ include "agent-sandbox.templateRegistryImage" . | quote }}
           imagePullPolicy: {{ tpl (.Values.templateRegistry.internal.pullPolicy | toString) . }}
           ports:
             - name: registry
@@ -61,8 +61,8 @@ spec:
             {{- if .Values.templateRegistry.internal.proxy.enabled }}
             - name: REGISTRY_PROXY_REMOTEURL
               value: {{ .Values.templateRegistry.internal.proxy.remoteUrl | quote }}
-            {{- $registrySecretName := .Values.templateRegistry.existingSecretName | default (include "sndbx.secretName" .) }}
-            {{- if eq (include "sndbx.templateRegistryAuthRequired" .) "true" }}
+            {{- $registrySecretName := .Values.templateRegistry.existingSecretName | default (include "agent-sandbox.secretName" .) }}
+            {{- if eq (include "agent-sandbox.templateRegistryAuthRequired" .) "true" }}
             - name: REGISTRY_PROXY_USERNAME
               valueFrom:
                 secretKeyRef:

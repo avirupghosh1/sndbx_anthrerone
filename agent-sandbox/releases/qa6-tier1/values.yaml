@@ -1,6 +1,6 @@
-tier: qa6-tier1
+tier: tier1
 namespace: spr-apps
-releaseName: sndbx-qa6-tier1
+releaseName: agent-sandbox-qa6-tier1
 branchName: master
 k8sClusterName: apps-gke
 cloudProvider: gcp
@@ -10,7 +10,7 @@ replicas:
   runtimeGateway: 3
 
 database:
-  existingSecretName: sndbx-qa6-tier1-secret
+  existingSecretName: agent-sandbox-qa6-tier1-secret
   existingSecretKey: DATABASE_URL
   typeExistingSecretKey: DATABASE_TYPE
   usernameExistingSecretKey: DATABASE_USERNAME
@@ -88,7 +88,7 @@ templateRegistry:
 
 imageBuilding:
   authRequired: false
-  existingSecretName: sndbx-qa6-tier1-secret
+  existingSecretName: agent-sandbox-qa6-tier1-secret
 
 config:
   apiService:
@@ -106,4 +106,4 @@ ingress:
 
 secrets:
   create: false
-  name: sndbx-qa6-tier1-secret
+  name: agent-sandbox-qa6-tier1-secret

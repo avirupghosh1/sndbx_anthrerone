@@ -43,7 +43,7 @@
 {{- end -}}
 {{- $databaseSecretName := toString (default "" (.Values.database.existingSecretName | default .Values.secrets.name)) -}}
 {{- if and (eq $databaseSecretName "") .Values.secrets.create -}}
-{{- $databaseSecretName = include "sndbx.secretName" . -}}
+{{- $databaseSecretName = include "agent-sandbox.secretName" . -}}
 {{- end -}}
 {{- if and (eq (default "" .Values.database.url) "") (eq $databaseSecretName "") -}}
 {{- fail "database is required: provide DATABASE_URL in secrets.name or set database.url" -}}
@@ -66,7 +66,7 @@
 {{- if not (has $internalRegistryMode (list "auto" "true" "false")) -}}
 {{- fail "templateRegistry.internal.enabled must be auto, true, or false" -}}
 {{- end -}}
-{{- $internalRegistryEnabled := eq (include "sndbx.templateRegistryInternalEnabled" .) "true" -}}
+{{- $internalRegistryEnabled := eq (include "agent-sandbox.templateRegistryInternalEnabled" .) "true" -}}
 {{- if and .Values.templateRegistry.pushEnabled (eq (default "" .Values.templateRegistry.repoPrefix) "") (not $internalRegistryEnabled) -}}
 {{- fail "templateRegistry.pushEnabled=true requires templateRegistry.repoPrefix or templateRegistry.internal.enabled=auto/true" -}}
 {{- end -}}
@@ -77,16 +77,16 @@
 {{- fail "templateRegistry.internal.proxy.enabled=true requires templateRegistry.internal.proxy.remoteUrl and remoteServer" -}}
 {{- end -}}
 {{- $registrySecretName := toString (default "" (.Values.templateRegistry.existingSecretName | default .Values.secrets.name)) -}}
-{{- if and (eq (include "sndbx.templateRegistryAuthRequired" .) "true") (not .Values.secrets.create) (eq $registrySecretName "") -}}
+{{- if and (eq (include "agent-sandbox.templateRegistryAuthRequired" .) "true") (not .Values.secrets.create) (eq $registrySecretName "") -}}
 {{- fail "templateRegistry.authRequired=true requires either secrets.create=true with registryUsername/registryPassword or templateRegistry.existingSecretName/secrets.name" -}}
 {{- end -}}
-{{- if and (eq (include "sndbx.templateRegistryAuthRequired" .) "true") .Values.secrets.create (eq (default "" .Values.templateRegistry.existingSecretName) "") (or (eq (default "" .Values.secrets.data.registryUsername) "") (eq (default "" .Values.secrets.data.registryPassword) "")) -}}
+{{- if and (eq (include "agent-sandbox.templateRegistryAuthRequired" .) "true") .Values.secrets.create (eq (default "" .Values.templateRegistry.existingSecretName) "") (or (eq (default "" .Values.secrets.data.registryUsername) "") (eq (default "" .Values.secrets.data.registryPassword) "")) -}}
 {{- fail "templateRegistry.authRequired=true with secrets.create=true requires secrets.data.registryUsername and secrets.data.registryPassword" -}}
 {{- end -}}
 {{- $imageBuildingSecretName := toString (default "" (.Values.imageBuilding.existingSecretName | default .Values.secrets.name)) -}}
-{{- if and (eq (include "sndbx.imageBuildingAuthRequired" .) "true") (not .Values.secrets.create) (eq $imageBuildingSecretName "") -}}
+{{- if and (eq (include "agent-sandbox.imageBuildingAuthRequired" .) "true") (not .Values.secrets.create) (eq $imageBuildingSecretName "") -}}
 {{- fail "imageBuilding.authRequired=true requires either secrets.create=true with imageBuilding S3 secret values or imageBuilding.existingSecretName/secrets.name" -}}
 {{- end -}}
-{{- if and (eq (include "sndbx.imageBuildingAuthRequired" .) "true") .Values.secrets.create (eq (default "" .Values.imageBuilding.existingSecretName) "") (or (eq (default "" .Values.secrets.data.imageBuildingS3Bucket) "") (eq (default "" .Values.secrets.data.imageBuildingS3Region) "") (eq (default "" .Values.secrets.data.imageBuildingS3AccessKeyId) "") (eq (default "" .Values.secrets.data.imageBuildingS3SecretAccessKey) "")) -}}
+{{- if and (eq (include "agent-sandbox.imageBuildingAuthRequired" .) "true") .Values.secrets.create (eq (default "" .Values.imageBuilding.existingSecretName) "") (or (eq (default "" .Values.secrets.data.imageBuildingS3Bucket) "") (eq (default "" .Values.secrets.data.imageBuildingS3Region) "") (eq (default "" .Values.secrets.data.imageBuildingS3AccessKeyId) "") (eq (default "" .Values.secrets.data.imageBuildingS3SecretAccessKey) "")) -}}
 {{- fail "imageBuilding.authRequired=true with secrets.create=true requires secrets.data.imageBuildingS3Bucket, imageBuildingS3Region, imageBuildingS3AccessKeyId, and imageBuildingS3SecretAccessKey" -}}
 {{- end -}}
