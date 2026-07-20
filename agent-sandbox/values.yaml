@@ -16,7 +16,7 @@ linkerd: disabled
 cloudProvider: gcp
 k8sClusterName: apps-gke
 chartName: agent-sandbox
-releaseName: sndbx-tier1
+releaseName: agent-sandbox-tier1
 branchName: master
 releaseVersion: NA
 itopsTicket: NA
@@ -161,9 +161,9 @@ config:
     SANDBOX_RUNTIME: "docker"
     TEMPLATE_DOCKERFILE_BUILD_MODE: "docker_cli"
     TEMPLATE_BUILD_VIA_RUNTIME_GATEWAY: "true"
-    RUNTIME_GATEWAY_URL: "http://{{ include \"sndbx.runtimeGatewayServiceFqdn\" . }}:8080"
+    RUNTIME_GATEWAY_URL: "http://{{ include \"agent-sandbox.runtimeGatewayServiceFqdn\" . }}:8080"
     SANDBOX_DATA_PLANE_ENABLED: "true"
-    SANDBOX_DATA_PLANE_DOMAIN: "sndbx.example.com"
+    SANDBOX_DATA_PLANE_DOMAIN: "agent-sandbox.example.com"
     SANDBOX_DATA_PLANE_SCHEME: "https"
     SANDBOX_DATA_PLANE_DEBUG: "false"
     SANDBOX_DEFAULT_ALLOW_PUBLIC_TRAFFIC: "false"
@@ -218,12 +218,12 @@ config:
     RUNTIME_GATEWAY_POD_LABEL_APP: "{{ .Chart.Name }}"
     RUNTIME_GATEWAY_POD_LABEL_TIER: "{{ .Values.tier }}"
     RUNTIME_GATEWAY_POD_LABEL_COMPONENT: "runtime-gateway"
-    RUNTIME_GATEWAY_STATEFULSET_NAME: "{{ include \"sndbx.runtimeGatewayName\" . }}"
-    RUNTIME_GATEWAY_HEADLESS_SERVICE: "{{ include \"sndbx.runtimeGatewayHeadlessName\" . }}"
+    RUNTIME_GATEWAY_STATEFULSET_NAME: "{{ include \"agent-sandbox.runtimeGatewayName\" . }}"
+    RUNTIME_GATEWAY_HEADLESS_SERVICE: "{{ include \"agent-sandbox.runtimeGatewayHeadlessName\" . }}"
     RUNTIME_GATEWAY_SERVICE_PORT: "{{ .Values.service.runtimeGateway.httpPort }}"
     API_SERVICE_INSTANCE_ID: ""
     WARM_POOL_COORDINATOR_LEASE_NAME: "warm-pool-coordinator"
-    WARM_POOL_USE_K8S_LEASE: "true"
+    WARM_POOL_USE_K8S_LEASE: "false"
     WARM_POOL_COORDINATOR_LEASE_TTL_SEC: "15"
     RUNTIME_GATEWAY_STATUS_CACHE_TTL_SEC: "2.0"
     IMAGE_BUILDING_AUTH_REQUIRED: "{{ .Values.imageBuilding.authRequired }}"
@@ -231,9 +231,9 @@ config:
     IMAGE_BUILDING_S3_ENDPOINT_URL: "{{ .Values.imageBuilding.s3.endpointUrl }}"
   
   runtimeGateway:
-    SANDBOX_DOMAIN: "sndbx.example.com"
+    SANDBOX_DOMAIN: "agent-sandbox.example.com"
     SANDBOX_INGRESS_DEBUG: "false"
-    CONTROL_PLANE_URL: "http://{{ include \"sndbx.apiServiceFqdn\" . }}:8000"
+    CONTROL_PLANE_URL: "http://{{ include \"agent-sandbox.apiServiceFqdn\" . }}:8000"
     CONTROL_PLANE_TIMEOUT_SEC: "10"
     DOCKER_HOST: "tcp://127.0.0.1:2375"
     SANDBOX_DOCKER_OCI_RUNTIME: "{{ .Values.config.apiService.SANDBOX_DOCKER_OCI_RUNTIME }}"
@@ -245,11 +245,11 @@ config:
     DOCKER_GRAPH_PATH: "/var/lib/docker"
     DOCKER_GRAPH_CAPACITY_BYTES: "{{ .Values.runtimeGateway.docker.graphCapacityBytes }}"
     TEMPLATE_REGISTRY_PUSH_ENABLED: "{{ .Values.templateRegistry.pushEnabled }}"
-    TEMPLATE_REGISTRY_REPO_PREFIX: "{{ include \"sndbx.templateRegistryRepoPrefix\" . }}"
-    TEMPLATE_REGISTRY_AUTH_REQUIRED: "{{ include \"sndbx.templateRegistryAuthRequired\" . }}"
+    TEMPLATE_REGISTRY_REPO_PREFIX: "{{ include \"agent-sandbox.templateRegistryRepoPrefix\" . }}"
+    TEMPLATE_REGISTRY_AUTH_REQUIRED: "{{ include \"agent-sandbox.templateRegistryAuthRequired\" . }}"
     TEMPLATE_REGISTRY_LAYOUT: "{{ .Values.templateRegistry.layout }}"
     TEMPLATE_REGISTRY_CACHE_ENABLED: "{{ .Values.templateRegistry.internal.proxy.enabled }}"
-    TEMPLATE_REGISTRY_CACHE_SERVER: "{{ include \"sndbx.templateRegistryServer\" . }}"
+    TEMPLATE_REGISTRY_CACHE_SERVER: "{{ include \"agent-sandbox.templateRegistryServer\" . }}"
     TEMPLATE_REGISTRY_CACHE_UPSTREAM_SERVER: "{{ .Values.templateRegistry.internal.proxy.remoteServer }}"
 
 templateRegistry:
@@ -332,9 +332,9 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-body-size: "1g"
   apiHosts:
-    - api.sndbx.example.com
+    - api.agent-sandbox.example.com
   sandboxHosts:
-    - "*.sndbx.example.com"
+    - "*.agent-sandbox.example.com"
   tls:
     # Production follows the Prism chart flow: rely on ingress class / ACME
     # automation from kubernetes.io/tls-acme instead of rendering an explicit

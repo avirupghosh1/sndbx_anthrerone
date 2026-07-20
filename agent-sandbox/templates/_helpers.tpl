@@ -1,60 +1,60 @@
-{{- define "sndbx.fullname" -}}
+{{- define "agent-sandbox.fullname" -}}
 {{- printf "%s-%s" .Chart.Name .Values.tier | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "sndbx.secretName" -}}
+{{- define "agent-sandbox.secretName" -}}
 {{- if .Values.secrets.name -}}
 {{- .Values.secrets.name -}}
 {{- else -}}
-{{- printf "%s-secret" (include "sndbx.fullname" .) -}}
+{{- printf "%s-secret" (include "agent-sandbox.fullname" .) -}}
 {{- end -}}
 {{- end -}}
 
-{{- define "sndbx.labels" -}}
+{{- define "agent-sandbox.labels" -}}
 releaseVersion: {{ .Values.releaseVersion | default "NA" | quote }}
 app: {{ .Chart.Name }}
 tier: {{ .Values.tier }}
 chartName: {{ .Values.chartName | default .Chart.Name }}
 branchName: {{ .Values.branchName | default "master" }}
-releaseName: {{ .Values.releaseName | default (include "sndbx.fullname" .) }}
+releaseName: {{ .Values.releaseName | default (include "agent-sandbox.fullname" .) }}
 itopsTicket: {{ .Values.itopsTicket | default "NA" }}
 buildJobUrl: {{ .Values.buildJobUrl | default "NA" | quote }}
 {{- end -}}
 
-{{- define "sndbx.selectorLabels" -}}
+{{- define "agent-sandbox.selectorLabels" -}}
 app: {{ .Chart.Name }}
 tier: {{ .Values.tier }}
 {{- end -}}
 
-{{- define "sndbx.image" -}}
+{{- define "agent-sandbox.image" -}}
 {{- printf "%s/%s:%s" (.repo | toString) (.name | toString) (.tag | toString) -}}
 {{- end -}}
 
-{{- define "sndbx.apiServiceName" -}}
-{{- printf "%s-api-service" (include "sndbx.fullname" .) -}}
+{{- define "agent-sandbox.apiServiceName" -}}
+{{- printf "%s-api-service" (include "agent-sandbox.fullname" .) -}}
 {{- end -}}
 
-{{- define "sndbx.runtimeGatewayName" -}}
-{{- printf "%s-runtime-gateway" (include "sndbx.fullname" .) -}}
+{{- define "agent-sandbox.runtimeGatewayName" -}}
+{{- printf "%s-runtime-gateway" (include "agent-sandbox.fullname" .) -}}
 {{- end -}}
 
-{{- define "sndbx.runtimeGatewayHeadlessName" -}}
-{{- printf "%s-headless" (include "sndbx.runtimeGatewayName" .) -}}
+{{- define "agent-sandbox.runtimeGatewayHeadlessName" -}}
+{{- printf "%s-headless" (include "agent-sandbox.runtimeGatewayName" .) -}}
 {{- end -}}
 
-{{- define "sndbx.apiServiceFqdn" -}}
-{{- printf "%s.%s.svc.cluster.local" (include "sndbx.apiServiceName" .) .Values.namespace -}}
+{{- define "agent-sandbox.apiServiceFqdn" -}}
+{{- printf "%s.%s.svc.cluster.local" (include "agent-sandbox.apiServiceName" .) .Values.namespace -}}
 {{- end -}}
 
-{{- define "sndbx.runtimeGatewayServiceFqdn" -}}
-{{- printf "%s.%s.svc.cluster.local" (include "sndbx.runtimeGatewayName" .) .Values.namespace -}}
+{{- define "agent-sandbox.runtimeGatewayServiceFqdn" -}}
+{{- printf "%s.%s.svc.cluster.local" (include "agent-sandbox.runtimeGatewayName" .) .Values.namespace -}}
 {{- end -}}
 
-{{- define "sndbx.templateRegistryName" -}}
-{{- printf "%s-template-registry" (include "sndbx.fullname" .) -}}
+{{- define "agent-sandbox.templateRegistryName" -}}
+{{- printf "%s-template-registry" (include "agent-sandbox.fullname" .) -}}
 {{- end -}}
 
-{{- define "sndbx.templateRegistryInternalEnabled" -}}
+{{- define "agent-sandbox.templateRegistryInternalEnabled" -}}
 {{- $mode := "auto" -}}
 {{- if and .Values.templateRegistry.internal (hasKey .Values.templateRegistry.internal "enabled") -}}
 {{- $mode = (toString .Values.templateRegistry.internal.enabled | lower) -}}
@@ -68,41 +68,41 @@ false
 {{- end -}}
 {{- end -}}
 
-{{- define "sndbx.templateRegistryImage" -}}
+{{- define "agent-sandbox.templateRegistryImage" -}}
 {{- $image := default "" .Values.templateRegistry.internal.image -}}
 {{- if ne $image "" -}}
 {{- $image -}}
 {{- else -}}
-{{- include "sndbx.image" .Values.images.templateRegistry -}}
+{{- include "agent-sandbox.image" .Values.images.templateRegistry -}}
 {{- end -}}
 {{- end -}}
 
-{{- define "sndbx.templateRegistryServer" -}}
-{{- if eq (include "sndbx.templateRegistryInternalEnabled" .) "true" -}}
-{{- printf "%s.%s.svc.cluster.local:%v" (include "sndbx.templateRegistryName" .) .Values.namespace .Values.templateRegistry.internal.servicePort -}}
+{{- define "agent-sandbox.templateRegistryServer" -}}
+{{- if eq (include "agent-sandbox.templateRegistryInternalEnabled" .) "true" -}}
+{{- printf "%s.%s.svc.cluster.local:%v" (include "agent-sandbox.templateRegistryName" .) .Values.namespace .Values.templateRegistry.internal.servicePort -}}
 {{- else -}}
 {{- .Values.templateRegistry.server | default "" -}}
 {{- end -}}
 {{- end -}}
 
-{{- define "sndbx.templateRegistryRepoPrefix" -}}
+{{- define "agent-sandbox.templateRegistryRepoPrefix" -}}
 {{- if ne (default "" .Values.templateRegistry.repoPrefix) "" -}}
 {{- .Values.templateRegistry.repoPrefix -}}
-{{- else if eq (include "sndbx.templateRegistryInternalEnabled" .) "true" -}}
-{{- printf "%s/templates" (include "sndbx.templateRegistryServer" .) -}}
+{{- else if eq (include "agent-sandbox.templateRegistryInternalEnabled" .) "true" -}}
+{{- printf "%s/templates" (include "agent-sandbox.templateRegistryServer" .) -}}
 {{- else -}}
 {{- "" -}}
 {{- end -}}
 {{- end -}}
 
-{{- define "sndbx.templateRegistryAuthRequired" -}}
-{{- if eq (include "sndbx.templateRegistryInternalEnabled" .) "true" -}}
+{{- define "agent-sandbox.templateRegistryAuthRequired" -}}
+{{- if eq (include "agent-sandbox.templateRegistryInternalEnabled" .) "true" -}}
 false
 {{- else -}}
 {{- .Values.templateRegistry.authRequired | toString -}}
 {{- end -}}
 {{- end -}}
 
-{{- define "sndbx.imageBuildingAuthRequired" -}}
+{{- define "agent-sandbox.imageBuildingAuthRequired" -}}
 {{- .Values.imageBuilding.authRequired | toString -}}
 {{- end -}}

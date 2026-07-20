@@ -2,10 +2,10 @@
 kind: Ingress
 apiVersion: {{ .Values.api.ingress | quote }}
 metadata:
-  name: {{ include "sndbx.fullname" . }}-ingress
+  name: {{ include "agent-sandbox.fullname" . }}-ingress
   namespace: {{ .Values.namespace }}
   labels:
-{{ include "sndbx.labels" . | indent 4 }}
+{{ include "agent-sandbox.labels" . | indent 4 }}
   annotations:
 {{ toYaml .Values.ingress.annotations | indent 4 }}
 spec:
@@ -19,7 +19,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "sndbx.apiServiceName" $ }}
+                name: {{ include "agent-sandbox.apiServiceName" $ }}
                 port:
                   number: {{ $.Values.service.apiService.port }}
   {{- end }}
@@ -31,7 +31,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "sndbx.runtimeGatewayName" $ }}
+                name: {{ include "agent-sandbox.runtimeGatewayName" $ }}
                 port:
                   number: {{ $.Values.service.runtimeGateway.httpPort }}
   {{- end }}

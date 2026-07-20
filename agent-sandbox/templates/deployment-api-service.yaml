@@ -1,10 +1,10 @@
 kind: Deployment
 apiVersion: {{ .Values.api.deployment | quote }}
 metadata:
-  name: {{ include "sndbx.apiServiceName" . }}
+  name: {{ include "agent-sandbox.apiServiceName" . }}
   namespace: {{ .Values.namespace }}
   labels:
-{{ include "sndbx.labels" . | indent 4 }}
+{{ include "agent-sandbox.labels" . | indent 4 }}
 spec:
   replicas: {{ .Values.replicas.apiService }}
   selector:
@@ -44,7 +44,7 @@ spec:
       {{- end }}
       containers:
         - name: api-service
-          image: {{ include "sndbx.image" .Values.images.apiService }}
+          image: {{ include "agent-sandbox.image" .Values.images.apiService }}
           imagePullPolicy: {{ .Values.images.apiService.pullPolicy }}
           ports:
             - name: http
@@ -58,37 +58,37 @@ spec:
               protocol: TCP
           envFrom:
             - configMapRef:
-                name: {{ include "sndbx.apiServiceName" . }}-config
+                name: {{ include "agent-sandbox.apiServiceName" . }}-config
           env:
             - name: API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "sndbx.secretName" . }}
+                  name: {{ include "agent-sandbox.secretName" . }}
                   key: API_KEY
             - name: INTERNAL_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "sndbx.secretName" . }}
+                  name: {{ include "agent-sandbox.secretName" . }}
                   key: INTERNAL_API_KEY
             - name: ADMIN_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "sndbx.secretName" . }}
+                  name: {{ include "agent-sandbox.secretName" . }}
                   key: ADMIN_API_KEY
             - name: RUNTIME_GATEWAY_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "sndbx.secretName" . }}
+                  name: {{ include "agent-sandbox.secretName" . }}
                   key: INTERNAL_API_KEY
             - name: AUTH_JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "sndbx.secretName" . }}
+                  name: {{ include "agent-sandbox.secretName" . }}
                   key: AUTH_JWT_SECRET
             - name: PORTAL_SESSION_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "sndbx.secretName" . }}
+                  name: {{ include "agent-sandbox.secretName" . }}
                   key: PORTAL_SESSION_SECRET
             - name: API_SERVICE_INSTANCE_ID
               valueFrom:
@@ -96,7 +96,7 @@ spec:
                   fieldPath: metadata.name
             {{- $databaseSecretName := toString (default "" (.Values.database.existingSecretName | default .Values.secrets.name)) }}
             {{- if and (eq $databaseSecretName "") .Values.secrets.create }}
-            {{- $databaseSecretName = include "sndbx.secretName" . }}
+            {{- $databaseSecretName = include "agent-sandbox.secretName" . }}
             {{- end }}
             {{- if $databaseSecretName }}
             - name: DATABASE_URL
@@ -134,8 +134,8 @@ spec:
             - name: DATABASE_PASSWORD
               value: {{ .Values.database.password | quote }}
             {{- end }}
-            {{- $imageBuildingSecretName := .Values.imageBuilding.existingSecretName | default (include "sndbx.secretName" .) }}
-            {{- if eq (include "sndbx.imageBuildingAuthRequired" .) "true" }}
+            {{- $imageBuildingSecretName := .Values.imageBuilding.existingSecretName | default (include "agent-sandbox.secretName" .) }}
+            {{- if eq (include "agent-sandbox.imageBuildingAuthRequired" .) "true" }}
             - name: IMAGE_BUILDING_S3_BUCKET
               valueFrom:
                 secretKeyRef:

@@ -2,10 +2,10 @@
 kind: PodDisruptionBudget
 apiVersion: {{ .Values.api.poddisruptionbudget | quote }}
 metadata:
-  name: {{ include "sndbx.apiServiceName" . }}-pdb
+  name: {{ include "agent-sandbox.apiServiceName" . }}-pdb
   namespace: {{ .Values.namespace }}
   labels:
-{{ include "sndbx.labels" . | indent 4 }}
+{{ include "agent-sandbox.labels" . | indent 4 }}
 spec:
   minAvailable: {{ .Values.podDisruptionBudget.apiService.minAvailable }}
   selector:
@@ -17,10 +17,10 @@ spec:
 kind: PodDisruptionBudget
 apiVersion: {{ .Values.api.poddisruptionbudget | quote }}
 metadata:
-  name: {{ include "sndbx.runtimeGatewayName" . }}-pdb
+  name: {{ include "agent-sandbox.runtimeGatewayName" . }}-pdb
   namespace: {{ .Values.namespace }}
   labels:
-{{ include "sndbx.labels" . | indent 4 }}
+{{ include "agent-sandbox.labels" . | indent 4 }}
 spec:
   minAvailable: {{ .Values.podDisruptionBudget.runtimeGateway.minAvailable }}
   selector:
