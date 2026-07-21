@@ -72,7 +72,27 @@ def _session_ttl_seconds() -> int:
     return int(getattr(get_config(), "PORTAL_SESSION_TTL_HOURS", 12) or 12) * 3600
 
 
-def _cookie_secure() -> bool:
+def _request_scheme(request: Optional[Request]) -> str:
+    if not request:
+        return ""
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+    if forwarded_proto:
+        return forwarded_proto
+    forwarded = (request.headers.get("forwarded") or "").split(",", 1)[0]
+    for part in forwarded.split(";"):
+        key, sep, value = part.strip().partition("=")
+        if sep and key.lower() == "proto":
+            return value.strip('"').lower()
+    return (request.url.scheme or "").strip().lower()
+
+
+def _cookie_secure(request: Optional[Request] = None) -> bool:
+    explicit = os.getenv("PORTAL_SESSION_COOKIE_SECURE")
+    if explicit is not None and explicit.strip() != "":
+        return bool(getattr(get_config(), "PORTAL_SESSION_COOKIE_SECURE", False))
+    scheme = _request_scheme(request)
+    if scheme:
+        return scheme in {"https", "wss"}
     return bool(getattr(get_config(), "PORTAL_SESSION_COOKIE_SECURE", False))
 
 
@@ -145,7 +165,7 @@ def _require_csrf(request: Request, submitted_token: str) -> None:
         raise HTTPException(status_code=403, detail="Invalid CSRF token")
 
 
-def _harden_response(response, *, csrf_token: Optional[str] = None):
+def _harden_response(response, *, request: Optional[Request] = None, csrf_token: Optional[str] = None):
     headers = {
         "Cache-Control": "no-store",
         "Pragma": "no-cache",
@@ -167,7 +187,7 @@ def _harden_response(response, *, csrf_token: Optional[str] = None):
             csrf_token,
             httponly=True,
             samesite="strict",
-            secure=_cookie_secure(),
+            secure=_cookie_secure(request),
             max_age=_CSRF_TTL_SECONDS,
             path="/",
         )
@@ -194,6 +214,7 @@ def _template_response(request: Request, name: str, context: dict, *, status_cod
             render_context,
             status_code=status_code,
         ),
+        request=request,
         csrf_token=csrf_token,
     )
 
@@ -201,6 +222,7 @@ def _template_response(request: Request, name: str, context: dict, *, status_cod
 def _redirect(request: Request, url: str, *, status_code: int = 303):
     return _harden_response(
         RedirectResponse(url, status_code=status_code),
+        request=request,
         csrf_token=_csrf_token_for_request(request),
     )
 
@@ -323,25 +345,25 @@ def _request_is_admin(request: Request, client: dict) -> bool:
     return bool(client_id and token and _read_admin_session(token, client_id))
 
 
-def _issue_session(response: RedirectResponse, client_id: str) -> None:
+def _issue_session(response: RedirectResponse, request: Request, client_id: str) -> None:
     response.set_cookie(
         _SESSION_COOKIE,
         _sign_session(client_id),
         httponly=True,
         samesite="strict",
-        secure=_cookie_secure(),
+        secure=_cookie_secure(request),
         max_age=_session_ttl_seconds(),
         path="/",
     )
 
 
-def _issue_admin_session(response: RedirectResponse, client_id: str) -> None:
+def _issue_admin_session(response: RedirectResponse, request: Request, client_id: str) -> None:
     response.set_cookie(
         _ADMIN_SESSION_COOKIE,
         _sign_admin_session(client_id),
         httponly=True,
         samesite="strict",
-        secure=_cookie_secure(),
+        secure=_cookie_secure(request),
         max_age=_session_ttl_seconds(),
         path="/",
     )
@@ -816,7 +838,7 @@ async def register(
     )
     _rate_limit_clear(rate_key)
     response = _redirect(request, "/portal/templates")
-    _issue_session(response, client["client_id"])
+    _issue_session(response, request, client["client_id"])
     return response
 
 
@@ -856,9 +878,9 @@ async def login(
         )
     _rate_limit_clear(rate_key)
     response = _redirect(request, "/portal/admin/observability" if admin_requested else "/portal/templates")
-    _issue_session(response, client["client_id"])
+    _issue_session(response, request, client["client_id"])
     if admin_requested:
-        _issue_admin_session(response, client["client_id"])
+        _issue_admin_session(response, request, client["client_id"])
     return response
 
 
@@ -871,7 +893,7 @@ async def admin_session(request: Request, admin_api_key: str = Form(...), csrf_t
     if not admin_api_key_is_valid(admin_api_key):
         raise HTTPException(status_code=403, detail="Invalid admin API key")
     response = _redirect(request, "/portal/admin/observability")
-    _issue_admin_session(response, client["client_id"])
+    _issue_admin_session(response, request, client["client_id"])
     return response
 
 

@@ -1,18 +1,18 @@
-# sndbx Helm Chart
+# agent-sandbox Helm Chart
 
 This chart is shaped to fit the same Jenkins custom Helm deployment flow used by Custodian's Prism deployment.
 
 Expected layout:
 
-- `sndbx/Chart.yaml`
-- `sndbx/values.yaml`
-- `sndbx/templates/*`
-- `sndbx/releases/qa6-tier1/values.yaml`
+- `agent-sandbox/Chart.yaml`
+- `agent-sandbox/values.yaml`
+- `agent-sandbox/templates/*`
+- `agent-sandbox/releases/qa6-tier1/values.yaml`
 
 Expected Jenkins deploy inputs:
 
-- `GIT_REPO_URL` points at the Helm repo containing this `sndbx` folder
-- `CHART_NAME=sndbx`
+- `GIT_REPO_URL` points at the Helm repo containing this `agent-sandbox` folder
+- `CHART_NAME=agent-sandbox`
 - `CHART_RELEASE_NAME=qa6-tier1`
 - `CHART_NAMESPACE=spr-apps`
 - `CHART_REPO_BRANCH=origin/main`

@@ -84,7 +84,7 @@ def _storage_token_ok(request: Request, organization_id: str) -> bool:
         or ""
     )
     if not token:
-        return True
+        return False
     return hmac.compare_digest(_storage_token(organization_id), token)
 
 def _daytona_error(status_code: int, message: str, *, code: str = "not_implemented"):

@@ -494,13 +494,7 @@ async def remove_template_tags(
     base_alias, _ = _split_e2b_template_ref(name)
     for tag in tags:
         alias = _tagged_alias(base_alias, tag)
-        row = await run_io(sandbox_manager.db.get_sandbox_template_by_alias, principal.client_id, alias)
-        if row:
-            await run_io(
-                sandbox_manager.db.delete_sandbox_template,
-                str(row.get("template_id") or ""),
-                principal.client_id,
-            )
+        await template_handlers.delete_template_for_principal(sandbox_manager, principal, alias)
     return Response(status_code=204)
 
 @router.get("/templates/{template_id}/tags")
@@ -592,6 +586,8 @@ async def delete_template_or_snapshot(
     principal: ApiKeyPrincipal = Depends(validate_api_key),
     sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
 ):
+    if await template_handlers.delete_template_for_principal(sandbox_manager, principal, template_id):
+        return Response(status_code=204)
     row = await run_io(
         sandbox_manager.db.get_sandbox_snapshot,
         template_id,

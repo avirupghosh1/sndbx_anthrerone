@@ -7,7 +7,7 @@ import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from typing import List
 
 from async_runner import run_io
@@ -77,6 +77,88 @@ def _resolve_template_row_for_principal(
     if row and not row.get("owner_client_id"):
         return row
     return None
+
+
+def _owned_template_row_for_principal(
+    sandbox_manager: SandboxManager,
+    principal: ApiKeyPrincipal,
+    template_id: str,
+) -> dict | None:
+    requested = (template_id or "").strip()
+    if not requested:
+        return None
+    owned = sandbox_manager.db.get_sandbox_template_by_alias(principal.client_id, requested)
+    if owned:
+        return owned
+    row = sandbox_manager.db.get_sandbox_template(requested)
+    if row and str(row.get("owner_client_id") or "") == principal.client_id:
+        return row
+    return None
+
+
+def _disable_template_warm_pool_segments(sandbox_manager: SandboxManager, template_id: str) -> int:
+    tid = (template_id or "").strip()
+    if not tid:
+        return 0
+    list_segments = getattr(sandbox_manager.db, "list_warm_pool_segments", None)
+    disable_segment = getattr(sandbox_manager.db, "disable_warm_pool_segment", None)
+    if not callable(list_segments) or not callable(disable_segment):
+        return 0
+    disabled = 0
+    for segment in list_segments():
+        key = str(segment.get("warm_pool_key") or "").strip()
+        segment_tid = str(segment.get("template_id") or "").strip()
+        if not key:
+            continue
+        if segment_tid != tid and not key.startswith(f"{tid}|"):
+            continue
+        pool = getattr(sandbox_manager, "warm_pool", None)
+        if pool is not None:
+            cfg = getattr(sandbox_manager, "_config", None)
+            try:
+                pool.ensure_pool_for(
+                    segment_tid or tid,
+                    str(segment.get("cpu_limit") or getattr(cfg, "DEFAULT_CPU_LIMIT", "1")),
+                    str(segment.get("memory_limit") or getattr(cfg, "DEFAULT_MEMORY_LIMIT", "512m")),
+                    int(segment.get("timeout") or getattr(cfg, "DEFAULT_TIMEOUT", 3600)),
+                    None,
+                    desired_size=0,
+                )
+            except Exception:
+                pass
+        if disable_segment(key, f"template {tid} deleted"):
+            disabled += 1
+        try:
+            sandbox_manager.trim_warm_pool_to_size(key, 0)
+        except Exception:
+            pass
+    return disabled
+
+
+async def delete_template_for_principal(
+    sandbox_manager: SandboxManager,
+    principal: ApiKeyPrincipal,
+    template_id: str,
+) -> bool:
+    requested = (template_id or "").strip()
+    row = await run_io(_owned_template_row_for_principal, sandbox_manager, principal, template_id)
+    if not row:
+        client_part = re.sub(r"[^a-zA-Z0-9]+", "-", principal.client_id).strip("-").lower() or "client"
+        owner_prefix = f"tpl-{client_part[:18]}-"
+        candidate_ids = [_storage_template_id(principal, requested)]
+        if requested.startswith(owner_prefix):
+            candidate_ids.append(requested)
+        disabled = 0
+        for candidate in dict.fromkeys(candidate_ids):
+            disabled += await run_io(_disable_template_warm_pool_segments, sandbox_manager, candidate)
+        return disabled > 0
+    if str(row.get("owner_client_id") or "") != principal.client_id:
+        return False
+    tid = str(row.get("template_id") or "").strip()
+    if not tid:
+        return False
+    await run_io(_disable_template_warm_pool_segments, sandbox_manager, tid)
+    return bool(await run_io(sandbox_manager.db.delete_sandbox_template, tid, principal.client_id))
 
 
 async def _create_build_record(
@@ -662,6 +744,17 @@ async def get_template(
         raise HTTPException(status_code=404, detail=f"Unknown template_id: {template_id}")
     ensure_template_access(principal, row, template_id)
     return TemplateDefinitionResponse(**_row_to_response(row))
+
+
+@router.delete("/{template_id}")
+async def delete_template(
+    template_id: str,
+    principal: ApiKeyPrincipal = Depends(validate_api_key),
+    sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
+):
+    if not await delete_template_for_principal(sandbox_manager, principal, template_id):
+        raise HTTPException(status_code=404, detail=f"Unknown template_id: {template_id}")
+    return Response(status_code=204)
 
 
 def _row_to_response(row: dict) -> dict:

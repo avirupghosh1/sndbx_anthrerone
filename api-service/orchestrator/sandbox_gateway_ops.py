@@ -723,14 +723,14 @@ class SandboxGatewayOpsMixin:
         warm_ref = str(row.get("warm_snapshot_image") or "").strip()
         registry_ref = str(row.get("registry_image_ref") or "").strip()
         owner_instance = str(row.get("materialized_gateway_instance_id") or "").strip()
-        if owner_instance and not registry_ref:
+        if owner_instance and warm_ref:
             pinned = target_for_instance(targets, owner_instance)
             if pinned is not None and (
                 not require_reachable
                 or self._gateway_can_accept_new_usage(pinned, force_refresh=force_refresh)
             ):
                 logger.info(
-                    "Scheduler decision: reason=template_owner gateway=%s template=%s",
+                    "Scheduler decision: reason=template_owner_cached gateway=%s template=%s",
                     pinned.instance_id,
                     template_id,
                 )
@@ -742,14 +742,41 @@ class SandboxGatewayOpsMixin:
                     entity_id=pinned.instance_id,
                     gateway_instance_id=pinned.instance_id,
                     template_id=template_id,
-                    message=f"Selected runtime gateway {pinned.instance_id} because it owns the template image",
+                    message=f"Selected runtime gateway {pinned.instance_id} because it has the materialized template image",
                     metadata={
-                        "reason": "template_owner",
+                        "reason": "template_owner_cached",
                         "template_id": template_id,
                         "owner_instance": owner_instance,
+                        "image_ref": warm_ref,
                     },
                 )
                 return pinned
+            if registry_ref:
+                logger.info(
+                    "Template %r owner gateway %s is not available; falling back to registry image %s",
+                    template_id,
+                    owner_instance,
+                    registry_ref,
+                )
+            else:
+                logger.warning(
+                    "Template %r is local-only on %s, but that runtime-gateway shard is not reachable",
+                    template_id,
+                    owner_instance,
+                )
+                self._record_observability_event(
+                    severity="warning",
+                    category="scheduler",
+                    action="no_gateway",
+                    entity_type="template",
+                    entity_id=template_id,
+                    gateway_instance_id=owner_instance,
+                    template_id=template_id,
+                    message=f"Template {template_id} is local-only on an unreachable runtime gateway",
+                    metadata={"reason": "template_owner_unreachable", "owner_instance": owner_instance},
+                )
+                return None
+        if owner_instance and not registry_ref:
             logger.warning(
                 "Template %r is local-only on %s, but that runtime-gateway shard is not reachable",
                 template_id,
@@ -961,6 +988,8 @@ class SandboxGatewayOpsMixin:
                     },
                 )
                 return claimed
+        if targets_by_instance is not None:
+            return None
         claimed = self.db.claim_warm_pool_sandbox(
             warm_pool_key=key,
             gateway_instance_id=None,
@@ -1031,12 +1060,19 @@ class SandboxGatewayOpsMixin:
         targets = self._gateway_targets()
         if not targets:
             return None
+        warm_ref = str((row or {}).get("warm_snapshot_image") or "").strip()
         registry_ref = str((row or {}).get("registry_image_ref") or "").strip()
         owner_instance = str((row or {}).get("materialized_gateway_instance_id") or "").strip()
-        if not registry_ref and owner_instance:
+        if owner_instance and warm_ref:
             pinned = target_for_instance(targets, owner_instance)
             if pinned is not None and self._gateway_can_accept_new_usage(pinned, force_refresh=True):
                 return pinned
+            if registry_ref:
+                return self._best_gateway_by_load(
+                    targets,
+                    force_refresh=True,
+                    preferred_image_ref=registry_ref,
+                )
             return None
         return self._best_gateway_by_load(
             targets,
