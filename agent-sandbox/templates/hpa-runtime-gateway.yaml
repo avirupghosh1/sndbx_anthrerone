@@ -2,7 +2,7 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "agent-sandbox.runtimeGatewayName" . }}
+  name: {{ include "agent-sandbox.runtimeGatewayStatefulSetName" . }}
   namespace: {{ .Values.namespace }}
   labels:
 {{ include "agent-sandbox.labels" . | indent 4 }}
@@ -10,7 +10,7 @@ spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: StatefulSet
-    name: {{ include "agent-sandbox.runtimeGatewayName" . }}
+    name: {{ include "agent-sandbox.runtimeGatewayStatefulSetName" . }}
   minReplicas: {{ .Values.runtimeGateway.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.runtimeGateway.autoscaling.maxReplicas }}
   behavior:

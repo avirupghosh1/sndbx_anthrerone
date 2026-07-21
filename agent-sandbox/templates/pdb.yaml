@@ -2,7 +2,7 @@
 kind: PodDisruptionBudget
 apiVersion: {{ .Values.api.poddisruptionbudget | quote }}
 metadata:
-  name: {{ include "agent-sandbox.apiServiceName" . }}-pdb
+  name: {{ include "agent-sandbox.apiServiceDeploymentName" . }}-pdb
   namespace: {{ .Values.namespace }}
   labels:
 {{ include "agent-sandbox.labels" . | indent 4 }}
@@ -17,7 +17,7 @@ spec:
 kind: PodDisruptionBudget
 apiVersion: {{ .Values.api.poddisruptionbudget | quote }}
 metadata:
-  name: {{ include "agent-sandbox.runtimeGatewayName" . }}-pdb
+  name: {{ include "agent-sandbox.runtimeGatewayStatefulSetName" . }}-pdb
   namespace: {{ .Values.namespace }}
   labels:
 {{ include "agent-sandbox.labels" . | indent 4 }}
