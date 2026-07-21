@@ -1,4 +1,4 @@
-tier: tier1
+tier: qa6-tier1
 namespace: spr-apps
 releaseName: agent-sandbox-qa6-tier1
 branchName: master

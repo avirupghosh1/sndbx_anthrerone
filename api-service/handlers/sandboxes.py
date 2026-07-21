@@ -21,10 +21,12 @@ from models import (
     CreateSandboxRequest,
     CreateSnapshotRequest,
     RefreshSandboxTimeoutRequest,
+    ResizeWarmPoolRequest,
     SandboxLifecycleResponse,
     SandboxResponse,
     SandboxTimeoutRefreshResponse,
     SnapshotRecordResponse,
+    WarmPoolResizeResponse,
 )
 from orchestrator import SandboxManager
 from orchestrator.sandbox_connections import enrich_sandbox_response
@@ -118,6 +120,60 @@ def ensure_live_sandbox(sandbox_manager: SandboxManager, sandbox_id: str) -> Non
     reason = sandbox_manager.get_sandbox_runtime_failure(sandbox_id)
     if reason:
         raise SandboxRuntimeLostException(sandbox_id, reason)
+
+
+def warm_pool_shape_for_sandbox(
+    sandbox_manager: SandboxManager,
+    sandbox: dict,
+) -> tuple[str, str, str, str, int]:
+    """Derive the canonical warm-pool segment key from a sandbox row."""
+    cfg = sandbox_manager._config
+    metadata = sandbox.get("metadata") if isinstance(sandbox.get("metadata"), dict) else {}
+    stored_key = str(
+        metadata.get("sandbox_allocation_pool_key") or sandbox.get("warm_pool_key") or ""
+    ).strip()
+    key_parts = stored_key.split("|") if stored_key else []
+
+    template_id = str(sandbox.get("template_id") or "").strip()
+    cpu_limit = str(sandbox.get("cpu_limit") or getattr(cfg, "DEFAULT_CPU_LIMIT", "1") or "1")
+    memory_limit = str(
+        sandbox.get("memory_limit") or getattr(cfg, "DEFAULT_MEMORY_LIMIT", "512m") or "512m"
+    )
+
+    if key_parts:
+        template_id = template_id or key_parts[0].strip()
+        if len(key_parts) >= 2 and not str(sandbox.get("cpu_limit") or "").strip():
+            cpu_limit = key_parts[1].strip()
+        if len(key_parts) >= 3 and not str(sandbox.get("memory_limit") or "").strip():
+            memory_limit = key_parts[2].strip()
+
+    try:
+        timeout = int(sandbox.get("timeout") or getattr(cfg, "DEFAULT_TIMEOUT", 3600) or 3600)
+    except (TypeError, ValueError):
+        timeout = int(getattr(cfg, "DEFAULT_TIMEOUT", 3600) or 3600)
+
+    if not template_id:
+        raise HTTPException(status_code=409, detail="Sandbox row does not contain a template_id")
+
+    warm_pool_key = sandbox_manager.warm_pool_key(template_id, cpu_limit, memory_limit, int(timeout))
+    return warm_pool_key, template_id, cpu_limit, memory_limit, int(timeout)
+
+
+def current_template_image_ref_for_warm_pool(
+    sandbox_manager: SandboxManager,
+    template_id: str,
+) -> Optional[str]:
+    tid = (template_id or "").strip()
+    if not tid:
+        return None
+    row = sandbox_manager.db.get_sandbox_template(tid)
+    if not row:
+        return None
+    ensure_template_image = getattr(sandbox_manager, "_ensure_template_runtime_image", None)
+    if callable(ensure_template_image):
+        row = ensure_template_image(tid, row)
+    image_ref = str(row.get("warm_snapshot_image") or row.get("registry_image_ref") or "").strip()
+    return image_ref or None
 
 
 async def create_sandbox_row(
@@ -341,6 +397,67 @@ async def refresh_sandbox_timeout(
         timeout_seconds=int(request.timeout_seconds or 0),
         refreshed=bool(ok),
     )
+
+
+@router.post("/{sandbox_id}/warm-pool/size", response_model=WarmPoolResizeResponse)
+async def resize_sandbox_warm_pool(
+    sandbox_id: str,
+    request: ResizeWarmPoolRequest,
+    principal: ApiKeyPrincipal = Depends(validate_api_key),
+    sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
+):
+    """Update desired warm-pool size for the template/cpu/memory segment matching this sandbox."""
+    sandbox = owned_sandbox_or_404(sandbox_manager, principal, sandbox_id)
+    desired_size = max(0, int(request.warmpool_size))
+
+    def _resize() -> dict:
+        warm_pool_key, template_id, cpu_limit, memory_limit, timeout = warm_pool_shape_for_sandbox(
+            sandbox_manager,
+            sandbox,
+        )
+        before = sandbox_manager.db.get_warm_pool_segment(warm_pool_key) or {}
+        previous_desired = int(before.get("desired_size") or 0)
+        preferred_gateway = str(
+            before.get("preferred_gateway_instance_id") or sandbox.get("gateway_instance_id") or ""
+        ).strip() or None
+        image_ref = current_template_image_ref_for_warm_pool(sandbox_manager, template_id)
+        pool = getattr(sandbox_manager, "warm_pool", None)
+        apply_size = getattr(sandbox_manager, "_apply_requested_warm_pool_size", None)
+        if pool is not None and callable(apply_size):
+            apply_size(
+                pool,
+                template_id=template_id,
+                cpu_limit=cpu_limit,
+                memory_limit=memory_limit,
+                timeout=int(timeout),
+                from_snapshot_image=image_ref,
+                desired_size=desired_size,
+                preferred_gateway_instance_id=preferred_gateway,
+            )
+        else:
+            sandbox_manager.note_warm_pool_segment(
+                template_id=template_id,
+                cpu_limit=cpu_limit,
+                memory_limit=memory_limit,
+                timeout=int(timeout),
+                desired_size=desired_size,
+                preferred_gateway_instance_id=preferred_gateway,
+            )
+        sandbox_manager.trim_warm_pool_to_size(warm_pool_key, desired_size)
+        return {
+            "sandbox_id": sandbox_id.strip(),
+            "warm_pool_key": warm_pool_key,
+            "template_id": template_id,
+            "cpu_limit": str(cpu_limit),
+            "memory_limit": str(memory_limit),
+            "timeout": int(timeout),
+            "previous_desired_size": previous_desired,
+            "desired_size": desired_size,
+            "ready_count": int(sandbox_manager.warm_pool_ready_count(warm_pool_key)),
+            "updated": True,
+        }
+
+    return WarmPoolResizeResponse(**await run_io(_resize))
 
 
 @router.get("/{sandbox_id}", response_model=SandboxResponse)

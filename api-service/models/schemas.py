@@ -100,6 +100,20 @@ class RefreshSandboxTimeoutRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class ResizeWarmPoolRequest(BaseModel):
+    """Update desired warm-pool size for the pool segment matching a sandbox."""
+
+    warmpool_size: int = Field(
+        ...,
+        validation_alias=AliasChoices("warmpool_size", "warmPoolSize", "warm_pool_size", "warmPool"),
+        ge=0,
+        le=1000,
+        description="Desired warm-pool size for the sandbox's template/cpu/memory segment.",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class RegisterTemplateRequest(BaseModel):
     """Register a logical ``template_id`` for Docker (base image + env + ``start_cmd``).
 

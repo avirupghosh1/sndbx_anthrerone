@@ -784,6 +784,7 @@ build = Template.build_stream(
                     _endpoint("GET", "/sandboxes/{sandbox_id}", "Get one sandbox.", response="SandboxResponse"),
                     _endpoint("GET", "/sandboxes/{sandbox_id}/status", "Get lifecycle state and runtime liveness.", response="SandboxLifecycleResponse"),
                     _endpoint("POST", "/sandboxes/{sandbox_id}/timeout", "Refresh sandbox lease timeout.", request="timeout_seconds or timeout", response="SandboxTimeoutRefreshResponse"),
+                    _endpoint("POST", "/sandboxes/{sandbox_id}/warm-pool/size", "Resize the sandbox's template/cpu/memory warm-pool segment.", request="warmpool_size", response="WarmPoolResizeResponse"),
                     _endpoint("POST", "/sandboxes/{sandbox_id}/pause", "Pause sandbox workload.", response="ok/state payload"),
                     _endpoint("POST", "/sandboxes/{sandbox_id}/resume", "Resume paused sandbox workload.", response="ok/state payload"),
                     _endpoint("POST", "/sandboxes/{sandbox_id}/kill", "Terminate and mark sandbox killed.", response="ok payload"),
