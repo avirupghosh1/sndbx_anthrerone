@@ -1,4 +1,4 @@
-tier: qa6-tier1
+tier: tier1
 namespace: spr-apps
 releaseName: agent-sandbox-qa6-tier1
 branchName: master
@@ -10,7 +10,7 @@ replicas:
   runtimeGateway: 3
 
 database:
-  existingSecretName: agent-sandbox-qa6-tier1-secret
+  existingSecretName: agent-sandbox-tier1-secret
   existingSecretKey: DATABASE_URL
   typeExistingSecretKey: DATABASE_TYPE
   usernameExistingSecretKey: DATABASE_USERNAME
@@ -88,7 +88,10 @@ templateRegistry:
 
 imageBuilding:
   authRequired: false
-  existingSecretName: agent-sandbox-qa6-tier1-secret
+  existingSecretName: agent-sandbox-tier1-secret
+  s3:
+    prefix: template-build-contexts
+    endpointUrl: ""
 
 config:
   apiService:
@@ -106,4 +109,4 @@ ingress:
 
 secrets:
   create: false
-  name: agent-sandbox-qa6-tier1-secret
+  name: agent-sandbox-tier1-secret

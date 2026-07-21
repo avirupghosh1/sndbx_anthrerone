@@ -141,11 +141,15 @@ def warm_pool_shape_for_sandbox(
     )
 
     if key_parts:
-        template_id = template_id or key_parts[0].strip()
-        if len(key_parts) >= 2 and not str(sandbox.get("cpu_limit") or "").strip():
-            cpu_limit = key_parts[1].strip()
-        if len(key_parts) >= 3 and not str(sandbox.get("memory_limit") or "").strip():
-            memory_limit = key_parts[2].strip()
+        # A sandbox handed out from a warm pool has already lost its DB
+        # warm_pool_key, so the allocation metadata is the authoritative
+        # segment identity. Prefer it fully; otherwise resize can update a
+        # different key and the reconciler will refill the original segment.
+        template_id = key_parts[0].strip() or template_id
+        if len(key_parts) >= 2:
+            cpu_limit = key_parts[1].strip() or cpu_limit
+        if len(key_parts) >= 3:
+            memory_limit = key_parts[2].strip() or memory_limit
 
     try:
         timeout = int(sandbox.get("timeout") or getattr(cfg, "DEFAULT_TIMEOUT", 3600) or 3600)

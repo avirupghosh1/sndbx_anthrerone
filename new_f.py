@@ -24,7 +24,7 @@ if (MY_SDK_ROOT / "my_sdk").is_dir():
 from my_sdk.api import APIEndpoints
 from my_sdk.api.async_client import AsyncAPIClient
 
-TEMPLATE_ALIAS = "custodian-agentlib-sandbox-dev-avirup-ghosh"
+TEMPLATE_ALIAS = "e2b-warmpool-resize-smoke-big"
 
 
 def resolve_template_id(env_name: str) -> str:
@@ -273,7 +273,7 @@ async def main() -> int:
         timeout_seconds=args.timeout,
     )
     print(f"e2b_create_seconds={e2b_elapsed:.3f} sandbox_id={e2b_id}", flush=True)
-    print(f"delta_local_minus_e2b_seconds={local_elapsed - e2b_elapsed:.3f}", flush=True)
+    # print(f"delta_local_minus_e2b_seconds={local_elapsed - e2b_elapsed:.3f}", flush=True)
     return 0
 
 

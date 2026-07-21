@@ -1,7 +1,7 @@
 kind: Deployment
 apiVersion: {{ .Values.api.deployment | quote }}
 metadata:
-  name: {{ include "agent-sandbox.apiServiceName" . }}
+  name: {{ include "agent-sandbox.apiServiceDeploymentName" . }}
   namespace: {{ .Values.namespace }}
   labels:
 {{ include "agent-sandbox.labels" . | indent 4 }}
@@ -58,7 +58,7 @@ spec:
               protocol: TCP
           envFrom:
             - configMapRef:
-                name: {{ include "agent-sandbox.apiServiceName" . }}-config
+                name: {{ include "agent-sandbox.apiServiceConfigName" . }}
           env:
             - name: API_KEY
               valueFrom:

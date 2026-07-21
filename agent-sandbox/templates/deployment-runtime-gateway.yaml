@@ -1,7 +1,7 @@
 kind: StatefulSet
 apiVersion: {{ .Values.api.deployment | quote }}
 metadata:
-  name: {{ include "agent-sandbox.runtimeGatewayName" . }}
+  name: {{ include "agent-sandbox.runtimeGatewayStatefulSetName" . }}
   namespace: {{ .Values.namespace }}
   labels:
 {{ include "agent-sandbox.labels" . | indent 4 }}
@@ -93,7 +93,7 @@ spec:
               protocol: TCP
           envFrom:
             - configMapRef:
-                name: {{ include "agent-sandbox.runtimeGatewayName" . }}-config
+                name: {{ include "agent-sandbox.runtimeGatewayConfigName" . }}
           env:
             - name: CONTROL_PLANE_API_KEY
               valueFrom:

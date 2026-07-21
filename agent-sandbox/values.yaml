@@ -218,7 +218,7 @@ config:
     RUNTIME_GATEWAY_POD_LABEL_APP: "{{ .Chart.Name }}"
     RUNTIME_GATEWAY_POD_LABEL_TIER: "{{ .Values.tier }}"
     RUNTIME_GATEWAY_POD_LABEL_COMPONENT: "runtime-gateway"
-    RUNTIME_GATEWAY_STATEFULSET_NAME: "{{ include \"agent-sandbox.runtimeGatewayName\" . }}"
+    RUNTIME_GATEWAY_STATEFULSET_NAME: "{{ include \"agent-sandbox.runtimeGatewayStatefulSetName\" . }}"
     RUNTIME_GATEWAY_HEADLESS_SERVICE: "{{ include \"agent-sandbox.runtimeGatewayHeadlessName\" . }}"
     RUNTIME_GATEWAY_SERVICE_PORT: "{{ .Values.service.runtimeGateway.httpPort }}"
     API_SERVICE_INSTANCE_ID: ""

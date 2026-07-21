@@ -1,7 +1,7 @@
 apiVersion: {{ .Values.api.configmap | quote }}
 kind: ConfigMap
 metadata:
-  name: {{ include "agent-sandbox.apiServiceName" . }}-config
+  name: {{ include "agent-sandbox.apiServiceConfigName" . }}
   namespace: {{ .Values.namespace }}
   labels:
 {{ include "agent-sandbox.labels" . | indent 4 }}
@@ -13,7 +13,7 @@ data:
 apiVersion: {{ .Values.api.configmap | quote }}
 kind: ConfigMap
 metadata:
-  name: {{ include "agent-sandbox.runtimeGatewayName" . }}-config
+  name: {{ include "agent-sandbox.runtimeGatewayConfigName" . }}
   namespace: {{ .Values.namespace }}
   labels:
 {{ include "agent-sandbox.labels" . | indent 4 }}

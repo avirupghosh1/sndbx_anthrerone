@@ -30,16 +30,32 @@ tier: {{ .Values.tier }}
 {{- printf "%s/%s:%s" (.repo | toString) (.name | toString) (.tag | toString) -}}
 {{- end -}}
 
+{{- define "agent-sandbox.apiServiceDeploymentName" -}}
+{{- printf "%s-api-%s-deployment" .Chart.Name .Values.tier | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{- define "agent-sandbox.apiServiceName" -}}
-{{- printf "%s-api-service" (include "agent-sandbox.fullname" .) -}}
+{{- printf "%s-api-%s-service" .Chart.Name .Values.tier | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "agent-sandbox.apiServiceConfigName" -}}
+{{- printf "%s-api-%s-config" .Chart.Name .Values.tier | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "agent-sandbox.runtimeGatewayStatefulSetName" -}}
+{{- printf "%s-runtime-gateway-%s-statefulset" .Chart.Name .Values.tier | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "agent-sandbox.runtimeGatewayName" -}}
-{{- printf "%s-runtime-gateway" (include "agent-sandbox.fullname" .) -}}
+{{- printf "%s-runtime-gateway-%s-service" .Chart.Name .Values.tier | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "agent-sandbox.runtimeGatewayHeadlessName" -}}
-{{- printf "%s-headless" (include "agent-sandbox.runtimeGatewayName" .) -}}
+{{- printf "%s-runtime-gateway-%s-headless" .Chart.Name .Values.tier | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "agent-sandbox.runtimeGatewayConfigName" -}}
+{{- printf "%s-runtime-gateway-%s-config" .Chart.Name .Values.tier | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "agent-sandbox.apiServiceFqdn" -}}
@@ -51,7 +67,11 @@ tier: {{ .Values.tier }}
 {{- end -}}
 
 {{- define "agent-sandbox.templateRegistryName" -}}
-{{- printf "%s-template-registry" (include "agent-sandbox.fullname" .) -}}
+{{- include "agent-sandbox.templateRegistryDeploymentName" . -}}
+{{- end -}}
+
+{{- define "agent-sandbox.templateRegistryDeploymentName" -}}
+{{- printf "%s-template-registry-%s-deployment" .Chart.Name .Values.tier | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "agent-sandbox.templateRegistryInternalEnabled" -}}
