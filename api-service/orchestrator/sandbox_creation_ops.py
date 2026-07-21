@@ -199,6 +199,26 @@ class SandboxCreationOpsMixin:
                 self.db.set_template_build_error(tid, self._last_create_error)
                 logger.warning(self._last_create_error)
                 return None
+            if (
+                pool is not None
+                and requested_warm_pool_size is None
+                and desired_warm_pool_size > 0
+                and warm_ref_existing
+            ):
+                warm_key_existing = self.warm_pool_key(tid, cpu_limit, memory_limit, int(timeout))
+                if self.warm_pool_ready_count(warm_key_existing) > 0:
+                    sid = pool.try_acquire(
+                        tid,
+                        metadata,
+                        cpu_limit,
+                        memory_limit,
+                        int(timeout),
+                        owner_client_id=owner_client_id,
+                        owner_api_key_id=owner_api_key_id,
+                        wait_for_ready=False,
+                    )
+                    if sid:
+                        return sid
             tpl = self._ensure_template_runtime_image(tid, tpl)
             if not (tpl.get("warm_snapshot_image") or tpl.get("registry_image_ref")):
                 if (tpl.get("source_kind") or "").strip().lower() == "dockerfile":
