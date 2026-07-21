@@ -24,7 +24,7 @@ all secret values in Helm values. That is not the current QA6 production mode.
 For QA6, create this Secret in `spr-apps` before deploying:
 
 ```sh
-kubectl -n spr-apps create secret generic sndbx-qa6-tier1-secret \
+kubectl -n spr-apps create secret generic agent-sandbox-qa6-tier1-secret \
   --from-literal=API_KEY='<api-key>' \
   --from-literal=INTERNAL_API_KEY='<internal-api-key>' \
   --from-literal=PORTAL_SESSION_SECRET='<session-secret>' \
@@ -44,7 +44,7 @@ either `DATABASE_USERNAME` or the URL userinfo. The URI must include a database
 name, or the pod must set `MONGODB_DATABASE`.
 
 ```sh
-kubectl -n spr-apps create secret generic sndbx-qa6-tier1-secret \
+kubectl -n spr-apps create secret generic agent-sandbox-qa6-tier1-secret \
   --from-literal=API_KEY='<api-key>' \
   --from-literal=INTERNAL_API_KEY='<internal-api-key>' \
   --from-literal=PORTAL_SESSION_SECRET='<session-secret>' \
@@ -164,7 +164,7 @@ These are GitLab pipeline variables, not Kubernetes Secret keys:
 
 - `DEPLOY_SNDBX=true`
 - `DOCKER_REPO=asia-south1-docker.pkg.dev/gc-qa6/gc-qa6`
-- `DATABASE_SECRET_NAME=sndbx-qa6-tier1-secret`
+- `DATABASE_SECRET_NAME=agent-sandbox-qa6-tier1-secret`
 - `DATABASE_SECRET_KEY=DATABASE_URL`
 - `TEMPLATE_REGISTRY_INTERNAL_ENABLED=auto`
 - `TEMPLATE_REGISTRY_REPO_PREFIX=`
@@ -196,8 +196,8 @@ TEMPLATE_REGISTRY_AUTH_REQUIRED=false
 
 With `templateRegistry.pushEnabled=true`, Helm creates:
 
-- `sndbx-qa6-tier1-template-registry` Deployment
-- `sndbx-qa6-tier1-template-registry` Service
+- `agent-sandbox-qa6-tier1-template-registry` Deployment
+- `agent-sandbox-qa6-tier1-template-registry` Service
 
 The registry pod image is built by the Jenkins pipeline from
 `template-registry/Dockerfile`, which wraps the standard Docker distribution
@@ -218,13 +218,13 @@ full-image override.
 Runtime-gateway then pushes template images to:
 
 ```text
-sndbx-qa6-tier1-template-registry.spr-apps.svc.cluster.local:5000/templates
+agent-sandbox-qa6-tier1-template-registry.spr-apps.svc.cluster.local:5000/templates
 ```
 
 The Docker daemon sidecar is rendered with:
 
 ```text
---insecure-registry=sndbx-qa6-tier1-template-registry.spr-apps.svc.cluster.local:5000
+--insecure-registry=agent-sandbox-qa6-tier1-template-registry.spr-apps.svc.cluster.local:5000
 ```
 
 This registry is internal ClusterIP only. It is not exposed through ingress.
@@ -264,7 +264,7 @@ To store those uploaded build-context objects in S3 instead, set:
 
 ```sh
 IMAGE_BUILDING_AUTH_REQUIRED=true
-IMAGE_BUILDING_S3_SECRET_NAME=sndbx-qa6-tier1-secret
+IMAGE_BUILDING_S3_SECRET_NAME=agent-sandbox-qa6-tier1-secret
 IMAGE_BUILDING_S3_PREFIX=template-build-contexts
 IMAGE_BUILDING_S3_ENDPOINT_URL=
 ```
@@ -288,18 +288,18 @@ Helm creates one Ingress when `ingress.enabled=true`.
 
 For QA6 it renders:
 
-- Ingress name: `sndbx-qa6-tier1-ingress`
+- Ingress name: `agent-sandbox-qa6-tier1-ingress`
 - Namespace: `spr-apps`
 - Ingress class: `ingress-nginx-office`
 - TLS: Prism-style ingress automation via `kubernetes.io/tls-acme: "true"`
 
 The ingress routes are:
 
-- `https://api.qa6-agent-sandbox.sprinklr.com/` -> `sndbx-qa6-tier1-api-service:8000`
-- `https://*.qa6-agent-sandbox.sprinklr.com/` -> `sndbx-qa6-tier1-runtime-gateway:8080`
+- `https://api.qa6-agent-sandbox.sprinklr.com/` -> `agent-sandbox-qa6-tier1-api-service:8000`
+- `https://*.qa6-agent-sandbox.sprinklr.com/` -> `agent-sandbox-qa6-tier1-runtime-gateway:8080`
 
 Daytona SSH compatibility is a separate TCP path, not an HTTP ingress route.
-The chart exposes `sndbx-qa6-tier1-api-service:2222` as the SSH gateway port.
+The chart exposes `agent-sandbox-qa6-tier1-api-service:2222` as the SSH gateway port.
 For external SSH access, configure the platform TCP ingress/load balancer to
 forward the public SSH host and port to that service port, then set
 `config.apiService.DAYTONA_SSH_GATEWAY_PUBLIC_HOST` and
@@ -337,7 +337,7 @@ Before deploy, confirm:
 Render QA6 with test image tags:
 
 ```sh
-helm lint sndbx -f sndbx/releases/qa6-tier1/values.yaml \
+helm lint agent-sandbox -f agent-sandbox/releases/qa6-tier1/values.yaml \
   --set images.apiService.tag=test \
   --set images.runtimeGateway.tag=test \
   --set images.dockerDind.tag=test \
@@ -347,8 +347,8 @@ helm lint sndbx -f sndbx/releases/qa6-tier1/values.yaml \
 Render internal-registry mode:
 
 ```sh
-helm template internal-reg sndbx \
-  --set secrets.name=sndbx-qa6-tier1-secret \
+helm template internal-reg agent-sandbox \
+  --set secrets.name=agent-sandbox-qa6-tier1-secret \
   --set images.apiService.tag=test \
   --set images.runtimeGateway.tag=test \
   --set images.dockerDind.tag=test \
@@ -358,8 +358,8 @@ helm template internal-reg sndbx \
 Render MongoDB mode with an existing Secret:
 
 ```sh
-helm template mongo sndbx \
-  --set secrets.name=sndbx-qa6-tier1-secret \
+helm template mongo agent-sandbox \
+  --set secrets.name=agent-sandbox-qa6-tier1-secret \
   --set images.apiService.tag=test \
   --set images.runtimeGateway.tag=test \
   --set images.dockerDind.tag=test \
@@ -379,16 +379,16 @@ Expected intentional failures:
 ## Deploy Flow
 
 1. Push application code to the GitHub repo configured in `.gitlab-ci.yml`.
-2. Push the `sndbx` chart to the Helm internal tools repo branch used by Jenkins.
-3. Create/update `sndbx-qa6-tier1-secret` in `spr-apps`.
+2. Push the `agent-sandbox` chart to the Helm internal tools repo branch used by Jenkins.
+3. Create/update `agent-sandbox-qa6-tier1-secret` in `spr-apps`.
 4. Set GitLab CI variables for the internal registry path.
 5. Run the GitLab pipeline with `DEPLOY_SNDBX=true`.
 6. Jenkins builds `api-service`, `runtime-gateway`, `dockerd-gvisor`, and `template-registry`.
-7. Jenkins deploys Helm release `sndbx-qa6-tier1` into `spr-apps`.
+7. Jenkins deploys Helm release `agent-sandbox-qa6-tier1` into `spr-apps`.
 8. Verify pods, services, ingress, and registry mode:
 
 ```sh
-kubectl -n spr-apps get pods,svc,ingress,pvc | grep sndbx-qa6-tier1
-kubectl -n spr-apps get secret sndbx-qa6-tier1-secret
-kubectl -n spr-apps describe ingress sndbx-qa6-tier1-ingress
+kubectl -n spr-apps get pods,svc,ingress,pvc | grep agent-sandbox-qa6-tier1
+kubectl -n spr-apps get secret agent-sandbox-qa6-tier1-secret
+kubectl -n spr-apps describe ingress agent-sandbox-qa6-tier1-ingress
 ```

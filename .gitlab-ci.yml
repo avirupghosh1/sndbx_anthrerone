@@ -14,7 +14,7 @@ stages:
 
 # Shared change set so all image builds and the deploy trigger together.
 # Keeps deploy-qa6 `needs` satisfied for every image it consumes.
-.sndbx-changes: &sndbx-changes
+.agent-sandbox-changes: &agent-sandbox-changes
   - .gitlab-ci.yml
   - api-service/**/*
   - runtime-gateway/**/*
@@ -27,7 +27,7 @@ variables:
     options:
       - "false"
       - "true"
-    description: "Build sndbx images and deploy the Helm release"
+    description: "Build agent-sandbox images and deploy the Helm release"
   JENKINS_URL: "https://qa6-build-int.sprinklr.com/jenkins"
   JENKINS_BUILD_JOB_PATH: "job/build-deploy-jobs/job/ci-docker-image-builder"
   JENKINS_DEPLOY_JOB_PATH: "job/itops-noc-jobs/job/custom-k8s-helm-deployment"
@@ -43,15 +43,15 @@ variables:
   DOCKER_REPO: "asia-south1-docker.pkg.dev/gc-qa6/gc-qa6"
   TEMPLATE_REGISTRY_REPO_PREFIX: ""
   TEMPLATE_REGISTRY_SERVER: ""
-  TEMPLATE_REGISTRY_SECRET_NAME: "sndbx-qa6-tier1-secret"
+  TEMPLATE_REGISTRY_SECRET_NAME: "agent-sandbox-qa6-tier1-secret"
   TEMPLATE_REGISTRY_AUTH_REQUIRED: "false"
   TEMPLATE_REGISTRY_LAYOUT: "auto"
   TEMPLATE_REGISTRY_INTERNAL_ENABLED: "auto"
   IMAGE_BUILDING_AUTH_REQUIRED: "false"
-  IMAGE_BUILDING_S3_SECRET_NAME: "sndbx-qa6-tier1-secret"
+  IMAGE_BUILDING_S3_SECRET_NAME: "agent-sandbox-qa6-tier1-secret"
   IMAGE_BUILDING_S3_PREFIX: "template-build-contexts"
   IMAGE_BUILDING_S3_ENDPOINT_URL: ""
-  DATABASE_SECRET_NAME: "sndbx-qa6-tier1-secret"
+  DATABASE_SECRET_NAME: "agent-sandbox-qa6-tier1-secret"
   DATABASE_SECRET_KEY: "DATABASE_URL"
   API_SERVICE_IMAGE_NAME: "api-service"
   RUNTIME_GATEWAY_IMAGE_NAME: "runtime-gateway"
@@ -167,7 +167,7 @@ build-api-service:
     - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
-      changes: *sndbx-changes
+      changes: *agent-sandbox-changes
 
 build-gvisor-image:
   extends: .trigger-jenkins-and-wait
@@ -181,7 +181,7 @@ build-gvisor-image:
     - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
-      changes: *sndbx-changes
+      changes: *agent-sandbox-changes
 
 
 build-runtime-gateway:
@@ -196,7 +196,7 @@ build-runtime-gateway:
     - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
-      changes: *sndbx-changes
+      changes: *agent-sandbox-changes
 
 build-template-registry:
   extends: .trigger-jenkins-and-wait
@@ -210,7 +210,7 @@ build-template-registry:
     - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
-      changes: *sndbx-changes
+      changes: *agent-sandbox-changes
 
 deploy-qa6:
   stage: deploy
@@ -303,4 +303,4 @@ deploy-qa6:
     - if: $CI_PIPELINE_SOURCE == "web" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "api" && $DEPLOY_SNDBX == "true"
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
-      changes: *sndbx-changes
+      changes: *agent-sandbox-changes

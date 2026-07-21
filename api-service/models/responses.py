@@ -95,6 +95,21 @@ class SandboxTimeoutRefreshResponse(BaseModel):
     refreshed: bool = Field(..., description="False if sandbox missing or not running")
 
 
+class WarmPoolResizeResponse(BaseModel):
+    """Ack after changing the desired warm-pool size for a sandbox segment."""
+
+    sandbox_id: str
+    warm_pool_key: str
+    template_id: str
+    cpu_limit: str
+    memory_limit: str
+    timeout: int
+    previous_desired_size: int
+    desired_size: int
+    ready_count: int
+    updated: bool = True
+
+
 class SnapshotRecordResponse(BaseModel):
     """One row from ``docker commit`` + ``sandbox_snapshots``."""
 
