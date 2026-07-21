@@ -834,8 +834,34 @@ async def get_snapshot_build_logs(
 
 
 @router.delete("/snapshots/{snapshot_id}")
-async def delete_snapshot(snapshot_id: str):
-    _ = snapshot_id
+async def delete_snapshot(
+    snapshot_id: str,
+    principal: ApiKeyPrincipal = Depends(validate_api_key),
+    sandbox_manager: SandboxManager = Depends(lambda: SandboxManager.__dict__.get("instance")),
+):
+    if await template_handlers.delete_template_for_principal(sandbox_manager, principal, snapshot_id):
+        return Response(status_code=204)
+    row = await run_io(
+        sandbox_manager.db.get_sandbox_snapshot,
+        snapshot_id,
+        principal.client_id,
+    )
+    if not row:
+        rows = await run_io(
+            sandbox_manager.db.list_all_sandbox_snapshots,
+            500,
+            principal.client_id,
+        )
+        row = next((r for r in rows if str(r.get("label") or "") == snapshot_id), None)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Unknown snapshot: {snapshot_id}")
+    ok = await run_io(
+        sandbox_manager.db.delete_sandbox_snapshot,
+        str(row.get("snapshot_id") or snapshot_id),
+        principal.client_id,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Unknown snapshot: {snapshot_id}")
     return Response(status_code=204)
 
 

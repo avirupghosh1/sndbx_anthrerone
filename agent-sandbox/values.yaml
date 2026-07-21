@@ -164,7 +164,7 @@ config:
     RUNTIME_GATEWAY_URL: "http://{{ include \"agent-sandbox.runtimeGatewayServiceFqdn\" . }}:8080"
     SANDBOX_DATA_PLANE_ENABLED: "true"
     SANDBOX_DATA_PLANE_DOMAIN: "agent-sandbox.example.com"
-    SANDBOX_DATA_PLANE_SCHEME: "https"
+    SANDBOX_DATA_PLANE_SCHEME: "http"
     SANDBOX_DATA_PLANE_DEBUG: "false"
     SANDBOX_DEFAULT_ALLOW_PUBLIC_TRAFFIC: "false"
     DAYTONA_OBJECT_STORAGE_URL: ""

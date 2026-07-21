@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from orchestrator.gateway_targets import GatewayTarget
 from orchestrator.template_image_lifecycle import TemplateImageLifecycle
 
 
@@ -60,6 +61,7 @@ class FakeManager:
         self.build_ok = build_ok
         self.build_calls = []
         self.events = []
+        self.gateway_images = {}
 
     def _build_registered_template_snapshot(self, template_id):
         self.build_calls.append(template_id)
@@ -82,6 +84,9 @@ class FakeManager:
 
     def _gateway_targets(self):
         return []
+
+    def _gateway_has_image(self, target, image_ref, *, force_refresh=False):
+        return bool(self.gateway_images.get((target.instance_id, image_ref)))
 
     def _record_observability_event(self, **kwargs):
         self.events.append(kwargs)
@@ -152,3 +157,67 @@ def test_repair_missing_base_image_snapshot_reports_unavailable_source():
     assert manager.build_calls == []
     assert "base image rebuild source is unavailable" in manager.db.row["build_error"]
     assert manager.events[-1]["action"] == "rebuild_unavailable"
+
+
+def test_image_for_target_prefers_owner_local_warm_image_over_registry_ref():
+    row = {
+        "template_id": "tpl-fast",
+        "base_image": "local-template:tag",
+        "warm_snapshot_image": "local-template:tag",
+        "registry_image_ref": "registry.local/templates/tpl-fast:tag",
+        "materialized_gateway_instance_id": "runtime-gateway-1",
+    }
+    manager = FakeManager(row)
+    manager.gateway_images[("runtime-gateway-1", "local-template:tag")] = True
+    target = GatewayTarget("runtime-gateway-1", "http://gateway-1", "http://gateway-1")
+
+    image = TemplateImageLifecycle(manager).image_for_target(
+        template_id="tpl-fast",
+        row=row,
+        requested_image="registry.local/templates/tpl-fast:tag",
+        target=target,
+    )
+
+    assert image == "local-template:tag"
+
+
+def test_image_for_target_falls_back_to_registry_when_owner_local_image_is_missing():
+    row = {
+        "template_id": "tpl-fast",
+        "base_image": "local-template:tag",
+        "warm_snapshot_image": "local-template:tag",
+        "registry_image_ref": "registry.local/templates/tpl-fast:tag",
+        "materialized_gateway_instance_id": "runtime-gateway-1",
+    }
+    manager = FakeManager(row)
+    target = GatewayTarget("runtime-gateway-1", "http://gateway-1", "http://gateway-1")
+
+    image = TemplateImageLifecycle(manager).image_for_target(
+        template_id="tpl-fast",
+        row=row,
+        requested_image="registry.local/templates/tpl-fast:tag",
+        target=target,
+    )
+
+    assert image == "registry.local/templates/tpl-fast:tag"
+
+
+def test_image_for_target_falls_back_to_registry_from_warm_ref_when_owner_image_is_missing():
+    row = {
+        "template_id": "tpl-fast",
+        "base_image": "local-template:tag",
+        "warm_snapshot_image": "local-template:tag",
+        "registry_image_ref": "registry.local/templates/tpl-fast:tag",
+        "materialized_gateway_instance_id": "runtime-gateway-1",
+    }
+    manager = FakeManager(row)
+    target = GatewayTarget("runtime-gateway-1", "http://gateway-1", "http://gateway-1")
+
+    image = TemplateImageLifecycle(manager).image_for_target(
+        template_id="tpl-fast",
+        row=row,
+        requested_image="local-template:tag",
+        target=target,
+    )
+
+    assert image == "registry.local/templates/tpl-fast:tag"

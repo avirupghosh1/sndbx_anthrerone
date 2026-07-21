@@ -548,6 +548,21 @@ class TemplateImageLifecycle:
             return image
         warm_ref = str(row.get("warm_snapshot_image") or "").strip()
         registry_ref = str(row.get("registry_image_ref") or "").strip()
+        owner_instance = str(row.get("materialized_gateway_instance_id") or "").strip()
+        if warm_ref and owner_instance and target.instance_id == owner_instance:
+            if self.manager._gateway_has_image(
+                target,
+                warm_ref,
+                force_refresh=True,
+            ):
+                logger.info(
+                    "Template %s using local warm image on owner gateway=%s for request-time create: image=%s registry=%s",
+                    template_id,
+                    target.instance_id,
+                    warm_ref,
+                    registry_ref or "-",
+                )
+                return warm_ref
         if image == registry_ref:
             return image
         if registry_ref:

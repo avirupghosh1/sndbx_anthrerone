@@ -314,12 +314,12 @@ class SandboxCreationOpsMixin:
                     wait_sec = float(getattr(cfg, "SANDBOX_WARM_POOL_ACQUIRE_WAIT_SEC", 0.0) or 0.0)
                     segment_after = self.db.get_warm_pool_segment(warm_key) if warm_key else None
                     err = str((segment_after or {}).get("last_error") or "").strip()
-                    self._last_create_error = (
-                        f"Timed out after {wait_sec:.1f}s waiting for a warm sandbox for template {tid!r}"
-                        + (f": {err}" if err else "")
+                    logger.info(
+                        "Warm pool unavailable for template %r after %.1fs; falling back to cold create%s",
+                        tid,
+                        wait_sec,
+                        f": {err}" if err else "",
                     )
-                    logger.warning(self._last_create_error)
-                    return None
             sid = self._create_sandbox_fresh(
                 template_id=tid,
                 metadata=metadata,

@@ -93,7 +93,7 @@ imageBuilding:
 config:
   apiService:
     SANDBOX_DATA_PLANE_DOMAIN: "qa6-agent-sandbox.sprinklr.com"
-    SANDBOX_DATA_PLANE_SCHEME: "https"
+    SANDBOX_DATA_PLANE_SCHEME: "http"
     SANDBOX_WARM_POOL_SIZE: "2"
   runtimeGateway:
     SANDBOX_DOMAIN: "qa6-agent-sandbox.sprinklr.com"
