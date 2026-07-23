@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 
 import pytest
 from fastapi import HTTPException
@@ -13,6 +14,11 @@ os.environ.setdefault("INTERNAL_API_KEY", "internal-key")
 os.environ.setdefault("ADMIN_API_KEY", "admin-key")
 
 from handlers import portal  # noqa: E402
+
+
+def test_new_api_key_value_matches_e2b_sdk_format():
+    api_key = portal._new_api_key_value()
+    assert re.fullmatch(r"e2b_[0-9a-f]{40}", api_key)
 
 
 class FakePortalDB:

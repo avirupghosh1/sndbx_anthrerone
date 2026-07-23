@@ -380,7 +380,7 @@ def _hash_api_key(api_key: str) -> str:
 
 
 def _new_api_key_value() -> str:
-    return f"sbx_{secrets.token_urlsafe(24)}"
+    return f"e2b_{secrets.token_hex(20)}"
 
 
 def _normalize_api_key_name(name: str) -> str:
