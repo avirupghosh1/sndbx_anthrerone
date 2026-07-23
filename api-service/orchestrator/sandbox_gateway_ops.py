@@ -325,9 +325,8 @@ class SandboxGatewayOpsMixin:
                 )
             logger.warning("Warm pool handoff skipped dead gateway sandbox=%s gateway=%s", sid or "-", gid)
             return False
-        if not self._gateway_can_accept_new_usage(target, force_refresh=False):
-            logger.debug("Warm pool handoff skipped unreachable gateway sandbox=%s gateway=%s", sid or "-", gid)
-            return False
+        # Keep warm handoff DB-first. These rows are created only after bootstrap;
+        # live container checks run in the inventory reconciler, not per request.
         return True
 
     def _live_warm_pool_rows(self, warm_pool_key: str) -> List[Dict[str, Any]]:
@@ -425,6 +424,12 @@ class SandboxGatewayOpsMixin:
         md = md if isinstance(md, dict) else {}
         return str(md.get("warm_pool_snapshot_image") or "").strip() in refs
 
+    @staticmethod
+    def _warm_pool_row_has_runtime_error(row: Dict[str, Any]) -> bool:
+        md = row.get("metadata") if isinstance(row, dict) else {}
+        md = md if isinstance(md, dict) else {}
+        return bool(str(md.get("runtime_error") or "").strip())
+
     def _discard_stale_warm_pool_rows(self, warm_pool_key: str, image_refs: tuple[str, ...]) -> int:
         refs = tuple(ref for ref in image_refs if ref)
         if not refs:
@@ -466,6 +471,7 @@ class SandboxGatewayOpsMixin:
                 row
                 for row in self.db.list_warm_pool_sandboxes(warm_pool_key=warm_pool_key)
                 if self._warm_pool_row_matches_image(row, image_refs)
+                and not self._warm_pool_row_has_runtime_error(row)
             ]
         )
 
@@ -925,6 +931,8 @@ class SandboxGatewayOpsMixin:
             targets_by_instance = {target.instance_id: target for target in self._gateway_targets()}
         inventory: Dict[str, List[Dict[str, Any]]] = {}
         for row in self.db.list_warm_pool_sandboxes(warm_pool_key=key):
+            if self._warm_pool_row_has_runtime_error(row):
+                continue
             if not self._warm_pool_row_matches_image(row, image_refs):
                 continue
             if not self._warm_pool_row_gateway_available(row, targets_by_instance):

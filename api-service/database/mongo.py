@@ -564,6 +564,20 @@ class _MongoDatabase:
             if not picked:
                 return None
             prev = self._metadata_value(picked.get("metadata"))
+            if str(prev.get("runtime_error") or "").strip():
+                now = _utc_now_iso()
+                self.db.sandboxes.update_one(
+                    {"_id": picked.get("_id"), "is_warm_pool": True},
+                    {
+                        "$set": {
+                            "state": "lost",
+                            "is_warm_pool": False,
+                            "warm_pool_key": None,
+                            "updated_at": now,
+                        }
+                    },
+                )
+                continue
             prev.pop("_warm_pool", None)
             merged = {**prev, **updates}
             base_wait = float(merged.get("sandbox_allocation_acquire_wait_seconds") or 0.0)
@@ -612,6 +626,7 @@ class _MongoDatabase:
         return [
             self._sandbox_dict_from_doc(doc)
             for doc in self.db.sandboxes.find(query).sort("created_at", 1)
+            if not str(self._metadata_value(doc.get("metadata")).get("runtime_error") or "").strip()
         ]
 
     def upsert_warm_pool_segment(

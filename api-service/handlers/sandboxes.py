@@ -196,16 +196,21 @@ async def create_sandbox_row(
         merged_env.update({str(k): str(v) for k, v in request.env_vars.items() if v is not None})
         metadata["env"] = merged_env
 
-    from_snapshot_image = request.from_snapshot_image or resolve_snapshot_image(
-        sandbox_manager,
-        principal,
-        request.template_id or "",
-    )
-    resolved_template_id = resolve_template_id_for_principal(
-        sandbox_manager,
-        principal,
-        request.template_id,
-    )
+    def _resolve_create_inputs() -> tuple[Optional[str], str]:
+        return (
+            request.from_snapshot_image or resolve_snapshot_image(
+                sandbox_manager,
+                principal,
+                request.template_id or "",
+            ),
+            resolve_template_id_for_principal(
+                sandbox_manager,
+                principal,
+                request.template_id,
+            ),
+        )
+
+    from_snapshot_image, resolved_template_id = await run_io(_resolve_create_inputs)
     queue_timeout = float(
         getattr(sandbox_manager._config, "SANDBOX_CREATE_QUEUE_TIMEOUT_SEC", 2.0) or 2.0
     )
@@ -292,7 +297,7 @@ async def create_sandbox_row(
                 ) from None
 
     if not sandbox_id:
-        hint = sandbox_manager.describe_docker_workload_blocker()
+        hint = await run_io(sandbox_manager.describe_docker_workload_blocker)
         detail = (
             "Failed to create sandbox: Docker could not start a workload. "
             "Check Docker socket, image pull, and template_id."
@@ -301,7 +306,7 @@ async def create_sandbox_row(
             detail = f"{detail} {hint}"
         raise HTTPException(status_code=503, detail=detail)
 
-    sandbox = sandbox_manager.get_sandbox_for_create_response(sandbox_id)
+    sandbox = await run_io(sandbox_manager.get_sandbox_for_create_response, sandbox_id)
     if not sandbox:
         raise HTTPException(status_code=500, detail="Sandbox was created but no DB row was returned")
     return sandbox

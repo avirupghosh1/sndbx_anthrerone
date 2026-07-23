@@ -5,12 +5,6 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-CLIENTS_DIR = Path(__file__).resolve().parent.parent / "clients"
-sys.path.insert(0, str(CLIENTS_DIR / "toolbox-api-client-python-async"))
-sys.path.insert(0, str(CLIENTS_DIR / "api-client-python-async"))
-sys.path.insert(0, str(CLIENTS_DIR / "toolbox-api-client-python"))
-sys.path.insert(0, str(CLIENTS_DIR / "api-client-python"))
-sys.path.insert(0, str(CLIENTS_DIR / "sdk-python" / "src"))
 
 from daytona import (  # noqa: E402
     CreateSecretParams,

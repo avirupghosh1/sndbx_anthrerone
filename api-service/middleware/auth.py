@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 from fastapi import HTTPException, Request, status
 
+from async_runner import run_io
 from config import get_config
 from database import Database
 
@@ -397,9 +398,10 @@ async def validate_api_key(request: Request) -> ApiKeyPrincipal:
 
     try:
         if api_key:
-            return authenticate_api_key_value(api_key)
+            return await run_io(authenticate_api_key_value, api_key)
         cfg = get_config()
-        return authenticate_client_credential(
+        return await run_io(
+            authenticate_client_credential,
             bearer,
             allow_jwt=True,
             allow_api_key=bool(getattr(cfg, "AUTH_BEARER_API_KEYS_ENABLED", True)),

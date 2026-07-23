@@ -1053,57 +1053,69 @@ class _PostgresDatabase:
         else:
             rendered = sql.format(gateway_clause="")
             params = (key,)
-        cursor.execute(rendered, params)
-        row = cursor.fetchone()
-        if not row:
-            conn.commit()
-            conn.close()
-            return None
-        picked = self._sandbox_dict_from_row(cursor, row)
-        prev = dict(picked.get("metadata") or {})
-        prev.pop("_warm_pool", None)
-        merged = {**prev, **updates}
-        base_wait = float(merged.get("sandbox_allocation_acquire_wait_seconds") or 0.0)
-        merged["sandbox_allocation_acquire_wait_seconds"] = round(
-            base_wait + max(0.0, time.monotonic() - claim_started),
-            3,
-        )
-        timeout_value = int(timeout_seconds) if timeout_seconds is not None else int(picked.get("timeout") or 3600)
-        lease_expires_at = (
-            datetime.now(timezone.utc) + timedelta(seconds=max(60, timeout_value))
-        ).isoformat().replace("+00:00", "Z")
-        cursor.execute(
-            """
-            UPDATE sandboxes
-            SET owner_client_id = ?, owner_api_key_id = ?, is_warm_pool = 0,
-                warm_pool_key = NULL, metadata = ?, timeout = ?,
-                lease_expires_at = ?, updated_at = ?
-            WHERE sandbox_id = ?
-            RETURNING *
-            """,
-            (
-                owner_client_id,
-                owner_api_key_id,
-                json.dumps(merged),
-                timeout_value,
-                lease_expires_at,
-                now,
-                picked["sandbox_id"],
-            ),
-        )
-        updated = cursor.fetchone()
-        result = self._sandbox_dict_from_row(cursor, updated) if updated else None
-        if result:
+        result: Optional[Dict[str, Any]] = None
+        for _ in range(8):
+            cursor.execute(rendered, params)
+            row = cursor.fetchone()
+            if not row:
+                break
+            picked = self._sandbox_dict_from_row(cursor, row)
+            prev = dict(picked.get("metadata") or {})
+            if str(prev.get("runtime_error") or "").strip():
+                cursor.execute(
+                    """
+                    UPDATE sandboxes
+                    SET state = 'lost', is_warm_pool = 0,
+                        warm_pool_key = NULL, updated_at = ?
+                    WHERE sandbox_id = ?
+                    """,
+                    (now, picked["sandbox_id"]),
+                )
+                continue
+            prev.pop("_warm_pool", None)
+            merged = {**prev, **updates}
+            base_wait = float(merged.get("sandbox_allocation_acquire_wait_seconds") or 0.0)
+            merged["sandbox_allocation_acquire_wait_seconds"] = round(
+                base_wait + max(0.0, time.monotonic() - claim_started),
+                3,
+            )
+            timeout_value = int(timeout_seconds) if timeout_seconds is not None else int(picked.get("timeout") or 3600)
+            lease_expires_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=max(60, timeout_value))
+            ).isoformat().replace("+00:00", "Z")
             cursor.execute(
                 """
-                UPDATE warm_pool_segments
-                SET handoff_count = handoff_count + 1,
-                    last_handoff_at = ?,
-                    updated_at = ?
-                WHERE warm_pool_key = ?
+                UPDATE sandboxes
+                SET owner_client_id = ?, owner_api_key_id = ?, is_warm_pool = 0,
+                    warm_pool_key = NULL, metadata = ?, timeout = ?,
+                    lease_expires_at = ?, updated_at = ?
+                WHERE sandbox_id = ?
+                RETURNING *
                 """,
-                (now, now, key),
+                (
+                    owner_client_id,
+                    owner_api_key_id,
+                    json.dumps(merged),
+                    timeout_value,
+                    lease_expires_at,
+                    now,
+                    picked["sandbox_id"],
+                ),
             )
+            updated = cursor.fetchone()
+            result = self._sandbox_dict_from_row(cursor, updated) if updated else None
+            if result:
+                cursor.execute(
+                    """
+                    UPDATE warm_pool_segments
+                    SET handoff_count = handoff_count + 1,
+                        last_handoff_at = ?,
+                        updated_at = ?
+                    WHERE warm_pool_key = ?
+                    """,
+                    (now, now, key),
+                )
+            break
         conn.commit()
         conn.close()
         return result
@@ -1132,7 +1144,11 @@ class _PostgresDatabase:
                 """
             )
         rows = cursor.fetchall()
-        out = [self._sandbox_dict_from_row(cursor, row) for row in rows]
+        out = [
+            item
+            for item in (self._sandbox_dict_from_row(cursor, row) for row in rows)
+            if not str((item.get("metadata") or {}).get("runtime_error") or "").strip()
+        ]
         conn.close()
         return out
 
