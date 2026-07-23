@@ -18,6 +18,18 @@ def gateway_ws_url(runtime_gateway_url: str) -> str:
     return urlunparse((scheme, parsed.netloc, path, "", "", ""))
 
 
+def gateway_http_url(runtime_gateway_url: str) -> str:
+    raw = (runtime_gateway_url or "").strip().rstrip("/")
+    if not raw:
+        raise ValueError("RUNTIME_GATEWAY_URL is not configured")
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    if not parsed.netloc:
+        raise ValueError(f"Invalid RUNTIME_GATEWAY_URL: {runtime_gateway_url!r}")
+    scheme = "https" if (parsed.scheme or "http").lower() in ("https", "wss") else "http"
+    path = (parsed.path or "").rstrip("/")
+    return urlunparse((scheme, parsed.netloc, path, "", "", ""))
+
+
 def forward_headers(
     inbound_headers: Any,
     *,

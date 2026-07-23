@@ -10,12 +10,18 @@ assert _SPEC and _SPEC.loader
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 forward_headers = _MODULE.forward_headers
+gateway_http_url = _MODULE.gateway_http_url
 gateway_ws_url = _MODULE.gateway_ws_url
 
 
 def test_gateway_ws_url_targets_gateway_root():
     assert gateway_ws_url("http://runtime-gateway.svc:8080") == "ws://runtime-gateway.svc:8080/"
     assert gateway_ws_url("https://gateway.example/internal") == "wss://gateway.example/internal/"
+
+
+def test_gateway_http_url_targets_gateway_base():
+    assert gateway_http_url("http://runtime-gateway.svc:8080") == "http://runtime-gateway.svc:8080"
+    assert gateway_http_url("wss://gateway.example/internal") == "https://gateway.example/internal"
 
 
 def test_forward_headers_encode_gateway_route_and_tokens():

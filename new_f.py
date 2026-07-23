@@ -24,7 +24,7 @@ if (MY_SDK_ROOT / "my_sdk").is_dir():
 from my_sdk.api import APIEndpoints
 from my_sdk.api.async_client import AsyncAPIClient
 
-TEMPLATE_ALIAS = "e2b-warmpool-resize-smoke-big"
+TEMPLATE_ALIAS = "custodian-agentlib-sandbox-dev-avirup-ghosh"
 
 
 def resolve_template_id(env_name: str) -> str:
@@ -169,7 +169,7 @@ async def main() -> int:
     )
     parser.add_argument(
         "--local-api-key",
-        default="sbx_nUW4EzXAiklLtsb01vMmHUesT1mJtbc9",
+        default="sbx_MRHuAMEcqS2O9yTgJKU6C4IoLrZ0Cxpe",
         help="Local sandbox API key.",
     )
     parser.add_argument(

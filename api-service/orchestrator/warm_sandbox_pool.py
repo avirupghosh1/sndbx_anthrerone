@@ -720,16 +720,7 @@ class MultiWarmSandboxPool:
         owner_api_key_id: Optional[str] = None,
         wait_for_ready: bool = True,
     ) -> Optional[str]:
-        key: PoolKey = _compatible_pool_shape(template_id, cpu_limit, memory_limit)
-        with self._pools_lock:
-            pool = self._pools.get(key)
-            if pool is None:
-                want_shape = _compatible_pool_shape(template_id, cpu_limit, memory_limit)
-                for existing_key, existing_pool in self._pools.items():
-                    if _compatible_pool_shape(*existing_key[:3]) == want_shape:
-                        pool = existing_pool
-                        break
-        if pool is None:
+        def _claim_direct() -> Optional[str]:
             claim_metadata = dict(metadata or {})
             claim_metadata.pop("_warm_pool", None)
             claim_metadata["sandbox_allocation_source"] = "warm_pool_acquire"
@@ -752,9 +743,20 @@ class MultiWarmSandboxPool:
             )
             if not claimed:
                 return None
-            sid = str(claimed.get("sandbox_id") or "").strip()
-            return sid
-        return pool.try_acquire(
+            return str(claimed.get("sandbox_id") or "").strip() or None
+
+        key: PoolKey = _compatible_pool_shape(template_id, cpu_limit, memory_limit)
+        with self._pools_lock:
+            pool = self._pools.get(key)
+            if pool is None:
+                want_shape = _compatible_pool_shape(template_id, cpu_limit, memory_limit)
+                for existing_key, existing_pool in self._pools.items():
+                    if _compatible_pool_shape(*existing_key[:3]) == want_shape:
+                        pool = existing_pool
+                        break
+        if pool is None:
+            return _claim_direct()
+        sid = pool.try_acquire(
             template_id,
             metadata,
             cpu_limit,
@@ -764,6 +766,9 @@ class MultiWarmSandboxPool:
             owner_api_key_id=owner_api_key_id,
             wait_for_ready=wait_for_ready,
         )
+        if sid:
+            return sid
+        return _claim_direct()
 
     def discard(self, sandbox_id: str) -> None:
         with self._pools_lock:

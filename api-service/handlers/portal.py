@@ -78,7 +78,7 @@ def _request_scheme(request: Optional[Request]) -> str:
     forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
     if forwarded_proto:
         return forwarded_proto
-    forwarded = (request.headers.get("forwarded") or "").split(",", 1)[0]
+    forwarded = request.headers.get("forwarded") or ""
     for part in forwarded.split(";"):
         key, sep, value = part.strip().partition("=")
         if sep and key.lower() == "proto":
