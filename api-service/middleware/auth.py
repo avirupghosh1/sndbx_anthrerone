@@ -22,9 +22,12 @@ from config import get_config
 from database import Database
 
 _BOOTSTRAP_LOCK = Lock()
+_API_KEY_CACHE_LOCK = Lock()
+_API_KEY_AUTH_CACHE: dict[str, tuple[float, ApiKeyPrincipal]] = {}
 _BOOTSTRAP_CLIENT_ID = "bootstrap-local-client"
 _BOOTSTRAP_EMAIL = "bootstrap@local.invalid"
 _PASSWORD_DISABLED_HASH = "!"
+_API_KEY_CACHE_MAX_ENTRIES = 4096
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,50 @@ def _principal_from_row(
         token_id=token_id,
         expires_at=expires_at,
     )
+
+
+def _api_key_cache_ttl_seconds() -> float:
+    cfg = get_config()
+    try:
+        return max(0.0, float(getattr(cfg, "AUTH_API_KEY_CACHE_TTL_SEC", 30.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _get_cached_api_key_principal(key_hash: str) -> Optional[ApiKeyPrincipal]:
+    ttl = _api_key_cache_ttl_seconds()
+    if ttl <= 0:
+        return None
+    now = time.monotonic()
+    with _API_KEY_CACHE_LOCK:
+        cached = _API_KEY_AUTH_CACHE.get(key_hash)
+        if not cached:
+            return None
+        expires_at, principal = cached
+        if expires_at > now:
+            return principal
+        _API_KEY_AUTH_CACHE.pop(key_hash, None)
+    return None
+
+
+def _set_cached_api_key_principal(key_hash: str, principal: ApiKeyPrincipal) -> None:
+    ttl = _api_key_cache_ttl_seconds()
+    if ttl <= 0:
+        return
+    now = time.monotonic()
+    with _API_KEY_CACHE_LOCK:
+        if len(_API_KEY_AUTH_CACHE) >= _API_KEY_CACHE_MAX_ENTRIES:
+            expired = [key for key, (expires_at, _) in _API_KEY_AUTH_CACHE.items() if expires_at <= now]
+            for key in expired:
+                _API_KEY_AUTH_CACHE.pop(key, None)
+            if len(_API_KEY_AUTH_CACHE) >= _API_KEY_CACHE_MAX_ENTRIES:
+                _API_KEY_AUTH_CACHE.clear()
+        _API_KEY_AUTH_CACHE[key_hash] = (now + ttl, principal)
+
+
+def clear_api_key_auth_cache() -> None:
+    with _API_KEY_CACHE_LOCK:
+        _API_KEY_AUTH_CACHE.clear()
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -203,16 +250,22 @@ def authenticate_api_key_value(api_key: str, *, touch: bool = True) -> ApiKeyPri
     raw = (api_key or "").strip()
     if not raw:
         raise ClientAuthError(status.HTTP_401_UNAUTHORIZED, "API key required")
+    hashed = hash_api_key(raw)
+    cached = _get_cached_api_key_principal(hashed)
+    if cached is not None:
+        return cached
     ensure_bootstrap_client_and_key()
     db = _db()
-    row = db.get_api_key_principal(hash_api_key(raw))
+    row = db.get_api_key_principal(hashed)
     if not row or row.get("revoked_at"):
         raise ClientAuthError(status.HTTP_401_UNAUTHORIZED, "Invalid API key")
     if not row.get("is_active", False):
         raise ClientAuthError(status.HTTP_403_FORBIDDEN, "Client is disabled")
     if touch:
         db.touch_api_key_used(str(row["key_id"]))
-    return _principal_from_row(row, auth_type="api_key")
+    principal = _principal_from_row(row, auth_type="api_key")
+    _set_cached_api_key_principal(hashed, principal)
+    return principal
 
 
 def authenticate_jwt_value(token: str, *, touch: bool = True) -> ApiKeyPrincipal:
@@ -425,6 +478,7 @@ def add_api_key(key: str) -> None:
     hashed = hash_api_key(raw)
     if db.get_api_key_principal(hashed):
         return
+    clear_api_key_auth_cache()
     db.create_api_key(
         key_id=f"key-{secrets.token_hex(8)}",
         client_id=_BOOTSTRAP_CLIENT_ID,
@@ -444,3 +498,4 @@ def remove_api_key(key: str) -> None:
     if not row:
         return
     db.revoke_api_key(str(row["key_id"]), str(row["client_id"]))
+    clear_api_key_auth_cache()

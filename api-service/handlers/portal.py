@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 
 from config import get_config
 from database import Database
-from middleware import admin_api_key_is_valid
+from middleware import admin_api_key_is_valid, clear_api_key_auth_cache
 from template_build_progress import derive_template_build_progress, parse_build_log_lines
 
 from . import admin_observability
@@ -1063,4 +1063,5 @@ async def revoke_api_key(request: Request, key_id: str, csrf_token: str = Form("
     if not client:
         return _redirect(request, "/portal/login")
     _db().revoke_api_key(key_id, client["client_id"])
+    clear_api_key_auth_cache()
     return _redirect(request, "/portal/api-keys")

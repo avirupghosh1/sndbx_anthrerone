@@ -124,6 +124,10 @@ class Config:
     # Keep Bearer API keys enabled for E2B/Daytona/Modal SDK compatibility.
     # Bearer values that look like JWTs are validated as JWTs first.
     AUTH_BEARER_API_KEYS_ENABLED: bool = _env_bool("AUTH_BEARER_API_KEYS_ENABLED", True)
+    AUTH_API_KEY_CACHE_TTL_SEC: float = max(
+        0.0,
+        min(300.0, float(os.getenv("AUTH_API_KEY_CACHE_TTL_SEC", "30.0") or "30.0")),
+    )
     PORTAL_SESSION_SECRET: str = (
         os.getenv("PORTAL_SESSION_SECRET")
         or ("" if IS_PRODUCTION else API_KEY)
