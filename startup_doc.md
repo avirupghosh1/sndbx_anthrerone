@@ -15,7 +15,7 @@ or pass **[ api_url = “http://api.qa6-agent-sandbox.sprinklr.com” , api_key=
 
 - As current url’s are not ca certified
 
-  **“https://*.qa6-agent-sandbox.sprinklr.com”** won’t work so we need to use inject sandbox_url **“http://49983-{sid}.qa6-agent-sandbox.sprinklr.com”** after every create using a reconnect. the code patch is something like this,
+  **“https://*.qa6-agent-sandbox.sprinklr.com”** won’t work so we need to inject sandbox_url **“http://49983-{sid}.qa6-agent-sandbox.sprinklr.com”** after every create using a reconnect. the code patch is something like this,
 
 ```python
 sandbox= e2b.Sandbox.create( template_id, metadata={..}, api_url="http://api.qa6-agent-sandbox.sprinklr.com",api_key="e2b_..")
