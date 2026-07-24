@@ -69,25 +69,6 @@
       </div>
       {% endif %}
 
-      {% if new_api_key %}
-      <div class="portal-modal auto-open-modal" data-modal="api-key" aria-hidden="false">
-        <div class="modal-backdrop" data-modal-close></div>
-        <section class="modal-card api-key-modal" role="dialog" aria-modal="true" aria-labelledby="api-key-title">
-          <div class="modal-head">
-            <div>
-              <h2 id="api-key-title">New API Key</h2>
-              <p>This value is shown once.</p>
-            </div>
-            <button type="button" class="modal-close" data-modal-close aria-label="Close">Close</button>
-          </div>
-          <div class="one-time-key">
-            <code>{{ new_api_key }}</code>
-            <button type="button" class="ghost-button copy-button" data-copy-text="{{ new_api_key }}">Copy</button>
-          </div>
-        </section>
-      </div>
-      {% endif %}
-
       {% if active_section == "observability" %}
       <div class="subtabs observability-subtabs">
         <a class="subtab {% if observability.active_tab == 'gateways' %}active{% endif %}" href="/portal/admin/observability/gateways">Gateways</a>
@@ -669,6 +650,26 @@
       </section>
       {% endif %}
     </main>
+
+      {% if new_api_key %}
+      <div class="portal-modal auto-open-modal" data-modal="api-key" aria-hidden="false">
+        <div class="modal-backdrop" data-modal-close></div>
+        <section class="modal-card api-key-modal" role="dialog" aria-modal="true" aria-labelledby="api-key-title">
+          <div class="modal-head">
+            <div>
+              <h2 id="api-key-title">New API Key</h2>
+              <p>This value is shown once.</p>
+            </div>
+            <button type="button" class="modal-close" data-modal-close aria-label="Close">Close</button>
+          </div>
+          <div class="one-time-key">
+            <code>{{ new_api_key }}</code>
+            <button type="button" class="ghost-button copy-button" data-copy-text="{{ new_api_key }}">Copy</button>
+          </div>
+        </section>
+      </div>
+      {% endif %}
+
     <script src="/portal/static/portal.js"></script>
   </body>
 </html>
