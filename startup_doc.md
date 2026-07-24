@@ -1,14 +1,14 @@
 # Startup Guide
 
-To start make own "our_api_key" in the portal [http://api.qa6-agent-sandbox.sprinklr.com/portal](http://api.qa6-agent-sandbox.sprinklr.com/portal)
+To start make an api_key in the portal [http://api.qa6-agent-sandbox.sprinklr.com/portal](http://api.qa6-agent-sandbox.sprinklr.com/portal)
 
-This "our_api_key" can be used as E2B_API_KEY, DAYTONA_API_KEY, MODAL_TOKEN_SECRET
+This "api_key" can be used as E2B_API_KEY, DAYTONA_API_KEY, MODAL_TOKEN_SECRET
 
 ## For E2B
 
 ```bash
 export E2B_API_URL=http://api.qa6-agent-sandbox.sprinklr.com
-export E2B_API_KEY=our_api_key                  %%replace here
+export E2B_API_KEY=api_key                  %%replace here
 ```
 
 or pass **[ api_url = “http://api.qa6-agent-sandbox.sprinklr.com” , api_key=our_api_key ]** to every method call
@@ -38,7 +38,7 @@ If ca cert is done for the wildcard domain we wont need the above and just api_u
 
 ```bash
 export DAYTONA_API_URL=http://api.qa6-agent-sandbox.sprinklr.com
-export DAYTONA_API_KEY=our_api_key                  %%replace here
+export DAYTONA_API_KEY=api_key                  %%replace here
 ```
 
 or pass api_url to Daytonaconfig
@@ -51,7 +51,7 @@ daytona = Daytona(DaytonaConfig(api_url="http://api.qa6-agent-sandbox.sprinklr.c
 
 ```bash
 export MODAL_SERVER_URL=http://api.qa6-agent-sandbox.sprinklr.com:50051
-export MODAL_TOKEN_SECRET=our_api_key.                        %%replace here
+export MODAL_TOKEN_SECRET=api_key.                        %%replace here
 ```
 
 ## Api documentation and more details
