@@ -25,7 +25,7 @@ sandbox= e2b.Sandbox.connect( sid, sandbox_url=f"http://49983-{sid}.qa6-agent-sa
 // extra add end
 ```
 
-also whenever connecting via websocket use
+also whenever connecting via websocket use ws not wss
 
 ```python
 ws_url = f"ws://{sandbox.get_host(port)}"
